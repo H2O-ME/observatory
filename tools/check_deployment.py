@@ -92,8 +92,10 @@ async def main() -> int:
             check(f"{label}域名 .cmd 内置注册码", args.code in wrapper.text)
             check(f"{label}域名 .cmd 内置多线路", 'set "URL1=' in wrapper.text and 'set "URL2=' in wrapper.text)
             check(f"{label}域名 .cmd 内置版本号", version in wrapper.text)
+            check(f"{label}域名 .cmd 是纯 ASCII", all(ord(char) < 128 for char in wrapper.text))
             ps1 = await client.get(f"{host}/api/v1/public/install.ps1", params={"code": args.code, "download": 1})
             check(f"{label}域名可下载 .ps1", ps1.status_code == 200 and ".ps1" in ps1.headers.get("content-disposition", ""), str(ps1.status_code))
+            check(f"{label}域名 .ps1 带 BOM", ps1.text.startswith("\ufeff"))
 
         group("控制台")
         login = await client.post(f"{console}/api/v1/auth/login", json={"password": args.password})

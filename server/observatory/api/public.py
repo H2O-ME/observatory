@@ -70,7 +70,7 @@ async def install_script(
     download: int = Query(default=0, description="传 1 则作为附件下载"),
     runtime: Runtime = Depends(get_runtime),
 ) -> PlainTextResponse:
-    script = installer.render_ps1(runtime, _require_code(runtime, code))
+    script = installer.render_ps1(runtime, _require_code(runtime, code), download=bool(download))
     headers = {"Cache-Control": "no-store"}
     if download:
         headers.update(_attachment(f"Observatory-Install-{runtime.version}.ps1"))

@@ -31,7 +31,7 @@ def _console_host(runtime: Runtime) -> str:
     return hosts[0] if hosts else ""
 
 
-def render_ps1(runtime: Runtime, code: str) -> str:
+def render_ps1(runtime: Runtime, code: str, download: bool = False) -> str:
     template = _read_template(PS1_NAME)
     quoted = ", ".join(f"'{url}'" for url in runtime.settings.base_urls)
     replacements = {
@@ -43,7 +43,10 @@ def render_ps1(runtime: Runtime, code: str) -> str:
     }
     for token, value in replacements.items():
         template = template.replace(token, value)
-    return template
+    # Windows PowerShell 5.1 decodes a BOM-less .ps1 as ANSI, which turns the
+    # Chinese output into mojibake when the file is saved to disk and run with
+    # -File. Only prepend the BOM for downloads; inline `irm | iex` needs none.
+    return ("\ufeff" + template) if download else template
 
 
 def render_cmd(runtime: Runtime, code: str) -> str:

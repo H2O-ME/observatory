@@ -398,6 +398,9 @@ def domain_policy(client: TestClient, version: str) -> None:
     check("安装程序内置版本号", version in wrapper)
     check("安装程序内置多线路", 'set "URL1=' in wrapper and 'set "URL2=' in wrapper, wrapper[:200])
     check("安装程序拉起 PowerShell", "powershell -NoProfile -ExecutionPolicy Bypass -File" in wrapper)
+    # cmd.exe parses batch files in the console code page; any non-ASCII byte
+    # makes the wrapper execute garbage on machines using a legacy code page.
+    check("安装程序为纯 ASCII", all(ord(char) < 128 for char in wrapper), repr([c for c in wrapper if ord(c) >= 128][:5]))
     cmd_leftovers = [token for token in ("@@VERSION@@", "@@ENROLL_CODE@@", "@@URL_LINES@@") if token in wrapper]
     check("安装程序无占位符残留", not cmd_leftovers, str(cmd_leftovers))
     check(
@@ -412,6 +415,10 @@ def domain_policy(client: TestClient, version: str) -> None:
         and ps1_download.headers["content-disposition"].rstrip('"').endswith(".ps1"),
         ps1_download.headers.get("content-disposition", ""),
     )
+    # Saved to disk and run with -File, PowerShell 5.1 would read a BOM-less file
+    # as ANSI and garble the Chinese output.
+    check("下载的脚本带 UTF-8 BOM", ps1_download.text.startswith("\ufeff"))
+    check("脚本正文仍是同一个脚本", "<#" in ps1_download.text and version in ps1_download.text)
 
 
 

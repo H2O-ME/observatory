@@ -1,17 +1,19 @@
 @echo off
-rem Observatory 受控端安装程序 —— 双击运行即可。
+rem Observatory agent installer -- double-click to install.
 rem
-rem 这个文件由服务器按请求生成：
-rem   * 已内置注册码与版本号，不需要手输任何参数
-rem   * 内置多个服务器地址，下载安装脚本时逐个尝试（多线路热备）
-rem   * 真正的安装逻辑在 install.ps1 里，由它完成一次 UAC 授权后静默安装
+rem Rendered per request by the server:
+rem   * the enrollment code and version are already inside
+rem   * several server addresses are embedded and tried in order
+rem   * the real work happens in install.ps1, which asks for elevation once
 rem
-rem 卸载：在本目录执行  "C:\Program Files\Observatory\observatory-agent.exe" --uninstall
-rem 或者直接远程卸载（不需要 UAC）。
+rem This file is intentionally plain ASCII: cmd.exe parses batch files using
+rem the console code page, and non-ASCII text there breaks on some machines.
+rem
+rem Uninstall: "C:\Program Files\Observatory\observatory-agent.exe" --uninstall
+rem or use the console; remote uninstall never prompts for UAC.
 
-setlocal EnableExtensions EnableDelayedExpansion
-chcp 65001 >nul 2>&1
-title Observatory 受控端安装程序
+setlocal EnableExtensions
+title Observatory agent installer
 
 set "CODE=@@ENROLL_CODE@@"
 set "CODE_URL=@@ENROLL_CODE_URL@@"
@@ -19,15 +21,16 @@ set "VERSION=@@VERSION@@"
 @@URL_LINES@@
 set "TARGET=%TEMP%\observatory-install-%RANDOM%%RANDOM%.ps1"
 set "GOT="
+set "PROBESIZE="
 
 echo.
 echo   ==================================================
-echo      Observatory 受控端安装程序
-echo      版本号 : %VERSION%
-echo      目标机 : %COMPUTERNAME%
+echo      Observatory agent installer
+echo      version : %VERSION%
+echo      machine : %COMPUTERNAME%
 echo   ==================================================
 echo.
-echo   正在下载安装脚本（多个服务器地址会自动尝试）...
+echo   Downloading the installer from the first reachable server...
 
 if defined URL1 call :Fetch "%URL1%"
 if not defined GOT if defined URL2 call :Fetch "%URL2%"
@@ -35,14 +38,14 @@ if not defined GOT if defined URL3 call :Fetch "%URL3%"
 
 if not defined GOT (
   echo.
-  echo   失败：所有服务器地址都不可达。
-  echo   请检查网络或代理后重新双击本文件。
+  echo   FAILED: none of the server addresses could be reached.
+  echo   Check the network or proxy, then run this file again.
   echo.
   pause
   exit /b 3
 )
 
-echo   下载完成，开始安装（只会弹一次 UAC 授权）...
+echo   Download OK. Installing now ^(one UAC prompt^)...
 echo.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%TARGET%" -Code "%CODE%"
 set "RC=%ERRORLEVEL%"
@@ -50,37 +53,37 @@ del "%TARGET%" >nul 2>&1
 
 if not "%RC%"=="0" (
   echo.
-  echo   安装未完成，退出码 %RC%。
-  echo   日志：%TEMP%\observatory-install.log
+  echo   Installation failed with exit code %RC%.
+  echo   Log: %TEMP%\observatory-install.log
   echo.
   pause
   exit /b %RC%
 )
 
 echo.
-echo   安装完成。之后的新版本会自动更新，不需要再运行本文件。
+echo   Done. Future versions update themselves; this file is not needed again.
 echo.
 pause
 exit /b 0
 
 :Fetch
-rem 依次尝试 curl（Win10 1803+ 自带）与 PowerShell 两种下载方式。
+rem Try curl.exe (Windows 10 1803+) first, then Windows PowerShell.
 set "CAND=%~1"
-set "PROBE=%TEMP%\observatory-install-probe-%RANDOM%.ps1"
+set "PROBE=%TEMP%\observatory-probe-%RANDOM%.ps1"
 del "%PROBE%" >nul 2>&1
 
-curl.exe -fsSL --max-time 25 -o "%PROBE%" "%CAND%/api/v1/public/install.ps1?code=%CODE_URL%" >nul 2>&1
+curl.exe -fsSL --max-time 30 -o "%PROBE%" "%CAND%/api/v1/public/install.ps1?download=1&code=%CODE_URL%" >nul 2>&1
 if not exist "%PROBE%" (
-  powershell -NoProfile -Command "try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 25 -Uri '%CAND%/api/v1/public/install.ps1?code=%CODE_URL%' -OutFile '%PROBE%' } catch { exit 1 }" >nul 2>&1
+  powershell -NoProfile -Command "try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 30 -Uri '%CAND%/api/v1/public/install.ps1?download=1&code=%CODE_URL%' -OutFile '%PROBE%' } catch { exit 1 }" >nul 2>&1
 )
 
-if exist "%PROBE%" (
-  for %%A in ("%PROBE%") do (
-    if %%~zA GTR 2000 (
-      move /y "%PROBE%" "%TARGET%" >nul 2>&1
-      if exist "%TARGET%" set "GOT=1"
-    )
-  )
+if not exist "%PROBE%" exit /b 0
+
+for %%A in ("%PROBE%") do set "PROBESIZE=%%~zA"
+if not defined PROBESIZE exit /b 0
+if %PROBESIZE% GEQ 2000 (
+  move /y "%PROBE%" "%TARGET%" >nul 2>&1
+  if exist "%TARGET%" set "GOT=1"
 )
 del "%PROBE%" >nul 2>&1
 exit /b 0
