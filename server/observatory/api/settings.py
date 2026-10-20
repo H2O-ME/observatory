@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..deps import client_ip, get_session, require_admin
 from ..models import AuditEntry, Device, now_ms
 from ..schemas import AuditListOut, AuditOut, SettingsOut, SettingsPatch
-from ..services import audit, events, storage
+from ..services import audit, events, installer, storage
 from ..services.runtime import Runtime, get_runtime
 from ..services.settings_store import SECRET_KEYS, SettingsError, describe, public_view
 
@@ -146,6 +146,9 @@ async def system_status(
         },
         "base_urls": runtime.settings.base_urls,
         "console_host": runtime.settings.console_hosts[0] if runtime.settings.console_hosts else "",
+        # Everything the console needs to offer a one-click download, including a
+        # ready-made file with the enrollment code already inside.
+        "install": installer.install_info(runtime),
     }
 
 

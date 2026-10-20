@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Check, Copy, KeyRound, Save, ShieldCheck, ShieldOff } from "lucide-react";
+import { Check, Copy, Download, KeyRound, Save, ShieldCheck, ShieldOff } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -225,11 +225,13 @@ export function SettingsPage() {
     }
   };
 
-  const installCommand = useMemo(() => {
-    if (!system) return "";
-    const base = system.console_host ? `https://${system.console_host}` : "https://control.tianhw.top";
-    return `powershell -NoProfile -ExecutionPolicy Bypass -Command "irm '${base}/api/v1/public/install.ps1?code=<注册码>' | iex"`;
-  }, [system]);
+  const install = system?.install;
+  const installArtifacts = install?.artifacts ?? [];
+
+  const copyInstallLink = (url: string, tag: string) => {
+    const absolute = url.startsWith("http") ? url : `${location.origin}${url}`;
+    void copy(absolute, tag);
+  };
 
   const changePassword = async () => {
     setError("");
@@ -320,15 +322,73 @@ export function SettingsPage() {
       </section>
 
       <section className="rounded-panel border border-line bg-panel p-3">
-        <h2 className="mb-1 text-xs font-semibold text-soft">安装命令</h2>
+        <h2 className="mb-1 text-xs font-semibold text-soft">安装程序</h2>
         <p className="mb-2 text-[0.66rem] leading-relaxed text-faint">
-          把 &lt;注册码&gt; 替换成服务器 .env 里的 OBS_ENROLL_CODE。安装过程只弹一次 UAC；之后升级、卸载、控制都不会再弹。
+          下载后双击运行即可，<b className="text-soft">不用输任何参数</b>：文件里已经带好注册码和版本号，
+          并内置多个服务器地址依次尝试。安装过程只弹一次 UAC；之后升级、卸载、远程控制都不会再弹。
         </p>
-        <pre className="overflow-x-auto rounded bg-sunken p-2 text-[0.62rem] leading-relaxed text-soft">{installCommand}</pre>
-        <Button size="sm" variant="outline" className="mt-2" onClick={() => void copy(installCommand, "install")}>
-          {copied === "install" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-          复制安装命令
-        </Button>
+
+        {install?.enabled ? (
+          <>
+            <div className="flex flex-wrap items-center gap-2">
+              {installArtifacts.map((artifact) =>
+                artifact.url ? (
+                  <a
+                    key={artifact.kind}
+                    href={artifact.url}
+                    download={artifact.filename}
+                    className={cn(
+                      buttonVariants({ variant: artifact.kind === "cmd" ? "default" : "outline", size: "sm" }),
+                      "no-underline",
+                    )}
+                    title={artifact.hint}
+                  >
+                    <Download className="size-3.5" />
+                    {artifact.label}
+                  </a>
+                ) : null,
+              )}
+              {installArtifacts[0]?.url ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => copyInstallLink(installArtifacts[0].url, "install-link")}
+                >
+                  {copied === "install-link" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                  复制下载链接
+                </Button>
+              ) : null}
+            </div>
+
+            <dl className="mt-2.5 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[0.68rem]">
+              <dt className="text-faint">版本</dt>
+              <dd className="font-mono text-soft">v{install.version}</dd>
+              <dt className="text-faint">线路</dt>
+              <dd className="break-all text-soft">{install.base_urls.join("  |  ")}</dd>
+              <dt className="text-faint">注册码</dt>
+              <dd className="flex items-center gap-1.5 font-mono text-soft">
+                <span>{install.enroll_code}</span>
+                <Button
+                  size="icon-sm"
+                  variant="ghost"
+                  aria-label="复制注册码"
+                  onClick={() => void copy(install.enroll_code, "code")}
+                >
+                  {copied === "code" ? <Check className="size-3" /> : <Copy className="size-3" />}
+                </Button>
+              </dd>
+            </dl>
+            <p className="mt-1.5 text-[0.62rem] leading-relaxed text-faint">
+              命令行部署（组策略/CI）也可以用 .ps1：
+              <span className="font-mono"> powershell -NoProfile -ExecutionPolicy Bypass -File Observatory-Install-{install.version}.ps1</span>
+            </p>
+          </>
+        ) : (
+          <p className="rounded-md border border-warn/30 bg-warn/10 px-2.5 py-1.5 text-[0.68rem] leading-relaxed text-warn">
+            服务器没有开启注册（<span className="font-mono">OBS_ENROLL_CODE</span> 为空），
+            因此不提供安装程序。在服务器 <span className="font-mono">server/.env</span> 里设置注册码后重启容器即可。
+          </p>
+        )}
       </section>
 
       {GROUPS.map((group) => {

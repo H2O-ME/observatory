@@ -83,6 +83,18 @@ async def main() -> int:
         bad_code = await client.get(f"{agent}/api/v1/public/install.ps1", params={"code": "definitely-wrong"})
         check("错误注册码被拒绝", bad_code.status_code == 403, str(bad_code.status_code))
 
+        group("安装程序")
+        for host, label in ((console, "控制台"), (agent, "受控端")):
+            wrapper = await client.get(f"{host}/api/v1/public/install.cmd", params={"code": args.code})
+            disposition = wrapper.headers.get("content-disposition", "")
+            check(f"{label}域名提供 .cmd 安装程序", wrapper.status_code == 200, str(wrapper.status_code))
+            check(f"{label}域名 .cmd 作为附件下载", "attachment" in disposition and disposition.rstrip('"').endswith(".cmd"), disposition)
+            check(f"{label}域名 .cmd 内置注册码", args.code in wrapper.text)
+            check(f"{label}域名 .cmd 内置多线路", 'set "URL1=' in wrapper.text and 'set "URL2=' in wrapper.text)
+            check(f"{label}域名 .cmd 内置版本号", version in wrapper.text)
+            ps1 = await client.get(f"{host}/api/v1/public/install.ps1", params={"code": args.code, "download": 1})
+            check(f"{label}域名可下载 .ps1", ps1.status_code == 200 and ".ps1" in ps1.headers.get("content-disposition", ""), str(ps1.status_code))
+
         group("控制台")
         login = await client.post(f"{console}/api/v1/auth/login", json={"password": args.password})
         check("控制台登录", login.status_code == 200, login.text[:160])

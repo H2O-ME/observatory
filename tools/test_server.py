@@ -387,6 +387,33 @@ def domain_policy(client: TestClient, version: str) -> None:
     leftovers = [token for token in ("@@VERSION@@", "@@ENROLL_CODE@@", "@@BASE_URLS@@", "@@CONSOLE_HOST@@", "@@SERVER_TIME_MS@@") if token in body]
     check("脚本无占位符残留", not leftovers, str(leftovers))
 
+    # The console hands out a file, not a command line: the .cmd must carry the
+    # code and the failover list so double-clicking is the whole procedure.
+    cmd = client.get("/api/v1/public/install.cmd?code=test-enroll-code")
+    check("安装程序 200", cmd.status_code == 200, str(cmd.status_code))
+    disposition = cmd.headers.get("content-disposition", "")
+    check("安装程序作为附件下载", "attachment" in disposition and disposition.rstrip('"').endswith(".cmd"), disposition)
+    wrapper = cmd.text
+    check("安装程序内置注册码", "test-enroll-code" in wrapper)
+    check("安装程序内置版本号", version in wrapper)
+    check("安装程序内置多线路", 'set "URL1=' in wrapper and 'set "URL2=' in wrapper, wrapper[:200])
+    check("安装程序拉起 PowerShell", "powershell -NoProfile -ExecutionPolicy Bypass -File" in wrapper)
+    cmd_leftovers = [token for token in ("@@VERSION@@", "@@ENROLL_CODE@@", "@@URL_LINES@@") if token in wrapper]
+    check("安装程序无占位符残留", not cmd_leftovers, str(cmd_leftovers))
+    check(
+        "安装程序需要正确注册码",
+        client.get("/api/v1/public/install.cmd?code=wrong").status_code == 403,
+    )
+
+    ps1_download = client.get("/api/v1/public/install.ps1?code=test-enroll-code&download=1")
+    check(
+        "安装脚本可下载",
+        "attachment" in ps1_download.headers.get("content-disposition", "")
+        and ps1_download.headers["content-disposition"].rstrip('"').endswith(".ps1"),
+        ps1_download.headers.get("content-disposition", ""),
+    )
+
+
 
 #: The project was renamed; the old folder name must never appear again. Built at
 #: runtime so this very file does not contain the string it forbids.
@@ -447,6 +474,25 @@ def stale_name_scan() -> None:
             offenders.append(relative)
     check("仓库中不再出现废弃项目名（迁移脚本除外）", not offenders, str(offenders[:5]))
     check("迁移脚本是唯一的例外", (ROOT / "deploy/migrate-from-legacy.sh").exists())
+
+
+def installer_flow(client: TestClient, headers: dict, version: str) -> None:
+    group("安装程序分发")
+    system = client.get("/api/v1/system", headers=headers)
+    install_info = (system.json() or {}).get("install") or {}
+    check("系统信息带安装信息", install_info.get("enabled") is True, str(system.json())[:120])
+    check("安装信息内含注册码", install_info.get("enroll_code") == "test-enroll-code")
+    check("安装信息提供两个下载项", len(install_info.get("artifacts") or []) == 2, str(install_info.get("artifacts"))[:160])
+    check("安装信息版本与服务器一致", install_info.get("version") == version)
+    check(
+        "下载链接自带注册码",
+        all("test-enroll-code" in (item.get("url") or "") for item in install_info.get("artifacts") or []),
+    )
+
+    # The whole point: an operator downloads a file instead of editing a command.
+    settings_source = (ROOT / "webui/src/pages/settings.tsx").read_text(encoding="utf-8")
+    check("控制台渲染下载按钮", "installArtifacts.map" in settings_source)
+    check("控制台不再要求手填注册码", "<注册码>" not in settings_source)
 
 
 def websockets_flow(client: TestClient, headers: dict, device_token: str, version: str) -> None:
@@ -689,6 +735,7 @@ def main() -> int:
         settings_flow(client, headers)
         packages_flow(client, headers, version)
         domain_policy(client, version)
+        installer_flow(client, headers, version)
         websockets_flow(client, headers, device_token, version)
         audit_flow(client, headers)
         spa_flow(client, version)

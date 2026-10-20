@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..deps import get_session
 from ..models import now_ms
 from ..schemas import VersionOut
-from ..services import storage
+from ..services import installer, storage
 from ..services.runtime import Runtime, get_runtime
 from ..version import parse_version
 
@@ -25,7 +25,21 @@ log = logging.getLogger(__name__)
 router = APIRouter(tags=["public"])
 public_router = APIRouter(prefix="/public", tags=["public"])
 
-TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "templates" / "install.ps1"
+
+def _require_code(runtime: Runtime, code: str) -> str:
+    expected = runtime.settings.enroll_code
+    if not expected:
+        raise HTTPException(status_code=403, detail="服务器未开启注册")
+    if not code or not hmac.compare_digest(code.strip(), expected):
+        raise HTTPException(status_code=403, detail="注册码不正确")
+    return code.strip()
+
+
+def _attachment(name: str) -> dict[str, str]:
+    return {
+        "Cache-Control": "no-store",
+        "Content-Disposition": f'attachment; filename="{name}"',
+    }
 
 
 @router.get("/health")
@@ -45,47 +59,36 @@ async def version(runtime: Runtime = Depends(get_runtime)) -> VersionOut:
 
 
 def render_install_script(runtime: Runtime, code: str) -> str:
-    """Fill the installer template.
+    """Backwards-compatible alias used by main.py's ``/install.ps1`` route."""
 
-    The enrollment code is injected per request and never baked into the file on
-    disk, so rotating it only requires changing ``OBS_ENROLL_CODE``.
-    """
-
-    try:
-        template = TEMPLATE_PATH.read_text(encoding="utf-8")
-    except OSError as exc:  # pragma: no cover - packaging error
-        log.error("installer template missing: %s", exc)
-        raise HTTPException(status_code=500, detail="安装脚本模板缺失") from exc
-
-    base_urls = runtime.settings.base_urls
-    quoted = ", ".join(f"'{url}'" for url in base_urls)
-    replacements = {
-        "@@VERSION@@": runtime.version,
-        "@@ENROLL_CODE@@": code,
-        "@@BASE_URLS@@": quoted,
-        "@@CONSOLE_HOST@@": runtime.settings.console_hosts[0] if runtime.settings.console_hosts else "",
-        "@@SERVER_TIME_MS@@": str(now_ms()),
-    }
-    for token, value in replacements.items():
-        template = template.replace(token, value)
-    return template
+    return installer.render_ps1(runtime, code)
 
 
 @public_router.get("/install.ps1", response_class=PlainTextResponse)
 async def install_script(
     code: str = Query(default="", description="注册码，与控制台一致"),
+    download: int = Query(default=0, description="传 1 则作为附件下载"),
     runtime: Runtime = Depends(get_runtime),
 ) -> PlainTextResponse:
-    expected = runtime.settings.enroll_code
-    if not expected:
-        raise HTTPException(status_code=403, detail="服务器未开启注册")
-    if not code or not hmac.compare_digest(code.strip(), expected):
-        raise HTTPException(status_code=403, detail="注册码不正确")
-    script = render_install_script(runtime, code.strip())
+    script = installer.render_ps1(runtime, _require_code(runtime, code))
+    headers = {"Cache-Control": "no-store"}
+    if download:
+        headers.update(_attachment(f"Observatory-Install-{runtime.version}.ps1"))
+    return PlainTextResponse(script, media_type="text/plain; charset=utf-8", headers=headers)
+
+
+@public_router.get("/install.cmd", response_class=PlainTextResponse)
+async def install_wrapper(
+    code: str = Query(default="", description="注册码，与控制台一致"),
+    runtime: Runtime = Depends(get_runtime),
+) -> PlainTextResponse:
+    """Double-clickable installer: enroll code and failover list already inside."""
+
+    wrapper = installer.render_cmd(runtime, _require_code(runtime, code))
     return PlainTextResponse(
-        script,
+        wrapper,
         media_type="text/plain; charset=utf-8",
-        headers={"Cache-Control": "no-store"},
+        headers=_attachment(f"Observatory-Install-{runtime.version}.cmd"),
     )
 
 

@@ -59,6 +59,7 @@ server/observatory/         控制服务器（Python 3.12）
   api/                      HTTP 与 WebSocket 端点
   services/                 presence / bus / storage / retention / packages ...
   templates/install.ps1     安装脚本模板（服务端渲染，含版本号与注册码）
+  templates/install.cmd     双击即用的安装程序模板（内置注册码与多线路地址）
 agent/observatory_agent/    受控端（Windows，PyInstaller onedir）
   transport.py              WSS → 长轮询 → 短轮询
   worker.py                 用户会话内：采集、输入、文件

@@ -223,6 +223,26 @@ export interface SystemStatus {
   };
   base_urls: string[];
   console_host: string;
+  install: InstallInfo;
+}
+
+export interface InstallArtifact {
+  kind: "cmd" | "ps1";
+  label: string;
+  filename: string;
+  url: string;
+  hint: string;
+}
+
+export interface InstallInfo {
+  enabled: boolean;
+  enroll_code: string;
+  version: string;
+  console_host: string;
+  base_urls: string[];
+  script_url: string;
+  cmd_url: string;
+  artifacts: InstallArtifact[];
 }
 
 export interface SessionInfo {
