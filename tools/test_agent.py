@@ -172,6 +172,77 @@ def windows_features() -> None:
     check("变化分数在范围内", 0 <= score <= 255, str(score))
 
 
+def update_pipeline() -> None:
+    group("自动更新流程")
+    import zipfile
+
+    from observatory_agent import updater
+
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        archive = work / "observatory-agent-0.2.1.zip"
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr("observatory-agent/observatory-agent.exe", b"MZ-new")
+            bundle.writestr("observatory-agent/_internal/lib.dll", b"dll")
+            bundle.writestr("observatory-agent/VERSION", b"0.2.1\n")
+
+        extracted = updater.extract_payload(archive, work / "payload")
+        check("解包后定位到 exe 所在目录", (extracted / "observatory-agent.exe").exists(), str(extracted))
+        check("解包保留内部文件", (extracted / "_internal" / "lib.dll").exists())
+
+        evil = work / "evil.zip"
+        with zipfile.ZipFile(evil, "w") as bundle:
+            bundle.writestr("../../escaped.txt", b"nope")
+            bundle.writestr("observatory-agent.exe", b"MZ")
+        try:
+            updater.extract_payload(evil, work / "evil-payload")
+            check("拒绝越权的安装包路径", False, "没有抛异常")
+        except Exception:
+            check("拒绝越权的安装包路径", not (work.parent / "escaped.txt").exists())
+
+        # Swap: payload replaces target, old build is moved aside, service hooks
+        # are stubbed so this never touches the real machine.
+        payload = work / "new-build"
+        payload.mkdir()
+        (payload / "observatory-agent.exe").write_bytes(b"MZ-0.2.1")
+        target = work / "install"
+        target.mkdir()
+        (target / "observatory-agent.exe").write_bytes(b"MZ-0.2.0")
+        (target / "stale.txt").write_text("old", encoding="utf-8")
+
+        calls = {"stopped": 0, "started": 0, "cleaned": 0}
+        original = (
+            updater._wait_for_process_exit,
+            updater._stop_service,
+            updater._start_service,
+            updater._cleanup_old,
+        )
+        updater._wait_for_process_exit = lambda *a, **k: None
+        updater._stop_service = lambda *a, **k: calls.__setitem__("stopped", calls["stopped"] + 1)
+        updater._start_service = lambda *a, **k: calls.__setitem__("started", calls["started"] + 1)
+        updater._cleanup_old = lambda *a, **k: calls.__setitem__("cleaned", calls["cleaned"] + 1)
+        try:
+            code = updater.apply_now(str(payload), str(target), 0, "0.2.1")
+        finally:
+            (
+                updater._wait_for_process_exit,
+                updater._stop_service,
+                updater._start_service,
+                updater._cleanup_old,
+            ) = original
+
+        check("更新助手返回成功", code == 0, str(code))
+        check("新版本已就位", (target / "observatory-agent.exe").read_bytes() == b"MZ-0.2.1")
+        check("旧版本文件不再存在", not (target / "stale.txt").exists())
+        check("更新前先停服务", calls["stopped"] == 1, str(calls))
+        check("更新后重启服务", calls["started"] == 1, str(calls))
+        check("清理旧目录", calls["cleaned"] == 1, str(calls))
+
+        missing = work / "not-there"
+        check("载荷缺失时返回错误", updater.apply_now(str(missing), str(target), 0, "0.2.2") == 2)
+        check("载荷缺失时不破坏现有安装", (target / "observatory-agent.exe").read_bytes() == b"MZ-0.2.1")
+
+
 def uninstall_paths() -> None:
     group("卸载清理范围（只碰配置的目录）")
     try:
@@ -218,6 +289,7 @@ def main() -> int:
     version_and_config()
     framing()
     transport()
+    update_pipeline()
     windows_features()
     uninstall_paths()
 

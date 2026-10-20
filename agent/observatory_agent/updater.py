@@ -74,7 +74,17 @@ def extract_payload(archive: Path, destination: Path) -> Path:
     if destination.exists():
         shutil.rmtree(destination, ignore_errors=True)
     destination.mkdir(parents=True, exist_ok=True)
+    root = destination.resolve()
     with zipfile.ZipFile(archive) as archive_file:
+        for member in archive_file.infolist():
+            # Defence in depth: `extract` already strips absolute paths and "..",
+            # but a package that tries to escape the staging directory should be
+            # rejected loudly instead of quietly unpacking somewhere else.
+            target = (root / member.filename).resolve()
+            try:
+                target.relative_to(root)
+            except ValueError as exc:
+                raise RuntimeError(f"安装包包含非法路径: {member.filename}") from exc
         archive_file.extractall(destination)
 
     candidates = [destination]

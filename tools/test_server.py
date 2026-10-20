@@ -599,6 +599,54 @@ def spa_flow(client: TestClient, version: str) -> None:
     check("受控端域名给出提示", "control.example.test" in agent_home.text, agent_home.text[:120])
 
 
+def cli_flow(version: str) -> None:
+    """The deploy scripts shell out to `python -m observatory.cli`; prove it works."""
+
+    group("命令行工具")
+    import subprocess
+
+    cli_data = DATA_DIR / "cli-data"
+    zip_path = DATA_DIR / f"observatory-agent-{version}.zip"
+    with zipfile.ZipFile(zip_path, "w") as archive:
+        archive.writestr("observatory-agent.exe", b"MZ")
+
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(SERVER),
+        "PYTHONIOENCODING": "utf-8",
+        "OBS_DATA_DIR": str(cli_data),
+        "OBS_SECRET_KEY": "cli-test-secret-0123456789abcdef0123456789abcdef",
+        "OBS_ADMIN_PASSWORD": "cli-test-password-123",
+        "OBS_ENROLL_CODE": "cli-code",
+    }
+
+    def run(*arguments: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, "-m", "observatory.cli", *arguments],
+            cwd=str(SERVER),
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
+
+    result = run("version")
+    check("cli version 成功", result.returncode == 0, result.stderr[-200:])
+    check("cli version 带版本号", version in result.stdout, result.stdout[:120])
+
+    result = run("package-add", str(zip_path))
+    check("cli package-add 成功", result.returncode == 0, (result.stderr or result.stdout)[-300:])
+    check("cli package-add 打印版本", version in (result.stdout + result.stderr), (result.stdout + result.stderr)[-160:])
+
+    result = run("packages")
+    check("cli packages 列出安装包", result.returncode == 0 and version in result.stdout, result.stdout[-200:])
+
+    result = run("enroll-code")
+    check("cli enroll-code 生成注册码", result.returncode == 0 and len(result.stdout.strip()) >= 8, result.stdout[:80])
+
+
 def main() -> int:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     print(f"Observatory {version} 自检 · 数据目录 {DATA_DIR}")
@@ -630,6 +678,7 @@ def main() -> int:
         audit_flow(client, headers)
         spa_flow(client, version)
 
+    cli_flow(version)
     stale_name_scan()
 
     print()
