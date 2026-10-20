@@ -20,8 +20,9 @@ services:
     environment:
       OBS_DATA_DIR: /data
     ports:
-      # 只监听回环，由宿主机的 nginx 终止公网 TLS 并转发两个域名。
-      - "127.0.0.1:${OBS_PORT:-8443}:8443"
+      # 默认绑定所有网卡：这类部署的公网入口通常由 CDN / 上游代理直连 8443。
+      # 如果在同一台机器上用 nginx 终止 TLS，把 OBS_BIND_ADDR 设为 127.0.0.1。
+      - "${OBS_BIND_ADDR:-0.0.0.0}:${OBS_PORT:-8443}:8443"
     volumes:
       - observatory-data:/data
       - ../certs:/certs:ro
