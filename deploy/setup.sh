@@ -171,7 +171,7 @@ main() {
 控制台    : https://$CONSOLE_HOST
 受控端接入: https://$CONSOLE_HOST  与  https://$AGENT_HOST （互为备份）
 安装命令  : 在控制台「设置」页复制
-版本      : \$(cd $APP_DIR && cat VERSION)
+版本      : $(cat "$APP_DIR/VERSION")
 
 下一步：
   1. 上传受控端安装包（控制台 -> 更新 -> 上传），或运行 deploy/build-agent.sh
