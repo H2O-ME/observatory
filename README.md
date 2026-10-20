@@ -119,6 +119,7 @@ python tools/set_version.py --check     # CI 里跑，漂移即失败
 python tools/test_server.py        # 服务端端到端：版本、鉴权、双域名、命令总线、画面、更新、更新包、控制转发、SPA
 python tools/test_agent.py         # 受控端：版本/配置/帧协议/传输阶梯/真实采集与文件操作/卸载清理范围
 python tools/test_e2e_live.py      # 真起服务端 + 真起受控端（仅 Windows）：注册→WS→心跳→采集→命令→文件读写→审计
+python tools/check_deployment.py --password <密码> --code <注册码>   # 已部署实例的公网体检
 cd webui && npm run build          # 类型检查 + 生产构建
 python -m compileall -q server/observatory agent/observatory_agent
 ```

@@ -27,10 +27,21 @@ if [[ -n "$(git status --porcelain)" ]]; then
   git stash push -u -m "update.sh $(date -Is)" >/dev/null
 fi
 
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+SCRIPT_HASH_BEFORE="$(sha256sum "$SELF" | cut -d' ' -f1)"
+
 log "拉取 origin/$BRANCH"
 git fetch --prune origin
 git checkout "$BRANCH"
 git pull --ff-only origin "$BRANCH"
+
+# A pull can replace this very file. Bash keeps executing the old text from
+# memory, so the freshly pulled fixes would silently not apply — re-exec once.
+SCRIPT_HASH_AFTER="$(sha256sum "$SELF" | cut -d' ' -f1)"
+if [[ "$SCRIPT_HASH_BEFORE" != "$SCRIPT_HASH_AFTER" && -z "${OBS_UPDATE_REEXEC:-}" ]]; then
+  log "部署脚本自身已更新，重新执行一次"
+  OBS_UPDATE_REEXEC=1 exec bash "$SELF" "$@"
+fi
 
 VERSION="$(cat VERSION)"
 log "目标版本：$VERSION"
