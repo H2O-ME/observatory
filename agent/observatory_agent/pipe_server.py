@@ -26,6 +26,9 @@ log = logging.getLogger(__name__)
 
 BUFFER_SIZE = 1024 * 1024
 POLL_INTERVAL = 0.02
+#: win32pipe.PIPE_UNLIMITED_INSTANCES; spelled out so this module imports cleanly
+#: on non-Windows hosts (docs/tests) without pywin32.
+PIPE_UNLIMITED_INSTANCES = 255
 CONNECT_TIMEOUT_S = 30.0
 
 
@@ -95,7 +98,10 @@ class PipeServer:
                     pipe_name(self.session_id),
                     win32pipe.PIPE_ACCESS_DUPLEX,
                     win32pipe.PIPE_TYPE_BYTE | win32pipe.PIPE_READMODE_BYTE | win32pipe.PIPE_WAIT,
-                    1,
+                    # Unlimited instances: a worker can reconnect while the old
+                    # handle is still closing, and a single instance turns that
+                    # brief overlap into ERROR_PIPE_BUSY (231) forever.
+                    PIPE_UNLIMITED_INSTANCES,
                     BUFFER_SIZE,
                     BUFFER_SIZE,
                     0,
@@ -133,12 +139,9 @@ class PipeServer:
             self._handle = None
 
     def _read_loop(self, handle) -> None:
-        import win32file
-
         while not self._stop.is_set():
-            try:
-                _flags, available, _left = win32file.PeekNamedPipe(handle, 0)
-            except Exception:
+            available = _available(handle)
+            if available is None:
                 return
             if available < HEADER_STRUCT.size:
                 time.sleep(POLL_INTERVAL)
@@ -177,22 +180,45 @@ class PipeServer:
                 log.exception("pipe message handler failed session=%s", self.session_id)
 
 
+def _available(handle) -> int | None:
+    """Bytes waiting in the pipe, or ``None`` when the pipe is gone.
+
+    ``PeekNamedPipe`` returns ``(data, bytes_available, bytes_left)`` and lives in
+    ``win32pipe`` — ``win32file`` does not export it in current pywin32 builds.
+    Getting either detail wrong is silent and fatal: every read looks like "pipe
+    closed", the worker exits, and the console reports "no interactive session".
+    """
+
+    for module_name in ("win32pipe", "win32file"):
+        try:
+            module = __import__(module_name)
+            peek = getattr(module, "PeekNamedPipe", None)
+            if peek is not None:
+                _data, bytes_available, _left = peek(handle, 0)
+                return int(bytes_available)
+        except ImportError:
+            continue
+        except Exception:  # noqa: BLE001 - broken pipe / closed handle
+            return None
+    log.error("PeekNamedPipe is unavailable in this pywin32 build")
+    return None
+
+
 def _read_bytes(handle, size: int) -> bytes | None:
     import win32file
 
     chunks: list[bytes] = []
     remaining = size
     while remaining > 0:
-        try:
-            _flags, available, _left = win32file.PeekNamedPipe(handle, 0)
-        except Exception:
+        available = _available(handle)
+        if available is None:
             return None
         if available <= 0:
             time.sleep(POLL_INTERVAL)
             continue
         try:
             _err, chunk = win32file.ReadFile(handle, min(remaining, available))
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
         if not chunk:
             continue

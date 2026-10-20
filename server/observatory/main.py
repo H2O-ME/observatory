@@ -112,6 +112,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         log.info("Observatory stopped")
 
 
+class ImmutableStaticFiles(StaticFiles):
+    """Serve Vite's content-hashed assets with a permanent cache directive.
+
+    The filenames change with the content, so revalidation is pure waste; the
+    previous console appended a ``?v=`` nonce instead, which defeated caching
+    entirely and made the timeline feel like it downloaded every frame again.
+    """
+
+    async def get_response(self, path: str, scope):  # type: ignore[override]
+        response = await super().get_response(path, scope)
+        if response.status_code == 200:
+            response.headers["cache-control"] = "public, max-age=31536000, immutable"
+        return response
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     settings.ensure_dirs()
@@ -152,7 +167,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     webui_dir = Path(settings.webui_dir)
     assets = webui_dir / "assets"
     if assets.is_dir():
-        app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
+        app.mount("/assets", ImmutableStaticFiles(directory=str(assets)), name="assets")
 
     @app.get("/")
     async def index():

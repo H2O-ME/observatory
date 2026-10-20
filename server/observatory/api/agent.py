@@ -132,7 +132,9 @@ async def heartbeat(
     if payload.agent_version:
         device.agent_version = payload.agent_version[:30]
     if payload.sysinfo:
-        device.sysinfo = payload.sysinfo
+        # Heartbeats carry a cheap subset; merge so a light payload never erases
+        # hostname/os/model collected at enrolment.
+        device.sysinfo = {**(device.sysinfo or {}), **payload.sysinfo}
     runtime.registry.attach(device.id, "poll", ip)
     await session.commit()
 

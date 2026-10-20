@@ -74,6 +74,16 @@ class ChannelRegistry:
                 if remote:
                     existing.remote = remote
                 return existing
+            # An HTTP heartbeat must never downgrade a live WebSocket: the agent
+            # keeps reporting over both paths, and letting the poll request win
+            # made the console claim "仅轮询，实时控制不可用" while the socket was
+            # healthy — the exact kind of lying UI this rewrite exists to remove.
+            if existing is not None and existing.kind == "ws" and kind != "ws":
+                if existing.age_ms() <= WS_STALE_MS:
+                    existing.touch()
+                    if remote:
+                        existing.remote = remote
+                    return existing
             channel = Channel(device_id=device_id, kind=kind, remote=remote)
             # Upgrading poll -> ws keeps the original "seen since" so the UI does
             # not report a connection drop it never had.

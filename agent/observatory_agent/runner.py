@@ -175,12 +175,13 @@ class AgentRunner:
             run_task = asyncio.create_task(channel.run(self._handle_message, self.heartbeat_interval), name="channel")
             ready_task = asyncio.create_task(channel.ready.wait(), name="ready")
             try:
-                done, pending = await asyncio.wait(
+                done, _pending = await asyncio.wait(
                     {run_task, ready_task}, return_when=asyncio.FIRST_COMPLETED
                 )
-                for task in pending:
-                    task.cancel()
-                if ready_task in done and channel.ready.is_set():
+                if ready_task in done and channel.ready.is_set() and not run_task.done():
+                    # The channel is live: it ends on its own when the peer closes.
+                    # Do NOT cancel run_task here — that would tear the session down
+                    # the moment it became usable.
                     self.level = level
                     self._connected = True
                     backoff = 0
@@ -188,17 +189,25 @@ class AgentRunner:
                     await self._report_state("connected")
                     if level != LEVEL_WS:
                         asyncio.create_task(self._upgrade_probe(level), name="upgrade")
-                    await run_task
+                    try:
+                        await run_task
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("transport %s ended: %s", level_name(level), exc)
                     if not self._stopping.is_set():
                         log.warning("transport %s closed", level_name(level))
                         self.level = min(level + 1, LEVEL_POLL_SHORT)
                 else:
+                    # The channel died before it was usable.
                     error = None
                     if run_task.done():
                         try:
                             run_task.result()
                         except Exception as exc:  # noqa: BLE001
                             error = exc
+                    else:
+                        run_task.cancel()
                     log.warning("transport %s unavailable: %s", level_name(level), error or "closed")
                     self.level = min(level + 1, LEVEL_POLL_SHORT)
             except asyncio.CancelledError:

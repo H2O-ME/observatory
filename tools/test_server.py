@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -360,6 +361,13 @@ def domain_policy(client: TestClient, version: str) -> None:
     health = client.get("/api/v1/health", headers={"Host": "agent.example.test"})
     check("受控端域名提供健康检查", health.status_code == 200)
 
+    agent_script = client.get("/install.ps1?code=test-enroll-code", headers={"Host": "agent.example.test"})
+    check("受控端域名提供安装脚本", agent_script.status_code == 200, str(agent_script.status_code))
+    check("受控端域名的脚本含版本", version in agent_script.text)
+
+    agent_script_no_code = client.get("/install.ps1", headers={"Host": "agent.example.test"})
+    check("受控端域名脚本也要注册码", agent_script_no_code.status_code == 403, str(agent_script_no_code.status_code))
+
     spoofed = client.get(
         "/api/v1/settings", headers={"Host": "agent.example.test", "X-Forwarded-Host": "agent.example.test"}
     )
@@ -451,6 +459,63 @@ def websockets_flow(client: TestClient, headers: dict, device_token: str, versio
         check("受控端 WS 收到 welcome", welcome.get("t") == "welcome", str(welcome)[:120])
         check("welcome 含配置", isinstance(welcome.get("config"), dict))
 
+        # --- realtime control relay -------------------------------------
+        from observatory.framing import encode as frame_encode
+
+        granted = client.post(
+            "/api/v1/devices/OBS-TEST0001/control",
+            headers=headers,
+            json={"confirm": True, "ttl_s": 120},
+        )
+        check("申请实时控制授权", granted.status_code == 200, granted.text[:160])
+        grant_token = granted.json().get("token", "")
+        check("授权带有效期", granted.json().get("expires_at_ms", 0) > 0)
+
+        declined_grant = client.post(
+            "/api/v1/devices/OBS-TEST0001/control", headers=headers, json={"confirm": False, "ttl_s": 60}
+        )
+        check("未确认不能开控制", declined_grant.status_code == 400, str(declined_grant.status_code))
+
+        with client.websocket_connect(
+            f"/api/v1/devices/OBS-TEST0001/control?token={grant_token}"
+        ) as viewer:
+            ready = viewer.receive_json()
+            check("控制端收到 ready", ready.get("type") == "ready", str(ready)[:120])
+            started = agent_socket.receive_json()
+            check("受控端收到 ctrl_start", started.get("t") == "ctrl_start", str(started)[:120])
+
+            viewer.send_json(
+                {"type": "input", "ev": {"kind": "mouse", "action": "move", "x": 4000, "y": 6000, "norm": True}}
+            )
+            relayed = agent_socket.receive_json()
+            event = relayed.get("ev") or {}
+            check(
+                "输入事件转发到受控端",
+                relayed.get("t") == "ctrl_in" and event.get("x") == 4000 and event.get("y") == 6000,
+                str(relayed)[:160],
+            )
+
+            fake_frame = b"\x00\x01control-frame-bytes"
+            agent_socket.send_bytes(
+                frame_encode({"t": "ctrl", "session": grant_token, "len": len(fake_frame)}, fake_frame)
+            )
+            received = viewer.receive_bytes()
+            check("画面从受控端转发到浏览器", received == fake_frame, str(received[:24]))
+
+        revoked = client.delete(
+            f"/api/v1/devices/OBS-TEST0001/control/{grant_token}", headers=headers
+        )
+        check("可以主动结束控制会话", revoked.status_code == 200, str(revoked.status_code))
+
+        stale = client.websocket_connect(f"/api/v1/devices/OBS-TEST0001/control?token=not-a-token")
+        with stale as socket:
+            while True:
+                try:
+                    socket.receive_json()
+                except Exception:
+                    break
+            check("无效授权被拒绝", True)
+
         device = client.get("/api/v1/devices/OBS-TEST0001", headers=headers).json()["device"]
         check("WS 连接后状态在线", device["presence"]["state"] == "online", device["presence"]["state"])
         check("在线状态可实时控制", device["presence"]["capabilities"]["control"] is True)
@@ -461,7 +526,11 @@ def websockets_flow(client: TestClient, headers: dict, device_token: str, versio
             json={"type": "sysinfo", "payload": {}},
         )
         check("在线设备可直接下发命令", reply.status_code == 200, reply.text[:120])
-        pushed = agent_socket.receive_json()
+        pushed = {}
+        for _ in range(6):
+            pushed = agent_socket.receive_json()
+            if pushed.get("t") == "command":
+                break
         check("命令通过 WS 推送", pushed.get("t") == "command", str(pushed)[:120])
         command_id = pushed.get("command", {}).get("id")
 
@@ -495,9 +564,50 @@ def audit_flow(client: TestClient, headers: dict) -> None:
     check("删除后可再注册", True)
 
 
+def spa_flow(client: TestClient, version: str) -> None:
+    group("控制台静态资源")
+    dist = ROOT / "webui" / "dist"
+    if not (dist / "index.html").exists():
+        print("  跳过：webui/dist 未构建")
+        return
+
+    index = client.get("/")
+    check("根路径返回控制台", index.status_code == 200 and "text/html" in index.headers.get("content-type", ""), str(index.status_code))
+    check("控制台引用打包资源", "/assets/" in index.text)
+    check("控制台标题是产品名", "Observatory" in index.text)
+    check("控制台不再含废弃名", LEGACY_NAME not in index.text.lower())
+    check("index.html 不缓存", "no-cache" in index.headers.get("cache-control", ""))
+
+    deep_link = client.get("/devices/OBS-DOESNOTEXIST")
+    check("前端路由回退到 index.html", deep_link.status_code == 200 and "/assets/" in deep_link.text)
+
+    assets = sorted((dist / "assets").glob("*.js"))
+    if assets:
+        asset = client.get(f"/assets/{assets[0].name}")
+        check("静态资源可访问", asset.status_code == 200, str(asset.status_code))
+        check("静态资源是 JS", "javascript" in asset.headers.get("content-type", ""), asset.headers.get("content-type", ""))
+        check("静态资源可长期缓存", "immutable" in asset.headers.get("cache-control", ""), asset.headers.get("cache-control", ""))
+
+    unknown_api = client.get("/api/v1/definitely-not-here")
+    check("未知接口返回 404 JSON", unknown_api.status_code == 404 and "detail" in unknown_api.text, str(unknown_api.status_code))
+
+    traversal = client.get("/%2e%2e/server/.env")
+    check("路径穿越被拒绝", traversal.status_code in (400, 404), str(traversal.status_code))
+
+    agent_home = client.get("/", headers={"Host": "agent.example.test"})
+    check("受控端域名不提供控制台", agent_home.status_code == 404, str(agent_home.status_code))
+    check("受控端域名给出提示", "control.example.test" in agent_home.text, agent_home.text[:120])
+
+
 def main() -> int:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     print(f"Observatory {version} 自检 · 数据目录 {DATA_DIR}")
+
+    # Publish a real console build into the temp data dir so the SPA routes are
+    # exercised instead of only the JSON fallback.
+    dist = ROOT / "webui" / "dist"
+    if (dist / "index.html").exists():
+        shutil.copytree(dist, DATA_DIR / "webui", dirs_exist_ok=True)
 
     version_consistency()
 
@@ -518,6 +628,7 @@ def main() -> int:
         domain_policy(client, version)
         websockets_flow(client, headers, device_token, version)
         audit_flow(client, headers)
+        spa_flow(client, version)
 
     stale_name_scan()
 

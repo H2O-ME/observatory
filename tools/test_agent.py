@@ -172,6 +172,46 @@ def windows_features() -> None:
     check("变化分数在范围内", 0 <= score <= 255, str(score))
 
 
+def uninstall_paths() -> None:
+    group("卸载清理范围（只碰配置的目录）")
+    try:
+        import win32api  # noqa: F401
+    except Exception:
+        print("  跳过：当前平台没有 pywin32")
+        return
+
+    from observatory_agent import uninstall
+
+    with tempfile.TemporaryDirectory() as tmp:
+        install = Path(tmp) / "install"
+        program_data = Path(tmp) / "programdata"
+        (install / "sub").mkdir(parents=True)
+        (install / "observatory-agent.exe").write_bytes(b"MZ")
+        (install / "sub" / "lib.dll").write_bytes(b"x")
+        program_data.mkdir(parents=True)
+        (program_data / "config.json").write_text("{}", encoding="utf-8")
+        keep = Path(tmp) / "keep.txt"
+        keep.write_text("do not touch", encoding="utf-8")
+
+        # Replace the two steps that reach outside the test sandbox.
+        original_footprint = uninstall._remove_footprint
+        original_self_delete = uninstall._schedule_self_delete
+        original_program_data = uninstall.PROGRAM_DATA
+        uninstall._remove_footprint = lambda: None
+        uninstall._schedule_self_delete = lambda: None
+        uninstall.PROGRAM_DATA = program_data
+        try:
+            uninstall.purge(0, str(install))
+        finally:
+            uninstall._remove_footprint = original_footprint
+            uninstall._schedule_self_delete = original_self_delete
+            uninstall.PROGRAM_DATA = original_program_data
+
+        check("删除安装目录", not install.exists())
+        check("删除数据目录", not program_data.exists())
+        check("不碰无关文件", keep.exists())
+
+
 def main() -> int:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     print(f"Observatory 受控端自检 · {version} · Python {sys.version.split()[0]}")
@@ -179,6 +219,7 @@ def main() -> int:
     framing()
     transport()
     windows_features()
+    uninstall_paths()
 
     print()
     if FAILED:

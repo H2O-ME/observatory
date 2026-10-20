@@ -91,11 +91,34 @@ def main(argv: list[str] | None = None) -> int:
         return _doctor()
 
     if args.console:
+        # Console mode honours the same overrides as the installer so a developer
+        # can point a checkout at a local server without touching the real
+        # %ProgramData%\Observatory enrolment.
+        _apply_cli_config(args)
         return run_console()
 
     from .service import run_service
 
     return run_service()
+
+
+def _cli_config_changes(args: argparse.Namespace) -> dict:
+    changes: dict = {}
+    if args.enroll_code:
+        changes["enroll_code"] = args.enroll_code
+    if args.base_urls:
+        changes["base_urls"] = [url.rstrip("/") for url in args.base_urls if url.strip()]
+    return changes
+
+
+def _apply_cli_config(args: argparse.Namespace) -> None:
+    from .config import ConfigStore, ensure_dirs
+
+    changes = _cli_config_changes(args)
+    if not changes:
+        return
+    ensure_dirs()
+    ConfigStore().update(**changes)
 
 
 def _install(args: argparse.Namespace) -> int:
@@ -104,11 +127,7 @@ def _install(args: argparse.Namespace) -> int:
 
     ensure_dirs()
     store = ConfigStore()
-    changes: dict = {}
-    if args.enroll_code:
-        changes["enroll_code"] = args.enroll_code
-    if args.base_urls:
-        changes["base_urls"] = [url.rstrip("/") for url in args.base_urls if url.strip()]
+    changes = _cli_config_changes(args)
     if changes:
         store.update(**changes)
 

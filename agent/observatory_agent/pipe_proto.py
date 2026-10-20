@@ -23,6 +23,11 @@ class FramingError(ValueError):
 
 
 def encode(header: dict, payload: bytes = b"") -> bytes:
+    # The payload length lives in the header, so the reader can tell where the
+    # next frame starts. Set it here rather than trusting every caller: one sender
+    # that forgets ``len`` desynchronises the stream for every subsequent frame.
+    if payload:
+        header = {**header, "len": len(payload)}
     raw = json.dumps(header, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     if len(raw) > MAX_HEADER_BYTES:
         raise FramingError("header too large")
