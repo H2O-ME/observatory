@@ -8,6 +8,7 @@ is older, so an upgrade is a build + an upload, never a reinstall.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import re
@@ -117,7 +118,10 @@ class PackageService:
             )
             if existing.scalars().first() is not None:
                 continue
-            data = await path.read_bytes()
+            # Path.read_bytes is synchronous; awaiting it raises TypeError and
+            # takes the whole API down at start-up the moment a zip is dropped
+            # into the packages directory without a database row.
+            data = await asyncio.to_thread(path.read_bytes)
             session.add(
                 Package(
                     kind=kind,

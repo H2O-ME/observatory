@@ -425,6 +425,9 @@ TEXT_SUFFIXES = {
 
 def stale_name_scan() -> None:
     group("废弃名称清理")
+    # A one-shot migration script has to name the stack it is replacing (paths,
+    # env prefixes). Everything else must be free of the old name.
+    allowed = {"deploy/migrate-from-legacy.sh"}
     offenders: list[str] = []
     for path in ROOT.rglob("*"):
         if not path.is_file():
@@ -433,13 +436,17 @@ def stale_name_scan() -> None:
             continue
         if path.suffix.lower() not in TEXT_SUFFIXES and path.name not in {"VERSION", ".gitignore"}:
             continue
+        relative = path.relative_to(ROOT).as_posix()
+        if relative in allowed:
+            continue
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
         if LEGACY_NAME in text.lower():
-            offenders.append(str(path.relative_to(ROOT)))
-    check("仓库中不再出现废弃项目名", not offenders, str(offenders[:5]))
+            offenders.append(relative)
+    check("仓库中不再出现废弃项目名（迁移脚本除外）", not offenders, str(offenders[:5]))
+    check("迁移脚本是唯一的例外", (ROOT / "deploy/migrate-from-legacy.sh").exists())
 
 
 def websockets_flow(client: TestClient, headers: dict, device_token: str, version: str) -> None:
@@ -635,6 +642,14 @@ def cli_flow(version: str) -> None:
     result = run("version")
     check("cli version 成功", result.returncode == 0, result.stderr[-200:])
     check("cli version 带版本号", version in result.stdout, result.stdout[:120])
+
+    # deploy/build-agent.sh drops the zip straight into the packages directory;
+    # `packages` must then discover it from disk, not only trust the database.
+    packages_dir = cli_data / "packages"
+    packages_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(zip_path, packages_dir / zip_path.name)
+    result = run("packages")
+    check("cli packages 能发现磁盘上的安装包", result.returncode == 0 and version in result.stdout, result.stdout[-200:] or result.stderr[-200:])
 
     result = run("package-add", str(zip_path))
     check("cli package-add 成功", result.returncode == 0, (result.stderr or result.stdout)[-300:])
