@@ -1,0 +1,42 @@
+# Observatory 生产部署
+#
+#   cp server/.env.example server/.env   # 填好密钥
+#   docker compose --env-file server/.env up -d --build
+#
+# 数据卷里放数据库、画面、安装包和构建好的控制台；只有 TLS 端口对外开放。
+
+name: observatory
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    image: observatory/api:${OBS_IMAGE_TAG:-latest}
+    container_name: observatory-api
+    restart: unless-stopped
+    env_file:
+      - ../server/.env
+    environment:
+      OBS_DATA_DIR: /data
+    ports:
+      # 只监听回环，由宿主机的 nginx 终止公网 TLS 并转发两个域名。
+      - "127.0.0.1:${OBS_PORT:-8443}:8443"
+    volumes:
+      - observatory-data:/data
+      - ../certs:/certs:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import ssl,urllib.request;ctx=ssl._create_unverified_context();print(urllib.request.urlopen('https://127.0.0.1:8443/api/v1/health',context=ctx,timeout=5).status)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+volumes:
+  observatory-data:
+    name: observatory-data

@@ -1,0 +1,90 @@
+/* Mobile, watch and touch refinements.
+ *
+ * Loaded after index.css. Two goals:
+ *  1. Nothing is "crammed": on a 320-380px screen the console switches to a single
+ *     column, larger type and full-width touch targets.
+ *  2. Performance: the watch repaints poorly, so backdrop filters and the ambient
+ *     aurora are dropped on small or low-power devices.
+ */
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  body {
+    /* Avoid iOS rubber-band jitter inside the app shell. */
+    overscroll-behavior-y: none;
+  }
+
+  /* 100dvh keeps the bottom nav visible as mobile browser chrome collapses.
+     Older engines fall back to 100vh, which is what they can do. */
+  #root {
+    height: 100vh;
+  }
+  @supports (height: 100dvh) {
+    #root {
+      height: 100dvh;
+    }
+  }
+
+  /* Coarse pointers (phones, watches): 44px minimum hit area and 16px inputs so
+     the browser never zooms on focus. */
+  @media (pointer: coarse) {
+    input,
+    select,
+    textarea {
+      font-size: 16px;
+    }
+
+    button,
+    [role="button"],
+    a.tap-target {
+      min-height: 44px;
+    }
+  }
+
+  /* The watch WebView struggles with large blurred layers; remove them there and
+     on anything that asks for reduced motion. */
+  @media (max-width: 420px), (prefers-reduced-motion: reduce) {
+    body::before {
+      display: none;
+    }
+    .glass,
+    .glass-raised,
+    .glass-chrome {
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+    }
+  }
+}
+
+@layer utilities {
+  /* Safe areas for notched phones and round watch faces. */
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .pt-safe {
+    padding-top: env(safe-area-inset-top);
+  }
+  .px-safe {
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  /* Horizontal scrollers should not look like they hide content. */
+  .scroll-x {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* Applied to lists of tap rows so the pressed state is obvious on touch. */
+  .tap-row {
+    min-height: 44px;
+    transition: background-color 0.12s ease;
+  }
+  .tap-row:active {
+    background-color: var(--c-sunken);
+  }
+}

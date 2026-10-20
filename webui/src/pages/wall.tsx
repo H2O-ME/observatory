@@ -1,0 +1,107 @@
+import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
+import { MonitorSmartphone, Plus, RefreshCw } from "lucide-react";
+
+import { DeviceCard } from "@/components/device-card";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
+import { api } from "@/lib/api";
+import { useViewport } from "@/hooks/use-viewport";
+import { useLive } from "@/store/live";
+import { cn } from "@/lib/utils";
+
+export function WallPage() {
+  const viewport = useViewport();
+  const connected = useLive((state) => state.connected);
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
+    queryKey: ["devices"],
+    queryFn: api.devices,
+    refetchInterval: connected ? 20_000 : 5_000,
+  });
+
+  const devices = data?.devices ?? [];
+  const counts = {
+    online: devices.filter((device) => device.presence.state === "online").length,
+    degraded: devices.filter((device) => device.presence.state === "degraded").length,
+    offline: devices.filter(
+      (device) => device.presence.state === "offline" || device.presence.state === "uninstalled",
+    ).length,
+  };
+
+  const columns =
+    viewport === "watch"
+      ? "grid-cols-1"
+      : viewport === "mobile"
+        ? "grid-cols-2"
+        : devices.length >= 3
+          ? "grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4"
+          : "grid-cols-2 xl:grid-cols-3";
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <h1 className="text-base font-semibold text-ink">设备</h1>
+          <span className="font-mono text-[0.68rem] text-faint">v{data?.server_version ?? "—"}</span>
+        </div>
+        <Button variant="outline" size="sm" onClick={() => void refetch()} disabled={isFetching}>
+          <RefreshCw className={cn("size-3.5", isFetching && "animate-spin")} />
+          刷新
+        </Button>
+      </div>
+
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[0.72rem] text-soft">
+        <span>
+          <span className="mr-1 inline-block size-1.5 rounded-full bg-ok align-middle" />
+          在线 {counts.online}
+        </span>
+        <span>
+          <span className="mr-1 inline-block size-1.5 rounded-full bg-warn align-middle" />
+          受限 {counts.degraded}
+        </span>
+        <span>
+          <span className="mr-1 inline-block size-1.5 rounded-full bg-faint align-middle" />
+          离线 {counts.offline}
+        </span>
+        {!connected ? <span className="text-warn">实时连接断开，数据每 5 秒刷新一次</span> : null}
+      </div>
+
+      {isError ? (
+        <div className="rounded-panel border border-danger/30 bg-danger/10 p-3 text-xs text-danger">
+          无法读取设备列表：{error instanceof Error ? error.message : "未知错误"}
+        </div>
+      ) : null}
+
+      {isLoading ? (
+        <div className={cn("grid gap-3", columns)}>
+          {[0, 1, 2].map((index) => (
+            <Skeleton key={index} className="h-52 w-full rounded-panel" />
+          ))}
+        </div>
+      ) : devices.length === 0 ? (
+        <div className="flex flex-col items-center justify-center gap-3 rounded-panel border border-dashed border-line py-14 text-center">
+          <MonitorSmartphone className="size-8 text-faint" />
+          <div>
+            <p className="text-sm font-medium text-ink">还没有受控端</p>
+            <p className="mt-1 text-xs text-soft">在设置页复制安装命令，在目标机器上运行即可。</p>
+          </div>
+          <Link to="/settings" className={buttonVariants({ variant: "default", size: "sm" })}>
+            <Plus className="size-3.5" />
+            获取安装命令
+          </Link>
+        </div>
+      ) : (
+        <div className={cn("grid gap-3", columns)}>
+          {devices.map((device) => (
+            <DeviceCard
+              key={device.uid}
+              device={device}
+              stale={!connected}
+              variant={viewport === "watch" ? "compact" : "full"}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Observatory</title>
+    <script>
+      /* Runs before the first paint so the stored theme is on <html> by the
+         time the stylesheet applies — otherwise a dark-mode operator gets a
+         white flash on every reload. Mirrors the key used by useTheme in
+         src/components/app-shell.tsx. */
+      (function () {
+        try {
+          var stored = localStorage.getItem("observatory.theme");
+          var pinned =
+            stored === "light" || stored === "dark" ? stored : "system";
+          var dark =
+            pinned === "dark" ||
+            (pinned === "system" &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.classList.toggle("dark", dark);
+          document.documentElement.style.colorScheme = dark ? "dark" : "light";
+        } catch (e) {
+          /* Private mode with storage disabled — fall through to light. */
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

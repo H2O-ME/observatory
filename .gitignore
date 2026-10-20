@@ -1,0 +1,47 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+*.spec.bak
+
+# ---- Runtime data (never commit local captures or secrets) ----
+.localdata/
+data/
+*.db
+*.db-wal
+*.db-shm
+server/.env
+
+# ---- Node / WebUI ----
+webui/node_modules/
+webui/dist/
+webui/.tsbuildinfo
+webui/*.tsbuildinfo
+
+# ---- Agent build artefacts ----
+agent/build/build/
+agent/build/dist/
+agent/dist/
+*.zip
+
+# ---- Deployment secrets / artefacts ----
+certs/
+backups/
+.wine-agent/
+server/.env
+server/.env.local
+
+# ---- Editors / OS ----
+.git-credentials
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+
+# ---- Local tooling ----
+.zcode/

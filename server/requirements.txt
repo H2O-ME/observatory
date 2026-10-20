@@ -1,0 +1,16 @@
+# Ranges rather than exact pins: the same file is used for the Docker image
+# (python:3.12-slim) and for local development on whatever Python is installed,
+# and those two need different wheel sets. Locking happens at image build time.
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.34,<1.0
+sqlalchemy>=2.0.36,<2.1
+aiosqlite>=0.20,<1.0
+greenlet>=3.1,<4.0
+pydantic>=2.10,<3.0
+pydantic-settings>=2.7,<3.0
+pillow>=11.0,<13.0
+bcrypt>=4.2,<6.0
+pyjwt>=2.10,<3.0
+pyotp>=2.9,<3.0
+python-multipart>=0.0.20,<1.0
+httpx>=0.28,<1.0

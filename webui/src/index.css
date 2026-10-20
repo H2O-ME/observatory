@@ -1,0 +1,377 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* The console is token-driven: components only ever name a semantic colour,
+   never a raw hex. Flipping the two variable sets below is therefore the whole
+   dark-mode implementation — the `.dark` class on <html> is the only switch,
+   and `system` mode resolves to one of the two sets in JS before first paint.
+
+   Two vocabularies are mapped onto the SAME primitives:
+     • `--c-*`  the console's own names (bg/panel/ink/soft/brand/…)
+     • shadcn's names (background/card/muted-foreground/primary/…)
+   They must not be conflated: shadcn's `accent` and `muted` are *surfaces*
+   (hover fills, track backgrounds), whereas the console's brand colour and
+   secondary text colour are `brand` and `soft`. Renaming the console's tokens
+   is what keeps `bg-accent` in a shadcn menu from turning solid blue. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme inline {
+  /* ---------------------------------------------------- console vocabulary */
+  --color-bg: var(--c-bg);
+  --color-panel: var(--c-panel);
+  --color-raised: var(--c-raised);
+  --color-sunken: var(--c-sunken);
+  --color-line: var(--c-line);
+  --color-line-strong: var(--c-line-strong);
+  --color-ink: var(--c-ink);
+  --color-soft: var(--c-soft);
+  --color-faint: var(--c-faint);
+  --color-brand: var(--c-brand);
+  --color-brand-ink: var(--c-brand-ink);
+  --color-brand-soft: var(--c-brand-soft);
+  --color-ok: var(--c-ok);
+  --color-warn: var(--c-warn);
+  --color-danger: var(--c-danger);
+
+  /* ----------------------------------------------------- shadcn vocabulary */
+  --color-background: var(--c-bg);
+  --color-foreground: var(--c-ink);
+  --color-card: var(--c-panel);
+  --color-card-foreground: var(--c-ink);
+  --color-popover: var(--c-raised);
+  --color-popover-foreground: var(--c-ink);
+  --color-primary: var(--c-brand);
+  --color-primary-foreground: var(--c-brand-ink);
+  --color-secondary: var(--c-sunken);
+  --color-secondary-foreground: var(--c-ink);
+  --color-muted: var(--c-sunken);
+  --color-muted-foreground: var(--c-soft);
+  --color-accent: var(--c-sunken);
+  --color-accent-foreground: var(--c-ink);
+  --color-destructive: var(--c-danger);
+  --color-destructive-foreground: var(--c-on-danger);
+  --color-border: var(--c-line);
+  --color-input: var(--c-line);
+  --color-ring: var(--c-brand);
+
+  --color-chart-1: var(--c-chart-1);
+  --color-chart-2: var(--c-chart-2);
+  --color-chart-3: var(--c-chart-3);
+  --color-chart-4: var(--c-chart-4);
+  --color-chart-5: var(--c-chart-5);
+
+  /* --------------------------------------------------------------- rest -- */
+  --shadow-card: var(--sh-card);
+  --shadow-raised: var(--sh-raised);
+  --shadow-pop: var(--sh-pop);
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei",
+    "Hiragino Sans GB", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "Consolas",
+    "Liberation Mono", monospace;
+
+  /* Slightly softer corners than Tailwind's defaults, across the board.
+     `xl` is the radius shadcn's Card/Dialog/AlertDialog already ship, so it
+     is the panel radius; `panel` is kept as the name to reach for. `window`
+     is the larger radius for the floating chrome frames.
+     Tailwind emits same-property utilities in name order, and `window` sorts
+     before `xl` — so on a shadcn surface that already carries `rounded-xl`,
+     a bare `rounded-window` loses. Those call sites use `rounded-window!`,
+     which is why the bang is there and not a typo to be tidied away. */
+  --radius-sm: 0.5rem;
+  --radius-md: 0.625rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+  --radius-panel: 1rem;
+  --radius-window: 1.375rem;
+
+  --animate-aurora: aurora 60s linear infinite;
+}
+
+/* ---------------------------------------------------------------- light -- */
+:root {
+  --c-bg: #eef0f6;
+  --c-panel: rgba(255, 255, 255, 0.86);
+  --c-raised: rgba(255, 255, 255, 0.96);
+  --c-glass: rgba(255, 255, 255, 0.6);
+  --c-sunken: rgba(15, 23, 42, 0.05);
+  --c-line: rgba(15, 23, 42, 0.09);
+  --c-line-strong: rgba(15, 23, 42, 0.17);
+  --c-ink: #1d1d1f;
+  --c-soft: #5c6270;
+  --c-faint: #8a8f9c;
+  --c-brand: #0071e3;
+  --c-brand-ink: #ffffff;
+  --c-brand-soft: rgba(0, 113, 227, 0.11);
+  --c-on-danger: #ffffff;
+  --c-ok: #0e8a45;
+  --c-warn: #b45309;
+  --c-danger: #d70015;
+
+  --c-chart-1: #0071e3;
+  --c-chart-2: #5e5ce6;
+  --c-chart-3: #0e8a45;
+  --c-chart-4: #b45309;
+  --c-chart-5: #d70015;
+
+  --sh-card: 0 1px 2px rgba(16, 24, 40, 0.05),
+    0 10px 30px -12px rgba(16, 24, 40, 0.14);
+  --sh-raised: 0 2px 8px rgba(16, 24, 40, 0.07),
+    0 20px 48px -16px rgba(16, 24, 40, 0.2);
+  --sh-pop: 0 32px 80px -20px rgba(16, 24, 40, 0.34),
+    0 6px 20px -6px rgba(16, 24, 40, 0.12);
+
+  /* Aceternity's aurora: saturated diagonal stripes, cut into bands by a
+     same-coloured-as-the-background gradient, then blurred into a wash. */
+  --aurora: repeating-linear-gradient(
+    100deg,
+    #0071e3 10%,
+    #a5b4fc 15%,
+    #7dd3fc 20%,
+    #ddd6fe 25%,
+    #60a5fa 30%
+  );
+  --aurora-band: repeating-linear-gradient(
+    100deg,
+    #fff 0%,
+    #fff 7%,
+    transparent 10%,
+    transparent 12%,
+    #fff 16%
+  );
+  --aurora-opacity: 0.5;
+}
+
+/* ----------------------------------------------------------------- dark -- */
+.dark {
+  --c-bg: #08090c;
+  --c-panel: rgba(30, 32, 38, 0.8);
+  --c-raised: rgba(42, 45, 53, 0.95);
+  --c-glass: rgba(22, 23, 28, 0.58);
+  --c-sunken: rgba(255, 255, 255, 0.05);
+  --c-line: rgba(255, 255, 255, 0.09);
+  --c-line-strong: rgba(255, 255, 255, 0.19);
+  --c-ink: #f2f4f8;
+  --c-soft: #9ba3b0;
+  --c-faint: #6d7583;
+  --c-brand: #0a84ff;
+  --c-brand-ink: #ffffff;
+  --c-brand-soft: rgba(10, 132, 255, 0.18);
+  --c-on-danger: #ffffff;
+  --c-ok: #30d158;
+  --c-warn: #ffb340;
+  --c-danger: #ff6b60;
+
+  --c-chart-1: #0a84ff;
+  --c-chart-2: #7d7aff;
+  --c-chart-3: #30d158;
+  --c-chart-4: #ffb340;
+  --c-chart-5: #ff6b60;
+
+  --sh-card: 0 1px 0 rgba(255, 255, 255, 0.045) inset,
+    0 12px 32px -14px rgba(0, 0, 0, 0.7);
+  --sh-raised: 0 1px 0 rgba(255, 255, 255, 0.06) inset,
+    0 24px 56px -18px rgba(0, 0, 0, 0.8);
+  --sh-pop: 0 1px 0 rgba(255, 255, 255, 0.07) inset,
+    0 40px 96px -24px rgba(0, 0, 0, 0.9);
+
+  --aurora: repeating-linear-gradient(
+    100deg,
+    #0a84ff 10%,
+    #6366f1 15%,
+    #38bdf8 20%,
+    #a78bfa 25%,
+    #3b82f6 30%
+  );
+  --aurora-band: repeating-linear-gradient(
+    100deg,
+    #000 0%,
+    #000 7%,
+    transparent 10%,
+    transparent 12%,
+    #000 16%
+  );
+  --aurora-opacity: 0.42;
+}
+
+/* The stripe sweep Aceternity animates: two background layers drifting at
+   different rates, which is what makes the bands appear to fold. */
+@keyframes aurora {
+  from {
+    background-position: 50% 50%, 50% 50%;
+  }
+  to {
+    background-position: 350% 50%, 350% 50%;
+  }
+}
+
+@layer base {
+  * {
+    border-color: var(--color-line);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    background-color: var(--color-bg);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    letter-spacing: -0.006em;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* The ambient layer. A fixed pseudo-element means no page renders a
+     backdrop div, and it sits below content because the body background is
+     propagated to the canvas. Masked to fade out downwards so the aurora is
+     brightest behind the chrome and never competes with table text. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: -25% -25% 0;
+    z-index: -1;
+    pointer-events: none;
+    background-image: var(--aurora-band), var(--aurora);
+    background-size: 300% 200%, 200% 100%;
+    background-position: 50% 50%, 50% 50%;
+    opacity: var(--aurora-opacity);
+    filter: blur(56px) saturate(140%);
+    mask-image: radial-gradient(ellipse 90% 60% at 50% 0%, #000 5%, transparent 70%);
+    -webkit-mask-image: radial-gradient(
+      ellipse 90% 60% at 50% 0%,
+      #000 5%,
+      transparent 70%
+    );
+    animation: var(--animate-aurora);
+    will-change: background-position;
+  }
+
+  /* Timestamps, IPs and checksums line up only in a monospace face. */
+  .tnum {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 0.8125em;
+  }
+
+  ::selection {
+    background: var(--color-brand);
+    color: var(--color-brand-ink);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-brand);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  ::-webkit-scrollbar {
+    width: 11px;
+    height: 11px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-line-strong);
+    border: 3px solid transparent;
+    background-clip: content-box;
+    border-radius: 999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-faint);
+    background-clip: content-box;
+  }
+}
+
+@layer utilities {
+  .scrollbar-none {
+    scrollbar-width: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Chrome (sidebar, toolbar, sheets) is translucent so the aurora shows
+     through; content surfaces stay near-opaque so dense tables and screen
+     frames remain readable. */
+  .glass {
+    background-color: var(--c-panel);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    backdrop-filter: blur(24px) saturate(180%);
+  }
+  .glass-raised {
+    background-color: var(--c-raised);
+    -webkit-backdrop-filter: blur(28px) saturate(180%);
+    backdrop-filter: blur(28px) saturate(180%);
+  }
+  .glass-chrome {
+    background-color: var(--c-glass);
+    -webkit-backdrop-filter: blur(28px) saturate(180%);
+    backdrop-filter: blur(28px) saturate(180%);
+  }
+
+  /* Subtle checkerboard behind frames, so letterboxing is obvious. */
+  .frame-stage {
+    background-image: linear-gradient(45deg, var(--color-sunken) 25%, transparent 25%),
+      linear-gradient(-45deg, var(--color-sunken) 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, var(--color-sunken) 75%),
+      linear-gradient(-45deg, transparent 75%, var(--color-sunken) 75%);
+    background-size: 18px 18px;
+    background-position: 0 0, 0 9px, 9px -9px, -9px 0;
+  }
+
+  @keyframes sm-pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.35;
+    }
+  }
+  .animate-sm-pulse {
+    animation: sm-pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes sm-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  .animate-sm-in {
+    animation: sm-in 0.16s ease-out both;
+  }
+
+  @keyframes sm-fade {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  .animate-sm-fade {
+    animation: sm-fade 0.2s ease-out both;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    body::before {
+      animation: none;
+    }
+    .animate-sm-pulse,
+    .animate-sm-in,
+    .animate-sm-fade {
+      animation: none;
+    }
+  }
+}

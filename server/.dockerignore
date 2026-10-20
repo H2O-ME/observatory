@@ -1,0 +1,16 @@
+*.pyc
+__pycache__/
+.venv/
+venv/
+.localdata/
+data/
+*.db
+*.db-wal
+*.db-shm
+.env
+tests/
+node_modules/
+webui/dist/
+agent/build/dist/
+agent/dist/
+.git/
