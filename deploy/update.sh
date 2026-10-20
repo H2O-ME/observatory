@@ -35,9 +35,11 @@ git pull --ff-only origin "$BRANCH"
 VERSION="$(cat VERSION)"
 log "目标版本：$VERSION"
 
+COMPOSE=(docker compose -f deploy/docker-compose.yml --env-file server/.env)
+
 log "重新构建镜像（会同时重建控制台前端）"
-docker compose --env-file server/.env build --pull
-docker compose --env-file server/.env up -d
+"${COMPOSE[@]}" build --pull
+"${COMPOSE[@]}" up -d
 
 log "等待服务就绪"
 ready=0

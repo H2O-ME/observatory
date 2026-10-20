@@ -141,7 +141,7 @@ install_nginx_sites() {
 start_stack() {
   log "构建并启动容器"
   cd "$APP_DIR"
-  docker compose --env-file server/.env up -d --build
+  docker compose -f deploy/docker-compose.yml --env-file server/.env up -d --build
   log "等待健康检查"
   for _ in $(seq 1 60); do
     if curl -fsSk "https://127.0.0.1:8443/api/v1/health" >/dev/null 2>&1; then

@@ -20,7 +20,7 @@ latest="$(find /etc/letsencrypt/live -name fullchain.pem -mmin -90 | head -n 1 |
 if [[ -n "$latest" ]]; then
   log "证书已更新，重启容器以加载新证书"
   cd "$APP_DIR"
-  docker compose --env-file server/.env restart api
+  docker compose -f deploy/docker-compose.yml --env-file server/.env restart api
 else
   log "证书未更新，无需重启"
 fi

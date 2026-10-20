@@ -21,7 +21,7 @@ read -r -p "这会覆盖 observatory-data 卷，输入 RESTORE 继续： " confi
 
 cd "$APP_DIR"
 log "停止容器"
-docker compose --env-file server/.env down
+docker compose -f deploy/docker-compose.yml --env-file server/.env down
 
 log "恢复数据卷"
 docker run --rm \
@@ -31,7 +31,7 @@ docker run --rm \
   sh -c "rm -rf /data/* && tar xzf /backup/$(basename "$ARCHIVE") -C /data"
 
 log "启动容器"
-docker compose --env-file server/.env up -d
+docker compose -f deploy/docker-compose.yml --env-file server/.env up -d
 
 log "等待就绪"
 for _ in $(seq 1 60); do
