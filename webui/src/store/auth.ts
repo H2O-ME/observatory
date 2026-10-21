@@ -17,7 +17,7 @@ interface AuthState {
   refresh: () => Promise<void>;
 }
 
-export const useAuth = create<AuthState>((set) => ({
+export const useAuth = create<AuthState>((set, get) => ({
   status: "boot",
   version: "",
   totpEnabled: false,
@@ -43,7 +43,11 @@ export const useAuth = create<AuthState>((set) => ({
       }
       return;
     }
-    await this.refresh();
+    // Must go through `get()`: `bootstrap` is normally destructured out of the
+    // store (`const { bootstrap } = useAuth()`), so `this` is undefined and the
+    // call threw a TypeError before any request was made. That is what left the
+    // console on "正在连接 Observatory…" with an empty network panel.
+    await get().refresh();
   },
 
   async refresh() {
@@ -68,7 +72,9 @@ export const useAuth = create<AuthState>((set) => ({
     const result = await api.login(password, totp);
     writeToken(result.token);
     set({ status: "authed", version: result.version, error: "" });
-    await this.refresh();
+    // Same reason as `bootstrap`: `login` is destructured off the store, so `this`
+    // is undefined here too.
+    await get().refresh();
   },
 
   async logout() {

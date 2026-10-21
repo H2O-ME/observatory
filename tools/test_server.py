@@ -556,6 +556,14 @@ def installer_flow(client: TestClient, headers: dict, version: str) -> None:
     check("前端请求带超时", "AbortController" in api_source and "REQUEST_TIMEOUT_MS" in api_source)
     check("超时后抛可读错误", "请求超时" in api_source)
 
+    # `const { bootstrap } = useAuth()` detaches the method from the store, so a
+    # `this.refresh()` inside it is `undefined.refresh()` and throws before the
+    # first request. That left the console stuck on "正在连接 Observatory…".
+    auth_source = (ROOT / "webui/src/store/auth.ts").read_text(encoding="utf-8")
+    check("auth store 不用 this 调自身方法", "await this." not in auth_source, "必须用 get()")
+    check("auth store 通过 get() 刷新", "get().refresh()" in auth_source)
+    check("auth store 使用 get 参数", "create<AuthState>((set, get)" in auth_source)
+
 
 def websockets_flow(client: TestClient, headers: dict, device_token: str, version: str) -> None:
     group("WebSocket 通道")
