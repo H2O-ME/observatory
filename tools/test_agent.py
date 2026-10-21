@@ -488,6 +488,82 @@ def helper_cli_contract() -> None:
     check("助手存活时允许升级", updater.verify_helper_alive(_AliveProcess(), grace_s=0.3) is True)
 
 
+def update_retry_and_cleanup() -> None:
+    """A failing update must not re-download the package on every heartbeat."""
+
+    group("更新重试与清理")
+    import asyncio
+    import time as time_module
+
+    from observatory_agent import runner as runner_module
+    from observatory_agent import updater
+
+    runner = runner_module.AgentRunner.__new__(runner_module.AgentRunner)
+    runner._updating = False
+    runner._connected = True
+    runner._update_failures = {}
+    runner.client = object()
+    runner.store = type("S", (), {"config": type("C", (), {"setting": staticmethod(lambda *a, **k: True)})()})()
+
+    events: list[tuple[str, dict]] = []
+
+    async def fake_event(name, payload):
+        events.append((name, dict(payload)))
+
+    runner._send_event = fake_event
+    runner._request_shutdown = lambda reason: None
+
+    calls = {"apply": 0}
+
+    async def failing_apply(**kwargs):
+        calls["apply"] += 1
+        raise RuntimeError("助手启动即退出")
+
+    original_apply = updater.apply_update
+    updater.apply_update = failing_apply
+    try:
+        info = {"version": "9.9.9", "sha256": "x" * 64}
+        asyncio.run(runner_module.AgentRunner._maybe_update(runner, info))
+        first = calls["apply"]
+        # Immediately asking again must be suppressed by the backoff.
+        asyncio.run(runner_module.AgentRunner._maybe_update(runner, info))
+        second = calls["apply"]
+    finally:
+        updater.apply_update = original_apply
+
+    check("首次失败后记录退避", first == 1 and second == 1, f"{first}/{second}")
+    check("失败事件带尝试次数", any(p.get("attempt") == 1 for n, p in events if n == "update_failed"), str(events))
+    check("退避窗口内不重试", second == 1, str(calls))
+
+    # Once the backoff expires the retry is allowed again.
+    failures = runner._update_failures["9.9.9"]
+    runner._update_failures["9.9.9"] = (failures[0], time_module.monotonic() - 10_000)
+    updater.apply_update = failing_apply
+    try:
+        asyncio.run(runner_module.AgentRunner._maybe_update(runner, {"version": "9.9.9"}))
+    finally:
+        updater.apply_update = original_apply
+    check("退避到期后允许重试", calls["apply"] == 2, str(calls))
+
+    # Staging cleanup must drop leftovers, including the legacy helper that can
+    # never run from an onedir build.
+    with tempfile.TemporaryDirectory() as tmp:
+        staging = Path(tmp)
+        (staging / "payload-0.2.4").mkdir()
+        (staging / "payload-0.2.4" / "x.dll").write_bytes(b"x")
+        (staging / "apply-1-2").mkdir()
+        (staging / "observatory-updater.exe").write_bytes(b"MZ")
+        (staging / "observatory-agent-0.2.4.zip").write_bytes(b"PK")
+        (staging / "keep.part").write_bytes(b"p")
+        updater.cleanup_staging(staging)
+        left = sorted(p.name for p in staging.iterdir())
+        check("清理遗留载荷", not (staging / "payload-0.2.4").exists(), str(left))
+        check("清理助手工作区", not (staging / "apply-1-2").exists(), str(left))
+        check("清理坏助手副本", not (staging / "observatory-updater.exe").exists(), str(left))
+        check("清理旧压缩包", not (staging / "observatory-agent-0.2.4.zip").exists(), str(left))
+        check("清理半成品", not (staging / "keep.part").exists(), str(left))
+
+
 def main() -> int:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     print(f"Observatory 受控端自检 · {version} · Python {sys.version.split()[0]}")
@@ -497,6 +573,7 @@ def main() -> int:
     session_lifecycle()
     large_result_transport()
     helper_cli_contract()
+    update_retry_and_cleanup()
     update_pipeline()
     windows_features()
     uninstall_paths()

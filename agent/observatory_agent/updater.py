@@ -16,6 +16,7 @@ rolled back by the next start.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import shutil
@@ -53,6 +54,8 @@ async def apply_update(
 
     staging_dir = Path(staging_dir)
     staging_dir.mkdir(parents=True, exist_ok=True)
+    # Drop whatever a previous failed attempt left behind before downloading again.
+    await asyncio.to_thread(cleanup_staging, staging_dir)
     archive = staging_dir / f"observatory-agent-{version}.zip"
 
     if on_event:
@@ -74,6 +77,33 @@ async def apply_update(
         raise RuntimeError("更新助手启动即退出，已保留当前版本继续运行")
     log.info("update helper started for %s -> %s", version, payload_root)
     return payload_root
+
+
+def cleanup_staging(staging_dir: Path = STAGING_DIR, *, keep_archive: bool = False) -> None:
+    """Remove leftovers from previous update attempts.
+
+    A failed attempt used to leave the downloaded zip, the unpacked payload and a
+    stale helper behind; repeated retries then filled %ProgramData% with dozens of
+    megabytes. Anything older than the current attempt is safe to drop because the
+    service only stops once a helper is confirmed running.
+    """
+
+    staging_dir = Path(staging_dir)
+    if not staging_dir.is_dir():
+        return
+    for path in staging_dir.iterdir():
+        try:
+            if path.is_dir() and path.name.startswith(("payload-", "apply-")):
+                shutil.rmtree(path, ignore_errors=True)
+            elif path.name == "observatory-updater.exe":
+                # Legacy helper copied from an onedir build; it can never run.
+                path.unlink(missing_ok=True)
+            elif path.suffix == ".part":
+                path.unlink(missing_ok=True)
+            elif path.suffix == ".zip" and not keep_archive:
+                path.unlink(missing_ok=True)
+        except OSError as exc:
+            log.debug("could not clean %s: %s", path, exc)
 
 
 def verify_helper_alive(helper: subprocess.Popen, grace_s: float = 2.5) -> bool:
@@ -291,4 +321,11 @@ def _cleanup_old(backup: Path) -> None:
             time.sleep(1.5 * (attempt + 1))
 
 
-__all__ = ["apply_now", "apply_update", "extract_payload", "spawn_apply_helper"]
+__all__ = [
+    "apply_now",
+    "apply_update",
+    "cleanup_staging",
+    "extract_payload",
+    "spawn_apply_helper",
+    "verify_helper_alive",
+]

@@ -50,6 +50,10 @@ UPGRADE_PROBE_BASE_S = 120
 FRAME_QUEUE_SIZE = 64
 SPOOL_DRAIN_S = 20
 MAX_COMMAND_CONCURRENCY = 4
+#: Retry backoff for a failed update: 5, 10, 20, ... capped at 30 minutes. Without
+#: it a broken helper re-downloaded the whole package on every heartbeat.
+UPDATE_RETRY_BASE_S = 300.0
+UPDATE_RETRY_MAX_S = 1800.0
 
 #: Commands the service answers itself. Everything else is delegated to a worker
 #: because it needs the interactive desktop.
@@ -85,6 +89,9 @@ class AgentRunner:
         self._pending: dict[str, dict[str, Any]] = {}
         self._control: dict[str, int] = {}
         self._updating = False
+        #: ``version -> (failed_attempts, monotonic_time)``; drives the retry backoff
+        #: so a broken update does not re-download the package every heartbeat.
+        self._update_failures: dict[str, tuple[int, float]] = {}
         self._last_update_check = 0.0
 
         #: Set by ``service.py`` so the uninstaller/updater can stop the service.
@@ -573,6 +580,24 @@ class AgentRunner:
                 return
             if not is_newer(version, __version__):
                 return
+
+        # A failed attempt used to be retried on the very next heartbeat, which
+        # re-downloaded the whole package every few seconds and hammered both the
+        # device and the server. Back off, and repeat the same failure less and
+        # less often while still eventually recovering.
+        failure = self._update_failures.get(version)
+        if failure is not None and not forced:
+            attempts, last = failure
+            wait_s = min(UPDATE_RETRY_MAX_S, UPDATE_RETRY_BASE_S * (2 ** (attempts - 1)))
+            if time.monotonic() - last < wait_s:
+                return
+            log.info(
+                "retrying update to %s after %ss (attempt %s failed before)",
+                version,
+                wait_s,
+                attempts,
+            )
+
         if not self._connected:
             log.info("deferring update to %s until connected", version)
             return
@@ -594,7 +619,11 @@ class AgentRunner:
             self._request_shutdown(f"update:{version}")
         except Exception as exc:  # noqa: BLE001
             log.exception("update failed")
-            await self._send_event("update_failed", {"version": version, "error": str(exc)})
+            attempts = (failure[0] + 1) if failure else 1
+            self._update_failures[version] = (attempts, time.monotonic())
+            await self._send_event(
+                "update_failed", {"version": version, "error": str(exc), "attempt": attempts}
+            )
             self._updating = False
 
     # -- uninstall ---------------------------------------------------------
