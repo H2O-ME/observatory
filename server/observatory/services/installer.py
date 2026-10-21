@@ -43,10 +43,14 @@ def render_ps1(runtime: Runtime, code: str, download: bool = False) -> str:
     }
     for token, value in replacements.items():
         template = template.replace(token, value)
-    # Windows PowerShell 5.1 decodes a BOM-less .ps1 as ANSI, which turns the
-    # Chinese output into mojibake when the file is saved to disk and run with
-    # -File. Only prepend the BOM for downloads; inline `irm | iex` needs none.
-    return ("\ufeff" + template) if download else template
+    # Windows PowerShell 5.1 decodes a BOM-less .ps1 as ANSI, so saving this to
+    # disk with `iwr -OutFile` and running it with -File turns every Chinese
+    # string into mojibake and the parser then fails on the broken quoting. The
+    # BOM is therefore always present: the documented workflow is a download, and
+    # `irm | iex` ignores a leading BOM. `download` now only controls whether the
+    # response is an attachment.
+    _ = download
+    return "\ufeff" + template
 
 
 def render_cmd(runtime: Runtime, code: str) -> str:
