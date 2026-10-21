@@ -24,10 +24,24 @@ from . import __version__
 
 log = logging.getLogger(__name__)
 
+#: Sentinel for the bare ``--version`` flag (no value supplied).
+PRINT_VERSION = "\x00print-version"
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="observatory-agent", description="Observatory 受控端")
-    parser.add_argument("--version", action="store_true", help="显示版本号")
+    # ``--version`` doubles as the bare "print version" flag and, historically, as
+    # the helper's target-version option: ``updater.spawn_apply_helper`` passed
+    # ``--version 0.2.1``. argparse rejected that value, so every update helper
+    # exited before doing anything and left the service stopped. Accepting an
+    # optional value keeps already-installed 0.2.0 agents upgradeable.
+    parser.add_argument(
+        "--version",
+        nargs="?",
+        const=PRINT_VERSION,
+        default="",
+        help="显示版本号；也接受 ``--version <x.y.z>``（更新助手兼容形式）",
+    )
 
     parser.add_argument("--console", action="store_true", help="前台运行（调试用）")
     parser.add_argument("--worker", action="store_true", help="以会话工作进程身份运行")
@@ -57,7 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
-    if args.version:
+    if args.version == PRINT_VERSION:
         print(__version__)
         return 0
 
@@ -69,7 +83,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.apply_update:
         from .updater import apply_now
 
-        return apply_now(args.apply_update, args.target, args.pid, args.version_name)
+        # Prefer the explicit ``--version-name``; fall back to the value passed
+        # through ``--version`` by older updaters.
+        target_version = args.version_name or (args.version if args.version != PRINT_VERSION else "")
+        return apply_now(args.apply_update, args.target, args.pid, target_version)
 
     if args.purge:
         from .uninstall import purge

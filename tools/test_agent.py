@@ -368,6 +368,96 @@ def large_result_transport() -> None:
     check("二进制载荷可承载 1MiB", payload == raw and header["result"]["data_encoding"] == "binary")
 
 
+def helper_cli_contract() -> None:
+    """The update helper must be startable with the exact arguments we spawn.
+
+    This is the regression that mattered: ``spawn_apply_helper`` passed
+    ``--version 0.2.1``, but ``--version`` was a bare flag and the version option
+    was named differently, so the helper died on an argparse error the moment the
+    service had already agreed to stop. Every 0.2.0 device went silent that way.
+    Only a test that parses the *actual argument list* catches it.
+    """
+
+    group("更新助手命令行")
+    from observatory_agent import updater
+    from observatory_agent.main import PRINT_VERSION, build_parser
+
+    parser = build_parser()
+
+    bare = parser.parse_args(["--version"])
+    check("裸 --version 仍打印版本", bare.version == PRINT_VERSION, str(bare.version))
+
+    args = parser.parse_args(
+        [
+            "--apply-update",
+            r"C:\payload",
+            "--target",
+            r"C:\Program Files\Observatory",
+            "--pid",
+            "1234",
+            "--version-name",
+            "0.2.1",
+        ]
+    )
+    check("更新助手参数可解析", args.apply_update == r"C:\payload" and args.version_name == "0.2.1")
+
+    legacy = parser.parse_args(
+        ["--apply-update", r"C:\payload", "--target", r"C:\x", "--pid", "1", "--version", "0.2.1"]
+    )
+    check("兼容旧的 --version 值形式", legacy.version == "0.2.1", str(legacy.version))
+
+    # And prove the spawned argument list itself parses, rather than trusting a
+    # hand-written approximation of it.
+    captured: dict[str, list[str]] = {}
+
+    original_popen = updater.subprocess.Popen
+
+    class _FakeProcess:
+        def __init__(self, arguments) -> None:
+            captured["argv"] = list(arguments)
+
+        def poll(self):
+            return None
+
+        def terminate(self) -> None:
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+    updater.subprocess.Popen = lambda arguments, **kwargs: _FakeProcess(arguments)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            helper = updater.spawn_apply_helper(Path(tmp) / "payload", "0.9.9")
+    finally:
+        updater.subprocess.Popen = original_popen
+
+    argv = captured.get("argv") or []
+    check("助手进程已启动", helper is not None)
+    check("启动参数使用 --version-name", "--version-name" in argv, str(argv))
+    check("启动参数不含裸 --version 带值", "--version" not in argv, str(argv))
+    try:
+        parsed = parser.parse_args(argv[1:])
+        ok = parsed.apply_update.endswith("payload") and parsed.version_name == "0.9.9"
+    except SystemExit:
+        ok = False
+    check("实际启动参数可被解析", ok, str(argv[1:]))
+
+    # A helper that dies instantly must abort the update instead of letting the
+    # caller stop the service.
+    class _DeadProcess:
+        def poll(self):
+            return 2
+
+    check("助手立即退出时拒绝升级", updater.verify_helper_alive(_DeadProcess(), grace_s=0.3) is False)
+
+    class _AliveProcess:
+        def poll(self):
+            return None
+
+    check("助手存活时允许升级", updater.verify_helper_alive(_AliveProcess(), grace_s=0.3) is True)
+
+
 def main() -> int:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     print(f"Observatory 受控端自检 · {version} · Python {sys.version.split()[0]}")
@@ -376,6 +466,7 @@ def main() -> int:
     transport()
     session_lifecycle()
     large_result_transport()
+    helper_cli_contract()
     update_pipeline()
     windows_features()
     uninstall_paths()

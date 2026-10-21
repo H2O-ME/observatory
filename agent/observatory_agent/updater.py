@@ -43,7 +43,11 @@ async def apply_update(
     staging_dir: Path = STAGING_DIR,
     on_event: Callable[[str, dict], Awaitable[None]] | None = None,
 ) -> Path:
-    """Download, verify and prepare an update payload; returns its directory."""
+    """Download, verify, stage an update and start the swap helper.
+
+    Returns the staged payload directory. The caller must only stop the service
+    after this returns without raising.
+    """
 
     staging_dir = Path(staging_dir)
     staging_dir.mkdir(parents=True, exist_ok=True)
@@ -60,9 +64,34 @@ async def apply_update(
     (payload_root / "VERSION").write_text(version + "\n", encoding="utf-8")
 
     helper = spawn_apply_helper(payload_root, version)
+    if helper is None:
+        # Never let the caller stop the service for an update that has no one to
+        # finish it: a stopped service with a dead helper is a silent brick.
+        raise RuntimeError("无法启动更新助手，已保留当前版本继续运行")
+    if not verify_helper_alive(helper):
+        raise RuntimeError("更新助手启动即退出，已保留当前版本继续运行")
     log.info("update helper started for %s -> %s", version, payload_root)
-    _ = helper
     return payload_root
+
+
+def verify_helper_alive(helper: subprocess.Popen, grace_s: float = 2.5) -> bool:
+    """Confirm the detached helper survived its own startup.
+
+    The helper re-executes this same executable, so a bad argument list or a
+    missing payload kills it within milliseconds — after the service has already
+    agreed to stop. That is exactly how 0.2.0 devices went silent: the helper
+    exited on an argparse error and nothing restarted the service. Checking here
+    turns that class of failure into a refused update instead of a dead agent.
+    """
+
+    deadline = time.time() + max(0.0, grace_s)
+    while time.time() < deadline:
+        code = helper.poll()
+        if code is not None:
+            log.error("update helper exited immediately (code %s); aborting update", code)
+            return False
+        time.sleep(0.15)
+    return True
 
 
 def extract_payload(archive: Path, destination: Path) -> Path:
@@ -115,7 +144,7 @@ def spawn_apply_helper(payload_root: Path, version: str) -> subprocess.Popen | N
         str(INSTALL_DIR),
         "--pid",
         str(os.getpid()),
-        "--version",
+        "--version-name",
         version,
     ]
     try:
@@ -123,6 +152,8 @@ def spawn_apply_helper(payload_root: Path, version: str) -> subprocess.Popen | N
             arguments,
             creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
             stdin=subprocess.DEVNULL,
+            # Keep the helper's stderr: when it fails to start, the reason is the
+            # only evidence that survives the service stopping itself.
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             close_fds=True,
