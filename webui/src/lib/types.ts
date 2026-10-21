@@ -13,6 +13,14 @@ export interface Capabilities {
   uninstall: boolean;
 }
 
+export interface CaptureHealth {
+  state: string;
+  reason: string;
+  sessions: number | null;
+  workers: number[];
+  at_ms: number;
+}
+
 export interface Presence {
   state: PresenceState;
   transport: TransportKind;
@@ -21,6 +29,7 @@ export interface Presence {
   age_ms: number | null;
   channel_since_ms: number | null;
   capabilities: Capabilities;
+  capture?: CaptureHealth | null;
 }
 
 export interface Device {

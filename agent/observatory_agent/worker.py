@@ -29,6 +29,9 @@ log = logging.getLogger(__name__)
 
 STATE_INTERVAL_S = 10
 MAX_PARALLEL_COMMANDS = 3
+#: Base64 file chunks above this size travel as the pipe payload instead of
+#: inside the JSON header, whose hard limit is 64 KiB.
+RESULT_INLINE_LIMIT = 16 * 1024
 
 
 class Worker:
@@ -142,16 +145,45 @@ class Worker:
                 result = {"ok": False, "error": f"worker 不处理该命令: {command_type}"}
             ok = bool(result.get("ok", True))
             error = result.get("error")
-            self.pipe.send(
-                {
-                    "t": "result",
-                    "id": command_id,
-                    "ok": ok,
-                    "result": result,
-                    "error": error,
-                    "elapsed_ms": _now_ms() - started,
-                }
-            )
+            # A file read carries up to 1 MiB of base64 in ``data``. That does not
+            # fit in the 64 KiB JSON header, and the old code ignored the failed
+            # send, so the command stayed ``dispatched`` forever. Move the bulky
+            # field to the binary payload and keep the header small.
+            payload_out = b""
+            header_out = {
+                "t": "result",
+                "id": command_id,
+                "ok": ok,
+                "result": result,
+                "error": error,
+                "elapsed_ms": _now_ms() - started,
+            }
+            data = result.get("data") if isinstance(result, dict) else None
+            if isinstance(data, str) and len(data) > RESULT_INLINE_LIMIT:
+                import base64
+
+                try:
+                    payload_out = base64.b64decode(data)
+                except Exception:  # noqa: BLE001 - keep the inline value on failure
+                    payload_out = b""
+                if payload_out:
+                    slim = {key: value for key, value in result.items() if key != "data"}
+                    slim["data_encoding"] = "binary"
+                    header_out["result"] = slim
+            if not self.pipe.send(header_out, payload_out) and payload_out:
+                # The binary path failed (pipe down or oversized); fall back to
+                # reporting the failure instead of leaving the command pending.
+                log.warning("could not return %s bytes for %s", len(payload_out), command_id)
+                self.pipe.send(
+                    {
+                        "t": "result",
+                        "id": command_id,
+                        "ok": False,
+                        "result": None,
+                        "error": "结果过大且管道已断开，请重试",
+                        "elapsed_ms": _now_ms() - started,
+                    }
+                )
         except Exception as exc:  # noqa: BLE001
             log.exception("command %s failed", command_type)
             self.pipe.send(

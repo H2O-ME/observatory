@@ -187,6 +187,36 @@ def enroll_and_presence(client: TestClient, headers: dict) -> str:
     check("受限状态不可实时控制", presence["capabilities"]["control"] is False)
     check("状态包含原因", bool(presence["reason"]))
     check("设备负载入参", device["sysinfo"].get("cpu_percent") == 14.0)
+
+    # A device can be perfectly reachable and still unable to capture: the agent
+    # runs as a service in session 0, so a host with no logged-in desktop has no
+    # screen to grab. The console must say so instead of showing "online" next to
+    # a permanently empty timeline.
+    blocked = client.post(
+        "/api/v1/agent/heartbeat",
+        headers={"X-Device-Token": device_token},
+        json={
+            "agent_version": "0.2.0",
+            "state": {"capture": {"state": "no_session", "reason": "当前没有已登录的交互式桌面", "sessions": 0}},
+        },
+    )
+    check("上报采屏状态被接受", blocked.status_code == 200, blocked.text[:160])
+    device = client.get("/api/v1/devices", headers=headers).json()["devices"][0]
+    presence = device["presence"]
+    check("无桌面时状态说明原因", "桌面" in (presence["reason"] or ""), str(presence["reason"]))
+    check("无桌面时截图能力为假", presence["capabilities"]["screenshot"] is False)
+    check("无桌面时实时控制关闭", presence["capabilities"]["control"] is False)
+    check("采屏状态原样暴露", (presence.get("capture") or {}).get("state") == "no_session", str(presence.get("capture")))
+    check("文件管理仍可用", presence["capabilities"]["files"] is True)
+
+    ok_capture = client.post(
+        "/api/v1/agent/heartbeat",
+        headers={"X-Device-Token": device_token},
+        json={"agent_version": "0.2.0", "state": {"capture": {"state": "ok", "sessions": 1, "workers": [1]}}},
+    )
+    check("采屏恢复后心跳成功", ok_capture.status_code == 200)
+    device = client.get("/api/v1/devices", headers=headers).json()["devices"][0]
+    check("采屏恢复后截图能力回归", device["presence"]["capabilities"]["screenshot"] is True)
     return device_token
 
 
@@ -500,6 +530,15 @@ def installer_flow(client: TestClient, headers: dict, version: str) -> None:
     settings_source = (ROOT / "webui/src/pages/settings.tsx").read_text(encoding="utf-8")
     check("控制台渲染下载按钮", "installArtifacts.map" in settings_source)
     check("控制台不再要求手填注册码", "<注册码>" not in settings_source)
+
+    # "Online but never a frame" was indistinguishable from broken capture. The
+    # console must surface the agent's own capture health instead.
+    overview_source = (ROOT / "webui/src/pages/device/overview-view.tsx").read_text(encoding="utf-8")
+    check("设备页提示无法采集屏幕", "无法采集屏幕" in overview_source)
+    check("提示引用受控端上报的原因", "presence.capture?.reason" in overview_source)
+    check("提示说明会话 0 限制", "会话 0" in overview_source)
+    types_source = (ROOT / "webui/src/lib/types.ts").read_text(encoding="utf-8")
+    check("前端类型包含采屏健康", "CaptureHealth" in types_source)
 
 
 def websockets_flow(client: TestClient, headers: dict, device_token: str, version: str) -> None:

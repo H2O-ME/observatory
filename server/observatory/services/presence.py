@@ -31,6 +31,9 @@ WS_STALE_MS = 65_000
 POLL_STALE_MS = 150_000
 #: After this long without any contact the device is simply offline.
 OFFLINE_AFTER_MS = 120_000
+#: How long an agent's capture-health report stays meaningful. It rides on the
+#: heartbeat, so this window is a few beats wide.
+CAPTURE_STALE_MS = 180_000
 
 STATE_ONLINE = "online"
 STATE_DEGRADED = "degraded"
@@ -170,6 +173,18 @@ def _capabilities(state: str) -> dict[str, bool]:
     }
 
 
+def _capture_state(device: Device) -> dict:
+    """Capture health as last reported by the agent, if it is recent enough."""
+
+    capture = (device.sysinfo or {}).get("capture")
+    if not isinstance(capture, dict):
+        return {}
+    reported = int(capture.get("at_ms") or 0)
+    if reported and now_ms() - reported > CAPTURE_STALE_MS:
+        return {}
+    return capture
+
+
 def snapshot(
     device: Device,
     registry: ChannelRegistry,
@@ -218,6 +233,20 @@ def snapshot(
         channel_since = channel.since_ms if channel else None
 
     age = max(0, server_now - last_seen) if last_seen else None
+    capture = _capture_state(device)
+    capabilities = _capabilities(state)
+    reason = reason
+    # A reachable device whose agent has no desktop to capture is online but
+    # cannot deliver screenshots; saying only "online" hides the real fault.
+    if state in (STATE_ONLINE, STATE_DEGRADED) and capture:
+        capture_state = str(capture.get("state") or "")
+        if capture_state in {"blocked", "no_session"}:
+            capabilities = {**capabilities, "screenshot": False, "control": False}
+            detail = str(capture.get("reason") or "")
+            if capture_state == "no_session":
+                reason = detail or "没有已登录的交互式桌面，无法采集屏幕"
+            else:
+                reason = f"采屏进程未运行：{detail}" if detail else "采屏进程未运行"
     return {
         "state": state,
         "transport": transport,
@@ -225,11 +254,21 @@ def snapshot(
         "last_seen_ms": last_seen,
         "age_ms": age,
         "channel_since_ms": channel_since,
-        "capabilities": _capabilities(state),
+        "capabilities": capabilities,
+        "capture": {
+            "state": capture.get("state") or "",
+            "reason": capture.get("reason") or "",
+            "sessions": capture.get("sessions"),
+            "workers": capture.get("workers") or [],
+            "at_ms": capture.get("at_ms") or 0,
+        }
+        if capture
+        else None,
     }
 
 
 __all__ = [
+    "CAPTURE_STALE_MS",
     "Channel",
     "ChannelRegistry",
     "OFFLINE_AFTER_MS",

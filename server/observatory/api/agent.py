@@ -135,6 +135,21 @@ async def heartbeat(
         # Heartbeats carry a cheap subset; merge so a light payload never erases
         # hostname/os/model collected at enrolment.
         device.sysinfo = {**(device.sysinfo or {}), **payload.sysinfo}
+    capture = payload.state.get("capture") if isinstance(payload.state, dict) else None
+    if isinstance(capture, dict):
+        # Capture health is the difference between "online and working" and
+        # "online but there is no desktop to capture". Persist it so the console
+        # can explain a device that never produces frames.
+        device.sysinfo = {
+            **(device.sysinfo or {}),
+            "capture": {
+                "state": str(capture.get("state") or "")[:30],
+                "reason": str(capture.get("reason") or "")[:200],
+                "workers": capture.get("workers") if isinstance(capture.get("workers"), list) else [],
+                "sessions": int(capture.get("sessions") or 0),
+                "at_ms": now_ms(),
+            },
+        }
     runtime.registry.attach(device.id, "poll", ip)
     await session.commit()
 

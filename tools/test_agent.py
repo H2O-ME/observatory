@@ -283,12 +283,99 @@ def uninstall_paths() -> None:
         check("不碰无关文件", keep.exists())
 
 
+def session_lifecycle() -> None:
+    """Regressions for the bug that produced zero frames on every device.
+
+    Two independent faults kept the capture worker from ever running inside the
+    user's session: the session launcher referenced a constant that does not
+    exist, and the session scanner retired sessions it never owned.
+    """
+
+    group("会话与采屏")
+    from observatory_agent import session_launch
+
+    check("MAXIMUM_ALLOWED 常量存在", session_launch.MAXIMUM_ALLOWED == 0x02000000)
+    offenders = [
+        path.name
+        for path in (ROOT / "agent" / "observatory_agent").glob("*.py")
+        if any(
+            "win32security.MAXIMUM_ALLOWED" in line.split("#", 1)[0]
+            for line in path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        )
+    ]
+    check("不再引用 win32security 里不存在的常量", not offenders, str(offenders))
+
+    from observatory_agent import runner as runner_module
+
+    managed: set[int] = set()
+
+    class FakePipe:
+        def __init__(self) -> None:
+            import threading
+
+            self.connected = threading.Event()
+
+    runner = runner_module.AgentRunner.__new__(runner_module.AgentRunner)
+
+    class _Pipes(dict):
+        pass
+
+    runner._pipes = _Pipes()
+    runner._processes = {}
+    # A listener session (RDP-Tcp reports id 65537) must not be treated as a
+    # managed session just because a worker hello mentioned it.
+    runner._sessions = {65537: {"username": "", "connected": False}, 1: {"username": "u", "connected": True}}
+    runner._pipes[1] = FakePipe()
+    managed = {1, 65537}
+    retired = [session_id for session_id in list(runner._sessions) if not runner._manages_session(session_id)]
+    check("未托管的监听会话被忽略", retired == [65537], str(retired))
+    check("托管会话仍被识别", runner._manages_session(1))
+
+    health = runner_module.AgentRunner._capture_health(runner)
+    check("拉起过程中上报启动中", health["state"] == "starting", str(health))
+    runner._mark_capture_blocked(1, "无法进入用户会话，屏幕采集不可用")
+    health = runner_module.AgentRunner._capture_health(runner)
+    check("进入会话失败时上报阻塞", health["state"] == "blocked", str(health))
+    check("阻塞原因可读", "屏幕采集" in health["reason"], health["reason"])
+    runner._pipes[1].connected.set()
+    health = runner_module.AgentRunner._capture_health(runner)
+    check("有采屏进程时上报正常", health["state"] == "ok", str(health))
+
+
+def large_result_transport() -> None:
+    """A file read must not stall because its base64 exceeds the header limit."""
+
+    group("大结果回传")
+    import base64
+
+    from observatory_agent.pipe_proto import MAX_HEADER_BYTES, FramingError, decode, encode
+    from observatory_agent.worker import RESULT_INLINE_LIMIT
+
+    blob = base64.b64encode(os.urandom(1024 * 1024)).decode("ascii")
+    check("阈值小于头部上限", RESULT_INLINE_LIMIT < MAX_HEADER_BYTES, str(RESULT_INLINE_LIMIT))
+    oversized = {"t": "result", "id": "x", "result": {"data": blob}}
+    try:
+        encode(oversized)
+        raised = False
+    except FramingError:
+        raised = True
+    check("大 base64 确实放不进头部", raised)
+
+    raw = base64.b64decode(blob)
+    header, payload = decode(
+        encode({"t": "result", "id": "x", "result": {"data_encoding": "binary"}}, raw)
+    )
+    check("二进制载荷可承载 1MiB", payload == raw and header["result"]["data_encoding"] == "binary")
+
+
 def main() -> int:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     print(f"Observatory 受控端自检 · {version} · Python {sys.version.split()[0]}")
     version_and_config()
     framing()
     transport()
+    session_lifecycle()
+    large_result_transport()
     update_pipeline()
     windows_features()
     uninstall_paths()

@@ -101,6 +101,9 @@ export function OverviewView({ device, onRefresh }: Props) {
   const disks = Array.isArray(device.sysinfo.disks) ? (device.sysinfo.disks as Disk[]) : [];
   const sessions = Array.isArray(device.sysinfo.sessions) ? (device.sysinfo.sessions as SessionRow[]) : [];
   const capabilities = device.presence.capabilities;
+  const captureState = device.presence.capture?.state ?? "";
+  const captureBlocked =
+    !capabilities.screenshot || captureState === "no_session" || captureState === "blocked";
 
   return (
     <div className="space-y-3">
@@ -109,6 +112,22 @@ export function OverviewView({ device, onRefresh }: Props) {
       ) : null}
       {error ? (
         <p className="rounded-md border border-danger/30 bg-danger/10 px-2.5 py-1.5 text-xs text-danger">{error}</p>
+      ) : null}
+
+      {captureBlocked ? (
+        <section className="rounded-panel border border-warn/40 bg-warn/10 p-3">
+          <h2 className="mb-1 flex items-center gap-1.5 text-xs font-semibold text-warn">
+            <Camera className="size-3.5" aria-hidden />
+            无法采集屏幕
+          </h2>
+          <p className="text-[0.72rem] leading-relaxed text-soft">
+            {device.presence.capture?.reason || device.presence.reason || "受控端当前没有可采集的桌面"}
+          </p>
+          <p className="mt-1 text-[0.68rem] leading-relaxed text-faint">
+            受控端服务运行在会话 0，只有用户登录并保持桌面会话时才能截屏。请在该机器上登录桌面（远程桌面窗口
+            断开也会停止采集），随后画面会自动恢复。
+          </p>
+        </section>
       ) : null}
 
       <section className="rounded-panel border border-line bg-panel p-3">

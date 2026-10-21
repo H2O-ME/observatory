@@ -322,6 +322,7 @@ class AgentRunner:
                     "username": state.get("username", ""),
                     "state": "active" if state.get("connected") else "connecting",
                     "is_console": bool(state.get("is_console")),
+                    "capturable": state.get("connectable", True),
                 }
             )
         return {
@@ -335,8 +336,43 @@ class AgentRunner:
                 "control": sorted(self._control.keys()),
                 "uptime_s": max(0, (int(time.time() * 1000) - self.started_at_ms) // 1000),
                 "updating": self._updating,
+                "capture": self._capture_health(),
             },
         }
+
+    def _capture_health(self) -> dict[str, Any]:
+        """Whether this host currently has a desktop the agent can capture.
+
+        Without this the console only saw "device online, no frames", which is
+        indistinguishable from a broken capture pipeline. The distinct cases are
+        reported explicitly instead.
+        """
+
+        workers = [sid for sid, pipe in self._pipes.items() if pipe.connected.is_set()]
+        errors = [
+            str(state.get("launch_error"))
+            for state in self._sessions.values()
+            if state.get("launch_error")
+        ]
+        if workers:
+            state, reason = "ok", ""
+        elif errors:
+            state, reason = "blocked", errors[0]
+        elif not self._sessions:
+            state, reason = "no_session", "当前没有已登录的交互式桌面（控制台未登录或已注销）"
+        else:
+            state, reason = "starting", "正在启动采屏进程"
+        return {
+            "state": state,
+            "reason": reason,
+            "workers": sorted(workers),
+            "sessions": len(self._sessions),
+        }
+
+    def _mark_capture_blocked(self, session_id: int, error: str) -> None:
+        state = self._sessions.setdefault(session_id, {})
+        state["connectable"] = False
+        state["launch_error"] = error
 
     async def _handle_message(self, message: dict) -> None:
         kind = message.get("t")
@@ -507,17 +543,20 @@ class AgentRunner:
                 return session_id
         return None
 
-    async def _handle_worker_result(self, session_id: int, header: dict) -> None:
+    async def _handle_worker_result(self, session_id: int, header: dict, payload: bytes = b"") -> None:
         command_id = str(header.get("id") or "")
         if not command_id:
             return
         self._pending.pop(command_id, None)
-        await self._send_result(
-            command_id,
-            bool(header.get("ok")),
-            header.get("result") if isinstance(header.get("result"), dict) else None,
-            header.get("error"),
-        )
+        result = header.get("result") if isinstance(header.get("result"), dict) else None
+        if result is not None and payload:
+            # A large file read travels as the pipe payload to stay under the
+            # header limit; put it back in the shape the console expects.
+            import base64
+
+            result = {**result, "data": base64.b64encode(payload).decode("ascii")}
+            result.pop("data_encoding", None)
+        await self._send_result(command_id, bool(header.get("ok")), result, header.get("error"))
 
     # -- updates -----------------------------------------------------------
     async def _maybe_update(self, info: dict) -> None:
@@ -617,10 +656,23 @@ class AgentRunner:
             )
             self._ensure_worker(session_id)
 
+        # Only a session that this loop itself tracks may be retired here. Worker
+        # hellos also report listener entries such as RDP-Tcp (session ids above
+        # 65535, state ``listen``); treating those as managed sessions made every
+        # scan "end" them and kill the worker that had just connected.
         for session_id in list(self._sessions):
-            if session_id not in active:
-                log.info("session %s ended, stopping worker", session_id)
-                self._stop_worker(session_id)
+            if session_id in active:
+                continue
+            if not self._manages_session(session_id):
+                self._sessions.pop(session_id, None)
+                continue
+            log.info("session %s ended, stopping worker", session_id)
+            self._stop_worker(session_id)
+
+    def _manages_session(self, session_id: int) -> bool:
+        """True when this process owns a worker (or pipe) for ``session_id``."""
+
+        return session_id in self._pipes or session_id in self._processes
 
     def _ensure_worker(self, session_id: int) -> None:
         pipe = self._pipes.get(session_id)
@@ -655,6 +707,22 @@ class AgentRunner:
         if self.service_mode:
             pid = launch_worker(session_id)
         if pid is None:
+            if self.service_mode:
+                # A service lives in session 0. Spawning the worker locally there
+                # yields a process with no desktop: it connects to the pipe and
+                # reports frames it cannot actually capture, which is worse than
+                # no worker at all. Record the failure and retry on the next scan
+                # instead of silently degrading.
+                self._launch_attempts[session_id] = (attempts + 1, now)
+                self._mark_capture_blocked(session_id, "无法进入用户会话，屏幕采集不可用")
+                log.error(
+                    "session %s: create-process-as-user failed, capture unavailable "
+                    "(attempt %s/%s)",
+                    session_id,
+                    attempts + 1,
+                    LAUNCH_RETRIES,
+                )
+                return
             process = spawn_local(worker_arguments(session_id))
             if process is not None:
                 self._processes[session_id] = process
@@ -707,7 +775,9 @@ class AgentRunner:
             elif kind == "ctrl":
                 loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self._forward_ctrl(header, payload)))
             elif kind == "result":
-                asyncio.run_coroutine_threadsafe(self._handle_worker_result(session_id, header), loop)
+                asyncio.run_coroutine_threadsafe(
+                    self._handle_worker_result(session_id, header, payload), loop
+                )
             elif kind == "hello":
                 state = self._sessions.setdefault(session_id, {})
                 state["connected"] = True

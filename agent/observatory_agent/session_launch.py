@@ -31,6 +31,12 @@ STARTF_USESHOWWINDOW = 0x00000001
 SW_HIDE = 0
 MAX_PATH = 260
 
+#: ``MAXIMUM_ALLOWED`` lives in ``win32con`` on every pywin32 build; older code
+#: referenced ``win32security.MAXIMUM_ALLOWED``, which does not exist and made
+#: every launch raise AttributeError, so the worker silently fell back to session 0
+#: where there is no desktop to capture.
+MAXIMUM_ALLOWED = 0x02000000
+
 
 class STARTUPINFOW(ctypes.Structure):
     _fields_ = (
@@ -135,7 +141,7 @@ def _create_process_as_user(session_id: int, command_line: str) -> int | None:
         token = win32ts.WTSQueryUserToken(session_id)
         duplicated = win32security.DuplicateTokenEx(
             token,
-            win32security.MAXIMUM_ALLOWED,
+            MAXIMUM_ALLOWED,
             None,
             win32security.SecurityImpersonation,
             win32security.TokenPrimary,

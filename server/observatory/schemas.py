@@ -23,6 +23,21 @@ class ApiBase(BaseModel):
 
 
 # ------------------------------------------------------------------ presence ---
+class CaptureHealthOut(ApiBase):
+    """Whether the agent currently has a desktop it can actually capture.
+
+    A service runs in session 0, so a host with nobody logged in has no screen to
+    grab. Reporting this explicitly is what stops the console from showing an
+    "online" device next to a timeline that never fills.
+    """
+
+    state: str = ""
+    reason: str = ""
+    sessions: int | None = None
+    workers: list[int] = Field(default_factory=list)
+    at_ms: int = 0
+
+
 class PresenceOut(ApiBase):
     state: PresenceState
     transport: TransportKind
@@ -33,6 +48,7 @@ class PresenceOut(ApiBase):
     # Which features actually work right now. The UI must gate on these rather
     # than inventing its own idea of "online".
     capabilities: dict[str, bool] = Field(default_factory=dict)
+    capture: CaptureHealthOut | None = None
 
 
 class DeviceOut(ApiBase):
