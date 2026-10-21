@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
 
@@ -26,7 +26,20 @@ export function TimelineView({ device }: { device: Device }) {
   const [hourTo, setHourTo] = useState(24);
   const [selected, setSelected] = useState<number | null>(null);
 
-  const now = Date.now();
+  // `Date.now()` must never enter the cache key. It changes on every render, so
+  // `["timeline", uid, from, to]` became a brand-new key each time, React Query
+  // re-fetched forever, and the view was stuck on its loading skeletons while
+  // firing an endless stream of timeline requests. A minute-resolution clock that
+  // only advances on a timer keeps the key stable between renders, while the
+  // window still moves forward as time passes.
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 60_000) * 60_000);
+  useEffect(() => {
+    const timer = window.setInterval(
+      () => setNow(Math.floor(Date.now() / 60_000) * 60_000),
+      60_000,
+    );
+    return () => window.clearInterval(timer);
+  }, []);
   const dayStart = startOfDay(now) - dayOffset * DAY;
   const from = dayStart + hourFrom * HOUR;
   const to = Math.min(dayStart + hourTo * HOUR, dayOffset === 0 ? now : dayStart + DAY);

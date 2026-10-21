@@ -540,6 +540,22 @@ def installer_flow(client: TestClient, headers: dict, version: str) -> None:
     types_source = (ROOT / "webui/src/lib/types.ts").read_text(encoding="utf-8")
     check("前端类型包含采屏健康", "CaptureHealth" in types_source)
 
+    # Console defects that are invisible to a type checker but obvious to a user:
+    # an unstable React Query key (infinite refetch, stuck skeletons) and a fetch
+    # with no deadline (the "正在连接 Observatory…" screen never resolves).
+    timeline_source = (ROOT / "webui/src/pages/device/timeline-view.tsx").read_text(encoding="utf-8")
+    check(
+        "时间轴不再把 Date.now() 放进缓存键",
+        "const now = Date.now()" not in timeline_source,
+        "缓存键必须稳定，否则会无限重取",
+    )
+    check("时间轴使用稳定的时钟值", "useState(() => Math.floor(Date.now()" in timeline_source)
+    check("时间轴按时推进窗口", "setInterval" in timeline_source)
+
+    api_source = (ROOT / "webui/src/lib/api.ts").read_text(encoding="utf-8")
+    check("前端请求带超时", "AbortController" in api_source and "REQUEST_TIMEOUT_MS" in api_source)
+    check("超时后抛可读错误", "请求超时" in api_source)
+
 
 def websockets_flow(client: TestClient, headers: dict, device_token: str, version: str) -> None:
     group("WebSocket 通道")

@@ -78,12 +78,42 @@ function errorDetail(payload: unknown, fallback: string): string {
   return fallback;
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    ...init,
-    headers: headers(init?.headers as Record<string, string> | undefined),
-    cache: "no-store",
-  });
+//: Every console request gets a deadline. Without one a stalled connection (a
+//: sleeping laptop, a captive portal that never answers, a dropped TLS handshake)
+//: leaves the promise pending forever, and `bootstrap()` never leaves the "正在
+//: 连接 Observatory…" screen even though the network looks fine.
+const REQUEST_TIMEOUT_MS = 20_000;
+
+async function request<T>(
+  path: string,
+  init?: RequestInit & { timeoutMs?: number },
+): Promise<T> {
+  const timeoutMs = (init as { timeoutMs?: number } | undefined)?.timeoutMs ?? REQUEST_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  // Honour a caller-provided signal in addition to our deadline.
+  const external = init?.signal;
+  if (external) {
+    if (external.aborted) controller.abort();
+    else external.addEventListener("abort", () => controller.abort(), { once: true });
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      ...init,
+      headers: headers(init?.headers as Record<string, string> | undefined),
+      cache: "no-store",
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (controller.signal.aborted && !external?.aborted) {
+      throw new ApiError(0, `请求超时（${Math.round(timeoutMs / 1000)} 秒无响应）`);
+    }
+    throw new ApiError(0, error instanceof Error ? error.message : "网络请求失败");
+  } finally {
+    window.clearTimeout(timer);
+  }
   if (response.status === 204) return undefined as T;
   const isJson = (response.headers.get("content-type") ?? "").includes("application/json");
   const payload = isJson ? await response.json() : await response.text();
