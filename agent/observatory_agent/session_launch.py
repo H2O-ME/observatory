@@ -134,19 +134,37 @@ def _create_process_as_user(session_id: int, command_line: str) -> int | None:
     userenv = ctypes.WinDLL("userenv", use_last_error=True)
 
     advapi32.CreateProcessAsUserW.restype = wintypes.BOOL
+    advapi32.DuplicateTokenEx.restype = wintypes.BOOL
+    advapi32.DuplicateTokenEx.argtypes = [
+        wintypes.HANDLE,  # hExistingToken
+        wintypes.DWORD,  # dwDesiredAccess
+        ctypes.c_void_p,  # lpTokenAttributes (NULL is allowed)
+        wintypes.DWORD,  # ImpersonationLevel
+        wintypes.DWORD,  # TokenType
+        ctypes.POINTER(wintypes.HANDLE),  # phNewToken
+    ]
     token = None
     duplicated = None
+    token_handle = None
     environment = ctypes.c_void_p()
     try:
         token = win32ts.WTSQueryUserToken(session_id)
-        duplicated = win32security.DuplicateTokenEx(
-            token,
+        # Call the API directly: pywin32's DuplicateTokenEx rejects ``None`` for
+        # TokenAttributes ("argument 3 must be int, not None") and there is no
+        # SECURITY_ATTRIBUTES typedef exposed by ctypes, while the native call
+        # accepts a NULL pointer for the default attributes.
+        duplicated = wintypes.HANDLE()
+        if not advapi32.DuplicateTokenEx(
+            int(token),
             MAXIMUM_ALLOWED,
             None,
             win32security.SecurityImpersonation,
             win32security.TokenPrimary,
-        )
-        if not userenv.CreateEnvironmentBlock(ctypes.byref(environment), duplicated, False):
+            ctypes.byref(duplicated),
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        token_handle = duplicated.value
+        if not userenv.CreateEnvironmentBlock(ctypes.byref(environment), token_handle, False):
             raise ctypes.WinError(ctypes.get_last_error())
 
         startup = STARTUPINFOW()
@@ -158,7 +176,7 @@ def _create_process_as_user(session_id: int, command_line: str) -> int | None:
 
         flags = CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW
         ok = advapi32.CreateProcessAsUserW(
-            duplicated,
+            token_handle,
             None,
             ctypes.c_wchar_p(command_line),
             None,
@@ -190,8 +208,8 @@ def _create_process_as_user(session_id: int, command_line: str) -> int | None:
                 userenv.DestroyEnvironmentBlock(environment)
             except Exception:  # noqa: BLE001
                 pass
-        for handle in (duplicated, token):
-            if handle is not None:
+        for handle in (token_handle, token):
+            if handle:
                 try:
                     win32api.CloseHandle(handle)
                 except Exception:  # noqa: BLE001
