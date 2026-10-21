@@ -33,6 +33,8 @@ DETACHED_PROCESS = 0x00000008
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 CREATE_NO_WINDOW = 0x08000000
 SWAP_WAIT_S = 120
+#: Name of the executable inside both the install directory and a staged payload.
+EXE_NAME = "observatory-agent.exe"
 
 
 async def apply_update(
@@ -125,16 +127,38 @@ def extract_payload(archive: Path, destination: Path) -> Path:
 
 
 def spawn_apply_helper(payload_root: Path, version: str) -> subprocess.Popen | None:
-    """Run a detached copy of ourselves to perform the swap."""
+    """Start a helper that can replace the install directory.
 
-    helper = STAGING_DIR / "observatory-updater.exe"
-    source = Path(sys.executable)
+    Two hard constraints shape this:
+
+    * The build is a PyInstaller ``onedir`` bundle, so an executable only runs
+      next to its ``_internal`` directory; copying just the exe into staging made
+      the helper die on startup and the update was refused forever.
+    * The helper cannot run from the payload directory itself, because applying
+      the update renames that directory into place with ``os.replace``.
+
+    So the payload is copied to a private staging directory first, and the helper
+    runs from there.
+    """
+
+    payload_root = Path(payload_root)
+    workdir = STAGING_DIR / f"apply-{version}-{int(time.time() * 1000) % 10_000_000}"
     try:
         STAGING_DIR.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, helper)
+        if workdir.exists():
+            shutil.rmtree(workdir, ignore_errors=True)
+        shutil.copytree(payload_root, workdir)
     except OSError as exc:
         log.error("could not stage updater: %s", exc)
         return None
+
+    helper = workdir / EXE_NAME
+    if not helper.is_file():
+        candidates = list(workdir.glob("*.exe"))
+        if not candidates:
+            log.error("no executable in payload %s", payload_root)
+            return None
+        helper = candidates[0]
 
     arguments = [
         str(helper),
@@ -150,6 +174,7 @@ def spawn_apply_helper(payload_root: Path, version: str) -> subprocess.Popen | N
     try:
         return subprocess.Popen(
             arguments,
+            cwd=str(workdir),
             creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
             stdin=subprocess.DEVNULL,
             # Keep the helper's stderr: when it fails to start, the reason is the

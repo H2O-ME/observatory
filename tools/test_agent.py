@@ -413,8 +413,9 @@ def helper_cli_contract() -> None:
     original_popen = updater.subprocess.Popen
 
     class _FakeProcess:
-        def __init__(self, arguments) -> None:
+        def __init__(self, arguments, **kwargs) -> None:
             captured["argv"] = list(arguments)
+            captured["cwd"] = kwargs.get("cwd")
 
         def poll(self):
             return None
@@ -425,12 +426,33 @@ def helper_cli_contract() -> None:
         def wait(self, timeout=None):
             return 0
 
-    updater.subprocess.Popen = lambda arguments, **kwargs: _FakeProcess(arguments)
+    updater.subprocess.Popen = lambda arguments, **kwargs: _FakeProcess(arguments, **kwargs)
+    staging_before = updater.STAGING_DIR
+    staged_ok = {}
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            helper = updater.spawn_apply_helper(Path(tmp) / "payload", "0.9.9")
+            root = Path(tmp)
+            updater.STAGING_DIR = root / "staging"
+            payload = root / "payload"
+            (payload / "_internal").mkdir(parents=True)
+            (payload / updater.EXE_NAME).write_bytes(b"MZ")
+            (payload / "_internal" / "lib.dll").write_bytes(b"dll")
+            helper = updater.spawn_apply_helper(payload, "0.9.9")
+            # Inspect while the temporary directory still exists.
+            argv_now = captured.get("argv") or []
+            helper_path = Path(argv_now[0]) if argv_now else Path("?")
+            staged_cwd = str(captured.get("cwd") or "")
+            staged_ok = {
+                "internal": (helper_path.parent / "_internal" / "lib.dll").is_file(),
+                "exe": helper_path.is_file(),
+                "not_payload": "payload" not in helper_path.parts,
+                "cwd": bool(staged_cwd) and Path(staged_cwd).is_dir(),
+                "path": str(helper_path),
+                "cwd_path": staged_cwd,
+            }
     finally:
         updater.subprocess.Popen = original_popen
+        updater.STAGING_DIR = staging_before
 
     argv = captured.get("argv") or []
     check("助手进程已启动", helper is not None)
@@ -442,6 +464,14 @@ def helper_cli_contract() -> None:
     except SystemExit:
         ok = False
     check("实际启动参数可被解析", ok, str(argv[1:]))
+
+    # A PyInstaller onedir build only runs next to its _internal directory, and the
+    # helper cannot run from the payload directory because applying the update
+    # renames it. Both constraints must hold in the spawned command.
+    check("助手目录携带 _internal", staged_ok.get("internal") is True, str(staged_ok.get("path")))
+    check("助手可执行文件存在", staged_ok.get("exe") is True, str(staged_ok.get("path")))
+    check("助手不在 payload 目录内运行", staged_ok.get("not_payload") is True, str(staged_ok.get("path")))
+    check("助手工作目录已就位", staged_ok.get("cwd") is True, str(staged_ok.get("cwd_path")))
 
     # A helper that dies instantly must abort the update instead of letting the
     # caller stop the service.
