@@ -23,13 +23,27 @@ export interface CaptureHealth {
 
 export interface Presence {
   state: PresenceState;
-  transport: TransportKind;
+  /*
+   * Transport and capabilities are optional on purpose: they were added to the
+   * payload after the first consoles shipped, so an older server may omit them.
+   * Read them through `@/lib/presence` helpers, which fall back to the server's
+   * own state→capabilities mapping instead of crashing on `undefined`.
+   */
+  transport?: TransportKind;
   reason: string;
   last_seen_ms: number;
   age_ms: number | null;
   channel_since_ms: number | null;
-  capabilities: Capabilities;
+  capabilities?: Capabilities;
   capture?: CaptureHealth | null;
+  /**
+   * Non-empty when this agent is too old (or its updater is broken) for the
+   * automatic upgrade path: the console must tell the operator to rerun the
+   * install script rather than wait forever. `null`/absent means "normal" and
+   * nothing should be rendered. Optional because the server field is newer
+   * than this console build.
+   */
+  self_update_blocked?: string | null;
 }
 
 export interface Device {

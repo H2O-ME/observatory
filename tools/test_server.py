@@ -674,6 +674,90 @@ def websockets_flow(client: TestClient, headers: dict, device_token: str, versio
     check("断开后不再显示在线", device["presence"]["state"] != "online", device["presence"]["state"])
 
 
+def update_gate_flow(client: TestClient, headers: dict, device_token: str, version: str) -> None:
+    """Only agents that can safely finish an upgrade may be offered one.
+
+    Pre-0.2.5 agents apply updates with a helper that copies the exe out of its
+    onedir bundle, dies immediately, and still stops the old service — pushing an
+    update to them disconnects the device forever. The same version gate must
+    cover every transport, and presence must explain the silence.
+    """
+
+    group("自动更新版本闸")
+
+    from observatory.services.packages import MIN_SELF_UPDATE_VERSION, can_self_update
+
+    check("最低可自行升级版本为 0.2.5", MIN_SELF_UPDATE_VERSION == "0.2.5", MIN_SELF_UPDATE_VERSION)
+    for older in ("0.1.9", "0.2.0", "0.2.1", "0.2.4"):
+        check(f"{older} 判定为不可自行升级", can_self_update(older) is False, older)
+    for newer in ("0.2.5", "0.2.6", "0.2.7"):
+        check(f"{newer} 判定为可自行升级", can_self_update(newer) is True, newer)
+    check("版本未知判定为不可自行升级", can_self_update("") is False)
+    check("非法版本判定为不可自行升级", can_self_update("not-a-version") is False)
+
+    def heartbeat(agent_version: str) -> dict:
+        response = client.post(
+            "/api/v1/agent/heartbeat",
+            headers={"X-Device-Token": device_token},
+            json={"agent_version": agent_version},
+        )
+        check(f"{agent_version} 心跳成功", response.status_code == 200, response.text[:160])
+        return response.json()
+
+    def presence() -> dict:
+        return client.get("/api/v1/devices/OBS-TEST0001", headers=headers).json()["device"]["presence"]
+
+    # 0.2.0 is exactly the fleet that must be protected while 0.2.7 is on disk.
+    older = heartbeat("0.2.0")
+    check("旧版心跳不下发 update", older.get("update") is None, str(older.get("update"))[:160])
+    polled = client.get("/api/v1/agent/commands?wait=0", headers={"X-Device-Token": device_token}).json()
+    check("旧版轮询也不下发 update", polled.get("update") is None, str(polled.get("update"))[:160])
+    blocked = presence()
+    check("旧版 presence 给出阻止原因", bool(blocked.get("self_update_blocked")), str(blocked))
+    check("阻止原因包含实际版本", "0.2.0" in (blocked.get("self_update_blocked") or ""), str(blocked.get("self_update_blocked")))
+    check("阻止原因指向重装脚本", "安装脚本" in (blocked.get("self_update_blocked") or ""), str(blocked.get("self_update_blocked")))
+
+    # A build that can upgrade itself still gets the package.
+    updatable = heartbeat("0.2.6")
+    update = updatable.get("update")
+    check("可自行升级版本收到 update", isinstance(update, dict), str(update)[:160])
+    if isinstance(update, dict):
+        check("update 指向最新安装包", update.get("version") == version, str(update.get("version")))
+        check(
+            "update 具备统一下发字段",
+            {"version", "url", "sha256", "size_bytes"} <= set(update),
+            str(sorted(update)),
+        )
+        check("update 携带下载地址", str(update.get("url") or "").startswith("/api/v1/public/agent/"), str(update.get("url")))
+    check("可自行升级版本无阻止原因", presence().get("self_update_blocked") is None, str(presence().get("self_update_blocked")))
+
+    # Already latest: no update, and no scary "blocked" message either.
+    current = heartbeat(version)
+    check("最新版不下发 update", current.get("update") is None, str(current.get("update"))[:160])
+    check("最新版无阻止原因", presence().get("self_update_blocked") is None, str(presence().get("self_update_blocked")))
+
+    # Welcome and pong carry the same gate as HTTP; the agent trusts whichever
+    # transport it happens to reconnect on.
+    heartbeat("0.2.0")
+    with client.websocket_connect("/api/v1/agent/ws", headers={"X-Device-Token": device_token}) as socket:
+        welcome = socket.receive_json()
+        check("旧版 welcome 不下发 update", welcome.get("update") is None, str(welcome.get("update"))[:160])
+        socket.send_json({"t": "heartbeat", "agent_version": "0.2.0"})
+        pong = socket.receive_json()
+        check("旧版 pong 不下发 update", pong.get("t") == "pong" and pong.get("update") is None, str(pong)[:160])
+
+    heartbeat("0.2.6")
+    with client.websocket_connect("/api/v1/agent/ws", headers={"X-Device-Token": device_token}) as socket:
+        welcome = socket.receive_json()
+        check("可自行升级版本 welcome 带 update", isinstance(welcome.get("update"), dict), str(welcome.get("update"))[:160])
+        socket.send_json({"t": "heartbeat", "agent_version": "0.2.6"})
+        pong = socket.receive_json()
+        check("可自行升级版本 pong 带 update", pong.get("t") == "pong" and isinstance(pong.get("update"), dict), str(pong)[:160])
+
+    # Leave the enrolled device exactly as the rest of the suite found it.
+    heartbeat("0.2.0")
+
+
 def audit_flow(client: TestClient, headers: dict) -> None:
     group("审计")
     audit = client.get("/api/v1/audit?limit=100", headers=headers).json()
@@ -804,6 +888,7 @@ def main() -> int:
         frame_flow(client, headers, device_token)
         settings_flow(client, headers)
         packages_flow(client, headers, version)
+        update_gate_flow(client, headers, device_token, version)
         domain_policy(client, version)
         installer_flow(client, headers, version)
         websockets_flow(client, headers, device_token, version)

@@ -49,6 +49,10 @@ class PresenceOut(ApiBase):
     # than inventing its own idea of "online".
     capabilities: dict[str, bool] = Field(default_factory=dict)
     capture: CaptureHealthOut | None = None
+    # Why the console must not wait for an automatic upgrade, or None when the
+    # agent is new enough to upgrade itself. The server never pushes ``update`` to
+    # a device that reports a reason here (see services.packages.can_self_update).
+    self_update_blocked: str | None = None
 
 
 class DeviceOut(ApiBase):

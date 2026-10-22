@@ -1,5 +1,6 @@
 import { formatAge } from "@/lib/format";
-import type { Presence } from "@/lib/types";
+import { transportOf } from "@/lib/presence";
+import type { Presence, TransportKind } from "@/lib/types";
 import { useAge } from "@/hooks/use-server-now";
 import { cn } from "@/lib/utils";
 
@@ -27,7 +28,7 @@ const DOTS: Record<Presence["state"], string> = {
   uninstalled: "bg-danger",
 };
 
-const TRANSPORT_LABELS: Record<Presence["transport"], string> = {
+const TRANSPORT_LABELS: Record<TransportKind, string> = {
   ws: "实时通道",
   poll: "轮询",
   none: "无通道",
@@ -50,6 +51,7 @@ interface Props {
  */
 export function StatusBadge({ presence, stale = false, compact = false, className }: Props) {
   const age = useAge(presence.last_seen_ms);
+  const transport = transportOf(presence);
   const unknown = stale && presence.state !== "uninstalled" && (age === null || age > 120_000);
 
   if (unknown) {
@@ -70,8 +72,8 @@ export function StatusBadge({ presence, stale = false, compact = false, classNam
   const label = LABELS[presence.state];
   const detail =
     presence.state === "online"
-      ? TRANSPORT_LABELS[presence.transport]
-      : presence.transport === "poll"
+      ? TRANSPORT_LABELS[transport]
+      : transport === "poll"
         ? "仅轮询"
         : presence.reason;
 

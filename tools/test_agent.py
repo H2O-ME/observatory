@@ -564,13 +564,360 @@ def update_retry_and_cleanup() -> None:
         check("清理半成品", not (staging / "keep.part").exists(), str(left))
 
 
+def transport_upgrade() -> None:
+    """缺陷 1 回归：WebSocket 探测成功后必须真的切换过去。
+
+    旧代码里 ``_upgrade_probe`` 只改 ``self.level`` 并调用 ``PollChannel.close()``，
+    而那是继承来的 no-op；轮询的 ``while True`` 不感知关闭，``_network_loop``
+    一直阻塞在 ``await run_task``，等轮询自己失败后又把级别降回 short-poll。
+    这个用例断言：探测成功后确实 cancel 了轮询通道、以 LEVEL_WS 建新通道，
+    并且 WS 真的不可用时仍会降级。
+    """
+
+    group("传输升级")
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+
+    from observatory_agent import runner as runner_module
+    from observatory_agent.transport import LEVEL_POLL_LONG, LEVEL_POLL_SHORT, LEVEL_WS
+
+    def make_runner(channels_state: dict, probe_ok: bool, stopping: threading.Event):
+        runner = runner_module.AgentRunner.__new__(runner_module.AgentRunner)
+        runner.store = SimpleNamespace(config=SimpleNamespace(setting=lambda *a, **k: 20))
+        runner.client = object()
+        runner._stopping = stopping
+        runner._stop_event = asyncio.Event()
+        runner._upgrade_requested = asyncio.Event()
+        runner.level = channels_state["start_level"]
+        runner._connected = False
+        runner.channel = None
+        runner._pipes = {}
+        runner._processes = {}
+        runner._sessions = {}
+        runner._launch_attempts = {}
+
+        async def enrolled():
+            return True
+
+        async def report(_stage):
+            return None
+
+        async def probe():
+            return probe_ok
+
+        runner._ensure_enrolled = enrolled
+        runner._report_state = report
+        runner._probe_ws = probe
+
+        original_sleep = runner_module.AgentRunner._sleep_or_stop
+
+        async def recording_sleep(seconds):
+            channels_state["sleeps"].append(float(seconds))
+            await original_sleep(runner, seconds)
+
+        runner._sleep_or_stop = recording_sleep
+        return runner
+
+    class FakeChannel:
+        def __init__(self, level, state):
+            self.level = level
+            self.kind = "ws" if level == LEVEL_WS else "poll"
+            self.ready = asyncio.Event()
+            self.cancelled = False
+            self.state = state
+
+        async def run(self, handler, heartbeat_s):
+            try:
+                self.ready.set()
+                if self.level == LEVEL_WS:
+                    self.state["ws_ready"].set()
+                    await self.state["ws_end"].wait()
+                    raise RuntimeError("测试主动断开 websocket")
+                self.state["poll_ready"].set()
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+
+        async def close(self):
+            return None
+
+    def install(state, start_level):
+        state.update(
+            {
+                "start_level": start_level,
+                "channels": [],
+                "levels": [],
+                "sleeps": [],
+                "ws_ready": asyncio.Event(),
+                "ws_end": asyncio.Event(),
+                "poll_ready": asyncio.Event(),
+            }
+        )
+
+        original_build = runner_module.build_channel
+        original_probe_delay = runner_module.UPGRADE_PROBE_BASE_S
+        original_backoff = runner_module.RECONNECT_BACKOFF_S
+
+        def fake_build(level, client, provider):
+            channel = FakeChannel(level, state)
+            state["channels"].append(channel)
+            state["levels"].append(level)
+            return channel
+
+        runner_module.build_channel = fake_build
+        # 探测间隔和重连退避都缩短到毫秒级，测试不需要真的等两分钟。
+        runner_module.UPGRADE_PROBE_BASE_S = 0.01
+        runner_module.RECONNECT_BACKOFF_S = (0.05, 0.05)
+
+        def restore():
+            runner_module.build_channel = original_build
+            runner_module.UPGRADE_PROBE_BASE_S = original_probe_delay
+            runner_module.RECONNECT_BACKOFF_S = original_backoff
+
+        return restore
+
+    async def scenario_upgrade() -> dict:
+        state: dict = {}
+        stopping = threading.Event()
+        restore = install(state, LEVEL_POLL_SHORT)
+        runner = make_runner(state, probe_ok=True, stopping=stopping)
+        task = asyncio.create_task(runner._network_loop())
+        result = dict(state)
+        result["timeout"] = False
+        try:
+            await asyncio.wait_for(state["ws_ready"].wait(), timeout=5)
+            result["level_after_upgrade"] = runner.level
+            result["levels_seen"] = list(state["levels"])
+            result["poll_cancelled"] = state["channels"][0].cancelled
+            result["sleeps"] = list(state["sleeps"])
+            # 先置停止位再放行 WS，让循环走正常退出路径而不是被 cancel。
+            stopping.set()
+            state["ws_end"].set()
+            await asyncio.wait_for(task, timeout=5)
+        except asyncio.TimeoutError:
+            result["timeout"] = True
+        finally:
+            stopping.set()
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            restore()
+        result["pending"] = [
+            item for item in asyncio.all_tasks() if item is not asyncio.current_task() and not item.done()
+        ]
+        return result
+
+    upgrade = asyncio.run(scenario_upgrade())
+    check("升级后确实建立了 WebSocket 通道", not upgrade["timeout"], str(upgrade.get("levels_seen")))
+    check(
+        "升级路径不经过任何降级级别",
+        upgrade.get("levels_seen") == [LEVEL_POLL_SHORT, LEVEL_WS],
+        str(upgrade.get("levels_seen")),
+    )
+    check("升级时轮询通道被主动取消", upgrade.get("poll_cancelled") is True, str(upgrade.get("poll_cancelled")))
+    check("升级后级别保持为 ws", upgrade.get("level_after_upgrade") == LEVEL_WS, str(upgrade.get("level_after_upgrade")))
+    check("升级不按断线退避等待", 0.05 not in upgrade.get("sleeps", []), str(upgrade.get("sleeps")))
+    check("升级过程不泄漏 task", not upgrade.get("pending"), str(upgrade.get("pending")))
+
+    async def scenario_degrade() -> dict:
+        state: dict = {}
+        stopping = threading.Event()
+        restore = install(state, LEVEL_WS)
+        runner = make_runner(state, probe_ok=False, stopping=stopping)
+
+        # WS 建连即失败，必须按阶梯降到 long-poll。
+        class FailingWs(FakeChannel):
+            async def run(self, handler, heartbeat_s):
+                raise RuntimeError("websocket 不可用")
+
+        install_build = runner_module.build_channel
+
+        def fake_build(level, client, provider):
+            if level == LEVEL_WS:
+                state["levels"].append(level)
+                return FailingWs(level, state)
+            return install_build(level, client, provider)
+
+        runner_module.build_channel = fake_build
+        task = asyncio.create_task(runner._network_loop())
+        result = {"timeout": False}
+        try:
+            await asyncio.wait_for(state["poll_ready"].wait(), timeout=5)
+            result["levels_seen"] = list(state["levels"])
+            result["level_after_degrade"] = runner.level
+        except asyncio.TimeoutError:
+            result["timeout"] = True
+            result["levels_seen"] = list(state["levels"])
+        finally:
+            stopping.set()
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            restore()
+        result["pending"] = [
+            item for item in asyncio.all_tasks() if item is not asyncio.current_task() and not item.done()
+        ]
+        return result
+
+    degrade = asyncio.run(scenario_degrade())
+    check("WS 不可用时降级到 long-poll", not degrade["timeout"] and degrade["level_after_degrade"] == LEVEL_POLL_LONG, str(degrade))
+    check("降级阶梯未被破坏", degrade.get("levels_seen") == [LEVEL_WS, LEVEL_POLL_LONG], str(degrade.get("levels_seen")))
+    check("降级过程不泄漏 task", not degrade.get("pending"), str(degrade.get("pending")))
+
+
+def ghost_session_backoff() -> None:
+    """缺陷 2 回归：没有登录用户的幽灵会话不再无限快速重试。
+
+    旧代码在 5 次失败后把 ``_launch_attempts`` 清零，下一次扫描（5 秒后）因为
+    ``attempts == 0`` 直接跳过冷却，等于 30 秒一轮的死循环；同时 heartbeat 的
+    ``capture`` 依赖这里的失败信息，修复不能把可观测性一起吞掉。
+    """
+
+    group("幽灵会话退避")
+    import asyncio
+    import threading
+    import time as time_module
+
+    from observatory_agent import runner as runner_module
+    from observatory_agent import sysinfo as sysinfo_module
+
+    # -- 1) 没有登录用户名的会话不拉起 worker，但仍如实上报 no_session -------
+    runner = runner_module.AgentRunner.__new__(runner_module.AgentRunner)
+    runner._sessions = {}
+    runner._pipes = {}
+    runner._processes = {}
+    runner._launch_attempts = {}
+    launches: list[int] = []
+    runner._ensure_worker = lambda session_id: launches.append(session_id)
+
+    original_list = sysinfo_module.list_sessions
+    original_console = sysinfo_module.console_session_id
+    sysinfo_module.list_sessions = lambda: [
+        {"session_id": 1, "username": "", "state": "active", "is_console": False},
+        {"session_id": 2, "username": "Administrator", "state": "active", "is_console": True},
+    ]
+    sysinfo_module.console_session_id = lambda: 2
+    try:
+        asyncio.run(runner_module.AgentRunner._scan_sessions(runner))
+    finally:
+        sysinfo_module.list_sessions = original_list
+        sysinfo_module.console_session_id = original_console
+
+    check("没有登录用户的会话不拉起采屏进程", launches == [2], str(launches))
+    check("幽灵会话被标记为不可采集", runner._sessions.get(1, {}).get("connectable") is False, str(runner._sessions.get(1)))
+    check("真实桌面会话仍会拉起", runner._sessions.get(2, {}).get("connectable") is True, str(runner._sessions.get(2)))
+
+    only_ghost = runner_module.AgentRunner.__new__(runner_module.AgentRunner)
+    only_ghost._pipes = {}
+    only_ghost._sessions = {1: {"username": "", "connectable": False}}
+    health = runner_module.AgentRunner._capture_health(only_ghost)
+    check("只有幽灵会话时上报 no_session", health["state"] == "no_session", str(health))
+    check("no_session 带可读原因", "桌面" in health["reason"] or "采集" in health["reason"], health["reason"])
+
+    # -- 2) 拉起失败使用递进退避，且连接成功后重置 --------------------------
+    worker = runner_module.AgentRunner.__new__(runner_module.AgentRunner)
+    worker.service_mode = True
+    worker._sessions = {}
+    worker._processes = {}
+    worker._launch_attempts = {}
+
+    class FakePipe:
+        def __init__(self) -> None:
+            self.connected = threading.Event()
+
+    pipe = FakePipe()
+    worker._pipes = {7: pipe}
+
+    calls = {"launch": 0}
+    original_launch = runner_module.launch_worker
+
+    def failing_launch(session_id):
+        calls["launch"] += 1
+        return None
+
+    runner_module.launch_worker = failing_launch
+    try:
+        worker._ensure_worker(7)
+        first_attempts = worker._launch_attempts.get(7, (0, 0.0))[0]
+        check("拉起失败记录失败次数", first_attempts == 1, str(worker._launch_attempts))
+        # 冷却窗口内立即再扫描一次，不能重试。
+        worker._ensure_worker(7)
+        check("冷却窗口内不重试", calls["launch"] == 1, str(calls))
+
+        # 模拟 30 秒冷却到期：失败次数必须保留并继续递增。
+        worker._launch_attempts[7] = (1, time_module.monotonic() - 31.0)
+        worker._ensure_worker(7)
+        check("退避到期后重试且次数递增", calls["launch"] == 2 and worker._launch_attempts[7][0] == 2, str(worker._launch_attempts))
+
+        # 连续失败 5 次以后：旧代码在这里清零并立即重来；新代码必须保留计数、
+        # 按长退避重试（上限 30 分钟）。
+        worker._launch_attempts[7] = (
+            runner_module.LAUNCH_RETRIES,
+            time_module.monotonic() - runner_module.LAUNCH_BACKOFF_MAX_S - 1,
+        )
+        before = calls["launch"]
+        worker._ensure_worker(7)
+        check("达到快速重试上限后仍按长退避重试", calls["launch"] == before + 1, str(calls))
+        check(
+            "达到上限后失败次数不被清零",
+            worker._launch_attempts[7][0] == runner_module.LAUNCH_RETRIES + 1,
+            str(worker._launch_attempts),
+        )
+
+        # 长退避窗口内反复扫描（模拟每 5 秒一次的 session scan）不得再拉起。
+        worker._launch_attempts[7] = (6, time_module.monotonic())
+        before = calls["launch"]
+        for _ in range(10):
+            worker._ensure_worker(7)
+        check("长退避窗口内反复扫描不重试", calls["launch"] == before, str(calls))
+
+        # 可观测性：失败期间 capture 仍如实报告 blocked 及原因。
+        blocked = runner_module.AgentRunner._capture_health(worker)
+        check(
+            "拉起失败时 capture 上报 blocked",
+            blocked["state"] == "blocked" and "屏幕采集" in blocked["reason"],
+            str(blocked),
+        )
+
+        check(
+            "退避按 30s→60s→… 递进",
+            [
+                worker._launch_backoff(1),
+                worker._launch_backoff(2),
+                worker._launch_backoff(3),
+                worker._launch_backoff(4),
+            ]
+            == [30.0, 60.0, 120.0, 240.0],
+            str([worker._launch_backoff(n) for n in (1, 2, 3, 4)]),
+        )
+        check("退避上限 30 分钟", worker._launch_backoff(99) == 1800.0, str(worker._launch_backoff(99)))
+
+        # 连接成功后必须重置退避状态。
+        pipe.connected.set()
+        worker._ensure_worker(7)
+        check("连上后重置退避", 7 not in worker._launch_attempts, str(worker._launch_attempts))
+        check("连上后清除阻塞标记", "launch_error" not in worker._sessions.get(7, {}), str(worker._sessions.get(7)))
+    finally:
+        runner_module.launch_worker = original_launch
+
+
 def main() -> int:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     print(f"Observatory 受控端自检 · {version} · Python {sys.version.split()[0]}")
     version_and_config()
     framing()
     transport()
+    transport_upgrade()
     session_lifecycle()
+    ghost_session_backoff()
     large_result_transport()
     helper_cli_contract()
     update_retry_and_cleanup()

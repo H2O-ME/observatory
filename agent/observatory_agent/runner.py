@@ -45,6 +45,9 @@ log = logging.getLogger(__name__)
 SESSION_SCAN_S = 5.0
 LAUNCH_RETRIES = 5
 LAUNCH_COOLDOWN_S = 30.0
+#: 连续拉起失败后的递进退避上限：30s → 60s → … → 30 分钟。没有递进时，一台没有
+#: 真实用户令牌的残留会话会每 30 秒重试一次，日志刷屏且白耗 CPU（设备 1 实测）。
+LAUNCH_BACKOFF_MAX_S = 1800.0
 RECONNECT_BACKOFF_S = (2, 5, 10, 20, 30, 60, 120)
 UPGRADE_PROBE_BASE_S = 120
 FRAME_QUEUE_SIZE = 64
@@ -80,9 +83,15 @@ class AgentRunner:
         self.channel: Channel | None = None
         self.level = LEVEL_WS
         self._connected = False
+        #: 升级到 WebSocket 的显式信号。探测成功后置位，``_network_loop`` 据此
+        #: 主动结束当前轮询通道并以 ``LEVEL_WS`` 重连，而不是等轮询自己失败后再
+        #: 被降级逻辑把级别覆盖回 short-poll。
+        self._upgrade_requested = asyncio.Event()
 
         self._pipes: dict[int, PipeServer] = {}
         self._processes: dict[int, subprocess.Popen] = {}
+        #: ``session_id -> (连续拉起失败次数, 上次尝试的 monotonic 时间)``。失败
+        #: 次数只增不清，冷却时间由 :meth:`_launch_backoff` 递进计算。
         self._launch_attempts: dict[int, tuple[int, float]] = {}
         self._sessions: dict[int, dict[str, Any]] = {}
         self._frame_queue: asyncio.Queue | None = None
@@ -174,6 +183,12 @@ class AgentRunner:
                 await asyncio.sleep(15)
                 continue
 
+            if self._upgrade_requested.is_set():
+                # 上一轮结束时探测恰好成功：不论那一轮做了怎样的降级判断，都按
+                # 升级结果用 WebSocket 重连（信号在这里消费掉）。
+                self.level = LEVEL_WS
+                self._upgrade_requested.clear()
+
             level = min(self.level, LEVEL_POLL_SHORT)
             channel = build_channel(level, self.client, self._heartbeat_payload)
             self.channel = channel
@@ -181,6 +196,8 @@ class AgentRunner:
 
             run_task = asyncio.create_task(channel.run(self._handle_message, self.heartbeat_interval), name="channel")
             ready_task = asyncio.create_task(channel.ready.wait(), name="ready")
+            probe_task: asyncio.Task | None = None
+            upgraded = False
             try:
                 done, _pending = await asyncio.wait(
                     {run_task, ready_task}, return_when=asyncio.FIRST_COMPLETED
@@ -194,17 +211,27 @@ class AgentRunner:
                     backoff = 0
                     log.info("connected via %s", level_name(level))
                     await self._report_state("connected")
-                    if level != LEVEL_WS:
-                        asyncio.create_task(self._upgrade_probe(level), name="upgrade")
-                    try:
-                        await run_task
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as exc:  # noqa: BLE001
-                        log.warning("transport %s ended: %s", level_name(level), exc)
-                    if not self._stopping.is_set():
+                    if level == LEVEL_WS:
+                        try:
+                            await run_task
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("transport %s ended: %s", level_name(level), exc)
+                    else:
+                        probe_task = asyncio.create_task(self._upgrade_probe(level), name="upgrade")
+                        upgraded = await self._wait_channel_end(run_task, level)
+                    if upgraded:
+                        # 通道是被升级信号主动结束的：保留 LEVEL_WS，跳过降级步进。
+                        log.info("switching transport to ws (upgrade confirmed)")
+                    elif not self._stopping.is_set():
                         log.warning("transport %s closed", level_name(level))
-                        self.level = min(level + 1, LEVEL_POLL_SHORT)
+                        if self.level == LEVEL_WS:
+                            # 探测恰好在这一刻成功：保留升级结果，事件在下一轮被
+                            # 消费，绝不能被下面的降级步进覆盖。
+                            upgraded = True
+                        else:
+                            self.level = min(level + 1, LEVEL_POLL_SHORT)
                 else:
                     # The channel died before it was usable.
                     error = None
@@ -225,9 +252,15 @@ class AgentRunner:
             finally:
                 self._connected = False
                 self.channel = None
-                for task in (run_task, ready_task):
+                pending = [task for task in (run_task, ready_task, probe_task) if task is not None]
+                for task in pending:
                     if not task.done():
                         task.cancel()
+                # 收尾被取消的 task，避免留下悬挂协程或 "Task was destroyed" 警告。
+                try:
+                    await asyncio.gather(*pending, return_exceptions=True)
+                except asyncio.CancelledError:
+                    raise
                 try:
                     await channel.close()
                 except Exception:  # noqa: BLE001
@@ -235,10 +268,53 @@ class AgentRunner:
 
             if self._stopping.is_set():
                 break
+            if upgraded:
+                # 升级是主动切换，不该按断线重连的退避等待，下一轮直接建 WebSocket。
+                continue
             delay = RECONNECT_BACKOFF_S[min(backoff, len(RECONNECT_BACKOFF_S) - 1)]
             backoff += 1
             log.info("reconnecting in %.0fs", delay)
             await self._sleep_or_stop(delay)
+
+    async def _wait_channel_end(self, run_task: asyncio.Task, level: int) -> bool:
+        """等待在线通道结束，或收到 WebSocket 升级信号。
+
+        返回 ``True`` 表示通道是被升级信号主动结束的（调用方必须保留
+        ``LEVEL_WS``，不能再降级）；``False`` 表示通道自己断了（调用方按阶梯降级）。
+        """
+
+        request_task = asyncio.create_task(self._upgrade_requested.wait(), name="upgrade-request")
+        try:
+            done, _pending = await asyncio.wait(
+                {run_task, request_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+        except asyncio.CancelledError:
+            request_task.cancel()
+            raise
+        upgrade = request_task in done and not request_task.cancelled() and request_task.result()
+        if not request_task.done():
+            request_task.cancel()
+            try:
+                await request_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        if upgrade:
+            # 升级：显式结束当前轮询通道。PollChannel 没有关闭语义（继承的
+            # ``Channel.close`` 是 no-op，``run`` 也不感知关闭），只能 cancel。
+            run_task.cancel()
+            try:
+                await run_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            return True
+        # 通道自己结束：把异常写进日志，交由调用方降级。
+        try:
+            run_task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            log.warning("transport %s ended: %s", level_name(level), exc)
+        return False
 
     async def _upgrade_probe(self, current_level: int) -> None:
         """Periodically try to climb back to the WebSocket."""
@@ -250,10 +326,10 @@ class AgentRunner:
                 return
             if await self._probe_ws():
                 log.info("websocket reachable again, upgrading from %s", level_name(current_level))
+                # 先落到 LEVEL_WS 再发信号：``_network_loop`` 收到信号后会 cancel
+                # 当前轮询通道并跳过降级步进，下一轮直接用 WsChannel 重建连接。
                 self.level = LEVEL_WS
-                channel = self.channel
-                if channel is not None:
-                    await channel.close()
+                self._upgrade_requested.set()
                 return
             delay = min(delay * 2, 1800)
 
@@ -361,11 +437,15 @@ class AgentRunner:
             for state in self._sessions.values()
             if state.get("launch_error")
         ]
+        # 只有带真实登录用户名的会话才可能有可采集的桌面。残留会话（例如
+        # session 1，WTSQueryUserToken 返回 1008）永远采不了屏，如实报
+        # no_session，不能一直显示"正在启动"。
+        has_user = any(str(state.get("username") or "").strip() for state in self._sessions.values())
         if workers:
             state, reason = "ok", ""
         elif errors:
             state, reason = "blocked", errors[0]
-        elif not self._sessions:
+        elif not self._sessions or not has_user:
             state, reason = "no_session", "当前没有已登录的交互式桌面（控制台未登录或已注销）"
         else:
             state, reason = "starting", "正在启动采屏进程"
@@ -677,12 +757,24 @@ class AgentRunner:
 
         for session_id, item in active.items():
             state = self._sessions.setdefault(session_id, {})
+            username = str(item.get("username") or "").strip()
+            previous = str(state.get("username") or "")
             state.update(
                 {
-                    "username": item.get("username", ""),
+                    "username": username,
                     "is_console": int(session_id) == console,
                 }
             )
+            if not username:
+                # 没有登录用户名的会话拿不到用户令牌（WTSQueryUserToken 返回
+                # 1008），拉起 worker 必然失败；它本身也没有可采集的桌面，属
+                # 环境限制。只记录状态供 heartbeat 的 capture 上报，不再拉起。
+                state["connectable"] = False
+                self._launch_attempts.pop(session_id, None)
+                if previous:
+                    log.info("session %s 没有登录用户，跳过采屏进程（无法采集屏幕）", session_id)
+                continue
+            state["connectable"] = True
             self._ensure_worker(session_id)
 
         # Only a session that this loop itself tracks may be retired here. Worker
@@ -703,6 +795,24 @@ class AgentRunner:
 
         return session_id in self._pipes or session_id in self._processes
 
+    def _launch_backoff(self, failures: int) -> float:
+        """连续拉起失败 ``failures`` 次后的冷却秒数：30s → 60s → … → 30 分钟。
+
+        没有递进时，一个永远拿不到用户令牌的残留会话会每 30 秒重试一次，日志
+        每 30 秒刷一行、白耗 CPU（设备 1 实测持续数小时）。
+        """
+
+        if failures <= 0:
+            return 0.0
+        # 30 * 2**10 已远超上限，限制指数避免大整数运算。
+        exponent = min(failures - 1, 10)
+        return min(LAUNCH_COOLDOWN_S * (2**exponent), LAUNCH_BACKOFF_MAX_S)
+
+    def _note_launch_failure(self, session_id: int, failures: int, now: float) -> None:
+        """记录一次拉起失败；连续失败次数只增不清，供递进退避使用。"""
+
+        self._launch_attempts[session_id] = (failures, now)
+
     def _ensure_worker(self, session_id: int) -> None:
         pipe = self._pipes.get(session_id)
         if pipe is None:
@@ -711,27 +821,31 @@ class AgentRunner:
             self._pipes[session_id] = pipe
 
         if pipe.connected.is_set():
-            self._launch_attempts[session_id] = (0, time.monotonic())
+            # 成功连上即重置退避与失败标记，下次断开从最短冷却重新开始。
+            self._launch_attempts.pop(session_id, None)
+            self._sessions.setdefault(session_id, {}).pop("launch_error", None)
             return
 
         process = self._processes.get(session_id)
         if process is not None and process.poll() is None:
             return
 
-        attempts, last_attempt = self._launch_attempts.get(session_id, (0, 0.0))
+        failures, last_attempt = self._launch_attempts.get(session_id, (0, 0.0))
         now = time.monotonic()
-        if attempts and now - last_attempt < LAUNCH_COOLDOWN_S:
+        cooldown = self._launch_backoff(failures)
+        if failures and now - last_attempt < cooldown:
             return
-        if attempts >= LAUNCH_RETRIES:
-            log.error(
-                "session %s: giving up after %s launch attempts (retrying after cooldown)",
+        if failures >= LAUNCH_RETRIES:
+            # 快速重试阶段已经结束，只在退避到期真正重试时留下一行日志，
+            # 不再每 30 秒重复 "launching/giving up"。
+            log.warning(
+                "session %s: 已连续 %s 次拉起失败，按递进退避重试（本次冷却 %.0fs）",
                 session_id,
-                attempts,
+                failures,
+                cooldown,
             )
-            self._launch_attempts[session_id] = (0, now)
-            return
 
-        log.info("launching worker for session %s (attempt %s)", session_id, attempts + 1)
+        log.info("launching worker for session %s (attempt %s)", session_id, failures + 1)
         pid: int | None = None
         if self.service_mode:
             pid = launch_worker(session_id)
@@ -740,24 +854,24 @@ class AgentRunner:
                 # A service lives in session 0. Spawning the worker locally there
                 # yields a process with no desktop: it connects to the pipe and
                 # reports frames it cannot actually capture, which is worse than
-                # no worker at all. Record the failure and retry on the next scan
+                # no worker at all. Record the failure and retry with backoff
                 # instead of silently degrading.
-                self._launch_attempts[session_id] = (attempts + 1, now)
+                self._note_launch_failure(session_id, failures + 1, now)
                 self._mark_capture_blocked(session_id, "无法进入用户会话，屏幕采集不可用")
                 log.error(
                     "session %s: create-process-as-user failed, capture unavailable "
-                    "(attempt %s/%s)",
+                    "(attempt %s, next retry in %.0fs)",
                     session_id,
-                    attempts + 1,
-                    LAUNCH_RETRIES,
+                    failures + 1,
+                    self._launch_backoff(failures + 1),
                 )
                 return
             process = spawn_local(worker_arguments(session_id))
             if process is not None:
                 self._processes[session_id] = process
-                self._launch_attempts[session_id] = (0, now)
+                self._launch_attempts.pop(session_id, None)
                 return
-        self._launch_attempts[session_id] = (attempts + 1, now)
+        self._note_launch_failure(session_id, failures + 1, now)
         self._sessions.setdefault(session_id, {})["launched_pid"] = pid
 
     def _stop_worker(self, session_id: int) -> None:

@@ -6,6 +6,7 @@ import { DeviceCard } from "@/components/device-card";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
+import { isPollMode } from "@/lib/presence";
 import { useViewport } from "@/hooks/use-viewport";
 import { useLive } from "@/store/live";
 import { cn } from "@/lib/utils";
@@ -27,6 +28,8 @@ export function WallPage() {
       (device) => device.presence.state === "offline" || device.presence.state === "uninstalled",
     ).length,
   };
+  // "受限" alone does not tell anyone what they lost; name the real consequence.
+  const pollOnly = devices.filter((device) => isPollMode(device.presence)).length;
 
   const columns =
     viewport === "watch"
@@ -63,6 +66,9 @@ export function WallPage() {
           <span className="mr-1 inline-block size-1.5 rounded-full bg-faint align-middle" />
           离线 {counts.offline}
         </span>
+        {pollOnly > 0 ? (
+          <span className="text-warn">{pollOnly} 台仅轮询：实时控制不可用，其余功能正常</span>
+        ) : null}
         {!connected ? <span className="text-warn">实时连接断开，数据每 5 秒刷新一次</span> : null}
       </div>
 

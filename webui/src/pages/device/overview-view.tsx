@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { Camera, Power, RotateCcw, Trash2, Unplug } from "lucide-react";
+import { Camera, Power, RotateCcw, Trash2, TriangleAlert, Unplug } from "lucide-react";
 
 import { Meter } from "@/components/meter";
 import { Button } from "@/components/ui/button";
@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { api, ApiError } from "@/lib/api";
 import { formatBytes, formatDateTime, formatDuration } from "@/lib/format";
+import { capabilitiesOf, selfUpdateBlockedReason, transportOf } from "@/lib/presence";
 import type { Device } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -100,10 +101,14 @@ export function OverviewView({ device, onRefresh }: Props) {
   const memory = num(device.sysinfo, "mem_percent");
   const disks = Array.isArray(device.sysinfo.disks) ? (device.sysinfo.disks as Disk[]) : [];
   const sessions = Array.isArray(device.sysinfo.sessions) ? (device.sysinfo.sessions as SessionRow[]) : [];
-  const capabilities = device.presence.capabilities;
+  const capabilities = capabilitiesOf(device.presence);
+  const transport = transportOf(device.presence);
   const captureState = device.presence.capture?.state ?? "";
   const captureBlocked =
     !capabilities.screenshot || captureState === "no_session" || captureState === "blocked";
+  // Newer server field: non-empty means "do not wait for an automatic upgrade".
+  // Absent on older servers, so it must render nothing in that case.
+  const selfUpdateBlocked = selfUpdateBlockedReason(device.presence);
 
   return (
     <div className="space-y-3">
@@ -193,10 +198,28 @@ export function OverviewView({ device, onRefresh }: Props) {
           <dd className="truncate text-soft">{formatDateTime(device.last_seen_ms)}</dd>
           <dt className="text-faint">通道</dt>
           <dd className="truncate text-soft">
-            {device.presence.transport === "ws" ? "WebSocket（实时）" : device.presence.transport === "poll" ? "HTTPS 轮询" : "无"}
+            {transport === "ws" ? "WebSocket（实时）" : transport === "poll" ? "HTTPS 轮询（无实时控制）" : "无"}
           </dd>
         </dl>
       </section>
+
+      {/* Update area. The server only fills `self_update_blocked` when the
+          installed agent is too old (or its updater is broken) for the
+          automatic path; then an upgrade will never arrive on its own, so say
+          so instead of leaving the operator waiting. `null`/absent = normal,
+          render nothing. */}
+      {selfUpdateBlocked ? (
+        <section className="rounded-panel border border-warn/40 bg-warn/10 p-3">
+          <h2 className="mb-1 flex items-center gap-1.5 text-xs font-semibold text-warn">
+            <TriangleAlert className="size-3.5" aria-hidden />
+            无法自动升级
+          </h2>
+          <p className="text-[0.72rem] leading-relaxed text-soft">{selfUpdateBlocked}</p>
+          <p className="mt-1 text-[0.68rem] leading-relaxed text-faint">
+            该版本不在自动更新路径上，服务器不会向它推送新版本。请在目标机器上重新运行最新的安装脚本（覆盖安装，设备标识与历史记录都会保留）。
+          </p>
+        </section>
+      ) : null}
 
       <section className="rounded-panel border border-line bg-panel p-3">
         <h2 className="mb-2 text-xs font-semibold text-soft">重命名</h2>

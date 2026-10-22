@@ -28,6 +28,7 @@ from ..models import Device, now_ms
 from ..security import device_token_hash
 from ..services import audit, commands as command_service, events, ingest
 from ..services.hub import AgentConnection
+from ..services.packages import can_self_update
 from ..services.runtime import Runtime
 from ..version import is_newer
 
@@ -82,13 +83,12 @@ async def agent_socket(websocket: WebSocket) -> None:
         update = None
         if runtime.packages is not None:
             package = await runtime.packages.latest(session, "agent")
-            if package is not None and is_newer(package.version, device.agent_version or "0.0.0"):
-                update = {
-                    "version": package.version,
-                    "url": runtime.packages.url_for(package),
-                    "sha256": package.sha256,
-                    "size_bytes": package.size_bytes,
-                }
+            if (
+                package is not None
+                and can_self_update(device.agent_version)
+                and is_newer(package.version, device.agent_version or "0.0.0")
+            ):
+                update = runtime.packages.update_payload(package)
 
     await connection.send_json(
         {
@@ -195,13 +195,12 @@ async def _handle_text(runtime: Runtime, device: Device, connection: AgentConnec
             update = None
             if runtime.packages is not None and config.get("auto_update", True):
                 package = await runtime.packages.latest(session, "agent")
-                if package is not None and is_newer(package.version, row.agent_version or "0.0.0"):
-                    update = {
-                        "version": package.version,
-                        "url": runtime.packages.url_for(package),
-                        "sha256": package.sha256,
-                        "size_bytes": package.size_bytes,
-                    }
+                if (
+                    package is not None
+                    and can_self_update(row.agent_version)
+                    and is_newer(package.version, row.agent_version or "0.0.0")
+                ):
+                    update = runtime.packages.update_payload(package)
         await connection.send_json(
             {
                 "t": "pong",

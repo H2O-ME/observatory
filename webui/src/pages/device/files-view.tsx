@@ -19,6 +19,7 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, ApiError } from "@/lib/api";
 import { basename, dirname, formatBytes, formatDateTime } from "@/lib/format";
+import { capabilitiesOf } from "@/lib/presence";
 import type { Device, FileEntry } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -37,11 +38,12 @@ export function FilesView({ device }: { device: Device }) {
   const [searchResults, setSearchResults] = useState<FileEntry[] | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
-  const canWrite = device.presence.capabilities.files;
+  const capabilities = capabilitiesOf(device.presence);
+  const canWrite = capabilities.files;
   const query = useQuery({
     queryKey: ["files", device.uid, path],
     queryFn: () => api.files(device.uid, path),
-    enabled: device.presence.capabilities.files,
+    enabled: capabilities.files,
     retry: 0,
   });
 

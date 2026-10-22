@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronLeft, RefreshCw } from "lucide-react";
+import { ChevronLeft, RefreshCw, WifiOff } from "lucide-react";
 
 import { StatusBadge } from "@/components/status-badge";
 import { CommandsView } from "@/pages/device/commands-view";
@@ -14,6 +14,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
 import { formatAge } from "@/lib/format";
+import { isPollMode } from "@/lib/presence";
 import { useAge } from "@/hooks/use-server-now";
 import { useViewport } from "@/hooks/use-viewport";
 import { useLive } from "@/store/live";
@@ -99,12 +100,27 @@ export function DevicePage() {
         </Button>
       </div>
 
-      {device.presence.state !== "online" ? (
+      {/*
+        A poll-only device is reachable and can run every command, but live
+        control needs the WebSocket. Saying only "受限" made operators think the
+        console was broken. This banner names the mode and what still works;
+        the capture-blocked banner on the overview tab stays separate because it
+        is a different fault (screen, not transport).
+      */}
+      {isPollMode(device.presence) ? (
+        <div className="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[0.72rem] leading-relaxed text-warn">
+          <p className="flex items-center gap-1.5 font-medium">
+            <WifiOff className="size-3.5 shrink-0" aria-hidden />
+            当前为轮询模式，实时控制不可用
+          </p>
+          <p className="mt-0.5 font-normal">
+            {device.presence.reason ? `${device.presence.reason}。` : ""}
+            设备通过 HTTPS 轮询上报，截图、文件管理、命令下发和历史画面仍然可用，只是响应更慢；受控端恢复 WebSocket 通道后会自动切回实时控制。
+          </p>
+        </div>
+      ) : device.presence.state !== "online" ? (
         <div className="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[0.72rem] leading-relaxed text-warn">
           {device.presence.reason}
-          {device.presence.transport === "poll"
-            ? "。命令仍然可用，但会慢一些；实时控制需要 WebSocket 通道。"
-            : ""}
         </div>
       ) : null}
 

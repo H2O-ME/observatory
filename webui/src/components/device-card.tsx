@@ -1,10 +1,11 @@
 import { Link } from "react-router-dom";
-import { Cpu, HardDrive, MemoryStick, MonitorSmartphone } from "lucide-react";
+import { Cpu, HardDrive, MemoryStick, MonitorSmartphone, WifiOff } from "lucide-react";
 
 import { FrameStage, FrameView } from "@/components/frame-view";
 import { Meter } from "@/components/meter";
 import { StatusBadge } from "@/components/status-badge";
 import { formatAge, formatBytes } from "@/lib/format";
+import { isPollMode } from "@/lib/presence";
 import type { Device } from "@/lib/types";
 import { useAge } from "@/hooks/use-server-now";
 import { cn } from "@/lib/utils";
@@ -32,6 +33,10 @@ export function DeviceCard({ device, stale, variant = "full" }: Props) {
   const memTotal = numberFrom(device.sysinfo, "mem_total");
   const age = useAge(device.last_seen_ms);
   const offline = device.presence.state === "offline" || device.presence.state === "uninstalled";
+  // Reachable but poll-only: the card must say why live control is missing,
+  // otherwise "受限" looks like an arbitrary label. Kept separate from the
+  // capture-blocked banner on the detail page — different fault, different fix.
+  const pollMode = isPollMode(device.presence);
 
   return (
     <Link
@@ -69,6 +74,15 @@ export function DeviceCard({ device, stale, variant = "full" }: Props) {
         </div>
         <span className="shrink-0 text-[0.68rem] text-faint">{formatAge(age)}</span>
       </div>
+
+      {pollMode ? (
+        <p className="flex items-center gap-1 rounded-md border border-warn/25 bg-warn/10 px-1.5 py-1 text-[0.66rem] leading-tight text-warn">
+          <WifiOff className="size-3 shrink-0" aria-hidden />
+          <span className="truncate">
+            {variant === "compact" ? "仅轮询 · 无实时控制" : "轮询模式 · 实时控制不可用"}
+          </span>
+        </p>
+      ) : null}
 
       {variant === "full" ? (
         <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">

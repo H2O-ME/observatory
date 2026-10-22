@@ -21,6 +21,7 @@ import threading
 from dataclasses import dataclass, field
 
 from ..models import Device, now_ms
+from .packages import can_self_update
 
 #: A WebSocket channel with no traffic for this long is considered dead. The
 #: agent sends a heartbeat every ``heartbeat_interval_s`` (default 20s), so this
@@ -185,6 +186,23 @@ def _capture_state(device: Device) -> dict:
     return capture
 
 
+def _self_update_blocked(device: Device) -> str | None:
+    """Explain why this agent cannot auto-upgrade, or ``None`` when it can.
+
+    The server already withholds ``update`` from pre-0.2.5 agents (their updater
+    helper was broken and stopped the service). Surfacing the same reason in
+    presence is what lets the console tell the operator to reinstall instead of
+    silently waiting for an upgrade that will never come.
+    """
+
+    version = (device.agent_version or "").strip()
+    if can_self_update(version):
+        return None
+    if not version:
+        return "受控端版本未知，无法自动升级，需重新运行安装脚本"
+    return f"受控端 {version} 无法自动升级，需重新运行安装脚本"
+
+
 def snapshot(
     device: Device,
     registry: ChannelRegistry,
@@ -264,6 +282,9 @@ def snapshot(
         }
         if capture
         else None,
+        # Top-level so the console can show it next to state/capabilities without
+        # having to interpret the update pipeline itself.
+        "self_update_blocked": _self_update_blocked(device),
     }
 
 

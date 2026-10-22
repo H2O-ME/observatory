@@ -5,6 +5,7 @@ import { FrameStage } from "@/components/frame-view";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api, ApiError } from "@/lib/api";
+import { controlUnavailableReason, isPollMode } from "@/lib/presence";
 import type { Device } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -48,7 +49,10 @@ export function LiveView({ device }: Props) {
   const lastMoveRef = useRef(0);
   const frameCountRef = useRef(0);
 
-  const capabilities = device.presence.capabilities;
+  // Poll-only devices (and capture-blocked ones) cannot carry pointer/keyboard
+  // input. Explain that up front and leave the entry point disabled instead of
+  // letting the user click into a silent failure.
+  const controlIssue = controlUnavailableReason(device.presence);
 
   const send = useCallback((payload: Record<string, unknown>) => {
     const socket = socketRef.current;
@@ -234,20 +238,31 @@ export function LiveView({ device }: Props) {
     void element?.requestFullscreen?.();
   };
 
-  if (!capabilities.control) {
+  if (controlIssue) {
+    const pollMode = isPollMode(device.presence);
     return (
       <div className="space-y-2 rounded-panel border border-warn/30 bg-warn/10 p-3">
         <p className="flex items-center gap-1.5 text-xs font-medium text-warn">
           <WifiOff className="size-3.5" />
           实时控制不可用
         </p>
-        <p className="text-[0.72rem] leading-relaxed text-warn/90">
-          实时控制需要受控端保持 WebSocket 通道。当前状态：{device.presence.reason}
-          {device.presence.transport === "poll" ? "（受控端已回退到 HTTPS 轮询）" : ""}
-        </p>
+        <p className="text-[0.72rem] leading-relaxed text-warn/90">{controlIssue}</p>
         <p className="text-[0.68rem] leading-relaxed text-soft">
-          轮询模式下仍然可以截图、管理文件、下发命令；受控端会在网络允许时自动重新升级到 WebSocket。
+          {pollMode
+            ? "轮询模式下仍然可以截图、管理文件、下发命令、查看历史画面；受控端会在网络允许时自动重新升级到 WebSocket。"
+            : "截图、文件管理、命令下发与历史画面仍可正常使用。"}
         </p>
+        <div className="flex flex-wrap items-center gap-2 pt-0.5">
+          <Button size="sm" disabled title={controlIssue}>
+            <MousePointer2 className="size-3.5" />
+            开始实时控制
+          </Button>
+          <Button size="sm" variant="outline" disabled title={controlIssue}>
+            <Expand className="size-3.5" />
+            全屏
+          </Button>
+          <span className="text-[0.66rem] text-faint">恢复实时通道后此入口会自动可用</span>
+        </div>
       </div>
     );
   }

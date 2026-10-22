@@ -28,6 +28,7 @@ from ..schemas import (
 )
 from ..security import device_token_hash, new_device_token
 from ..services import audit, commands as command_service, events, ingest
+from ..services.packages import can_self_update
 from ..services.presence import snapshot
 from ..services.runtime import Runtime, get_runtime
 from ..version import is_newer
@@ -106,17 +107,16 @@ async def enroll(
 async def _update_info(runtime: Runtime, session: AsyncSession, device: Device) -> UpdateInfoOut | None:
     if runtime.packages is None:
         return None
+    # Never offer an upgrade to a build that cannot finish it: pre-0.2.5 agents
+    # stop their own service before the (broken) helper proves it can start.
+    if not can_self_update(device.agent_version):
+        return None
     package = await runtime.packages.latest(session, "agent")
     if package is None:
         return None
     if not is_newer(package.version, device.agent_version or "0.0.0"):
         return None
-    return UpdateInfoOut(
-        version=package.version,
-        url=runtime.packages.url_for(package),
-        sha256=package.sha256,
-        size_bytes=package.size_bytes,
-    )
+    return UpdateInfoOut(**runtime.packages.update_payload(package))
 
 
 @router.post("/heartbeat", response_model=HeartbeatOut)

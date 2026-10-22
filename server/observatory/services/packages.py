@@ -13,12 +13,13 @@ import hashlib
 import logging
 import re
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import Package, now_ms
-from ..version import version_tuple
+from ..version import parse_version, version_tuple
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +29,32 @@ FILENAME_RE = re.compile(
     r"^(?:(?P<product>[a-z]+)-)?(?P<kind>[a-z]+)-(?P<version>\d+\.\d+\.\d+)\.zip$"
 )
 MAX_PACKAGE_BYTES = 256 * 1024 * 1024
+
+#: The oldest agent build that can safely replace itself through auto-update.
+#:
+#: Do not lower this to "make updates work again". Agents below 0.2.5 apply an
+#: update by spawning a helper that only did ``shutil.copy2(sys.executable)``, but
+#: every shipped agent is a PyInstaller *onedir* build: the copied exe was missing
+#: its sibling ``_internal/`` runtime, so the helper died immediately while the old
+#: agent still shut itself down unconditionally — the host lost its service and
+#: nothing brought it back. 0.2.5 introduced whole-directory staging (``copytree``)
+#: plus ``verify_helper_alive``; only builds at or above it may be told to upgrade.
+MIN_SELF_UPDATE_VERSION = "0.2.5"
+
+
+def can_self_update(current_version: str | None) -> bool:
+    """True when *current_version* may apply an automatic update without bricking.
+
+    This is the single version gate: the WebSocket welcome, the WebSocket pong and
+    the HTTP heartbeat all call it before handing out an ``update`` object. Unknown
+    or malformed versions return ``False`` — keeping an old agent running is always
+    safer than an upgrade it cannot finish.
+    """
+
+    try:
+        return parse_version(current_version or "0.0.0") >= parse_version(MIN_SELF_UPDATE_VERSION)
+    except ValueError:
+        return False
 
 
 class PackageError(ValueError):
@@ -60,6 +87,21 @@ class PackageService:
 
     def url_for(self, package: Package) -> str:
         return f"/api/v1/public/agent/{package.version}/package"
+
+    def update_payload(self, package: Package) -> dict[str, Any]:
+        """The one shape of the ``update`` object pushed to an agent.
+
+        Welcome, pong and the HTTP heartbeat must agree field-for-field: the agent
+        parses this dict by key, so keeping a single builder here is what stops the
+        three transports from drifting apart.
+        """
+
+        return {
+            "version": package.version,
+            "url": self.url_for(package),
+            "sha256": package.sha256,
+            "size_bytes": package.size_bytes,
+        }
 
     async def save(
         self,
@@ -162,4 +204,11 @@ class PackageService:
         return True
 
 
-__all__ = ["MAX_PACKAGE_BYTES", "PackageError", "PackageService", "parse_filename"]
+__all__ = [
+    "MAX_PACKAGE_BYTES",
+    "MIN_SELF_UPDATE_VERSION",
+    "PackageError",
+    "PackageService",
+    "can_self_update",
+    "parse_filename",
+]
