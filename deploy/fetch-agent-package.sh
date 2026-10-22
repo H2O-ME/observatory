@@ -45,7 +45,10 @@ log "分支里的版本：${REMOTE_VERSION:-未知}"
 git show "${TRACKING}:${NAME}" > "${OUT_DIR}/${NAME}" \
   || die "分支里没有 ${NAME}"
 
-EXPECTED="$(git show "${TRACKING}:SHA256SUMS" 2>/dev/null | awk -v n="$NAME" '$2==n {print $1}' || true)"
+# GNU sha256sum 在文本模式输出 `<hash>  <file>`，但在 Git Bash（Windows runner）
+# 上会退化成二进制模式 `<hash> *<file>`。两种都接受，否则校验会被静默跳过。
+EXPECTED="$(git show "${TRACKING}:SHA256SUMS" 2>/dev/null \
+  | awk -v n="$NAME" '{ f=$2; sub(/^\*/,"",f); if (f==n) { print $1; exit } }' || true)"
 ACTUAL="$(sha256sum "${OUT_DIR}/${NAME}" | cut -d' ' -f1)"
 if [[ -n "$EXPECTED" ]]; then
   [[ "$EXPECTED" == "$ACTUAL" ]] || die "sha256 不匹配：分支=$EXPECTED 实际=$ACTUAL"
