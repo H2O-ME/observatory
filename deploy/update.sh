@@ -63,6 +63,18 @@ for _ in $(seq 1 60); do
 done
 [[ "$ready" == "1" ]] || die "服务在 120 秒内没有就绪，请查看 docker compose logs"
 
+# 受控端由 GitHub Actions 在 Windows runner 上构建（PyInstaller 不能交叉编译），
+# 产物由 CI 推到 `agent-dist` 分支。本地没有该版本的包时，从那个分支取回来并登记。
+if [[ ! -f "agent/dist/observatory-agent-${VERSION}.zip" ]]; then
+  if [[ -x deploy/fetch-agent-package.sh || -f deploy/fetch-agent-package.sh ]]; then
+    log "本地没有 ${VERSION} 的受控端包，尝试从 CI 的 agent-dist 分支获取"
+    if ! bash deploy/fetch-agent-package.sh; then
+      warn "获取受控端包失败（CI 可能还没跑完）。受控端将保持当前版本；稍后可单独执行："
+      warn "  sudo bash deploy/fetch-agent-package.sh"
+    fi
+  fi
+fi
+
 # 如果本次提交带来了新的受控端安装包，自动登记（可被设备自动更新拉取）。
 shopt -s nullglob
 for zip in agent/dist/observatory-agent-*.zip; do

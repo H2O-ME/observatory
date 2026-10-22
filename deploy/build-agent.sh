@@ -1,15 +1,24 @@
 #!/usr/bin/env bash
 # 在服务器上产出受控端 exe 包，并登记到控制台（自动更新就从这里取包）。
 #
-#   sudo bash deploy/build-agent.sh                # 在服务器上用 Wine 构建
-#   sudo bash deploy/build-agent.sh --from-release v0.2.1   # 直接取 CI 产物
+# 【推荐路径】不要用本脚本。受控端由 .github/workflows/build.yml 在 GitHub 的
+# Windows runner 上原生构建，产物由 CI 推到 `agent-dist` 分支；服务器侧只需要：
 #
-# 两种方式都合法：
+#   sudo bash deploy/fetch-agent-package.sh
 #
-#   * `--from-release` 从 GitHub Release 下载由 Windows runner 构建好的 zip。
-#     这是推荐路径：PyInstaller 的 Windows 引导器在原生 Windows 上最稳。
-#   * 默认方式在本机用 Wine 跑 Windows 版 Python + PyInstaller。可行，但对
-#     Wine 版本敏感，失败时会明确打印诊断而不是静默产出坏包。
+# 或者直接 `sudo bash deploy/update.sh`（它会自动调用上面那个脚本）。
+#
+# 背景：PyInstaller 不做交叉编译，Linux 上的 Python 只能产出 Linux 二进制，
+# 所以"在部署服务器上构建 Windows 包"必须靠 Wine 跑 Windows 版 Python。实测
+# Debian 12 + wine 8.0 下 Python 官方 MSI 安装器无法静默安装（kernel32 加载
+# 失败 / 安装器静默退出），要绕到 embeddable zip + 手动铺 wheel 才勉强可行，
+# 代价远大于收益。本脚本因此只作为离线兜底保留：
+#
+#   sudo bash deploy/build-agent.sh                        # 在服务器上用 Wine 构建（兜底）
+#   sudo bash deploy/build-agent.sh --from-release v0.2.8  # 取 CI 已发布的 Release 资产
+#
+# 注意：`--from-release` 在私有仓库下需要凭据（gh 已登录，或提供令牌），
+# 因此正常情况下请优先用 deploy/fetch-agent-package.sh（复用已有 git 访问）。
 #
 # 无论哪种方式，产物都会：校验版本号 -> 放进数据卷 -> 调用 CLI 登记。
 # 登记之后，旧版本受控端会在下一次心跳自动更新，不需要重新安装。
