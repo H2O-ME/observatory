@@ -35,17 +35,43 @@ OUT_DIR="$APP_DIR/agent/dist"
 mkdir -p "$OUT_DIR"
 
 log "当前仓库版本：$VERSION"
-log "拉取 ${REMOTE}/${BRANCH}"
-git fetch --force --prune "$REMOTE" "+${BRANCH}:${TRACKING}" \
+
+# 拉取策略刻意保持保守，因为 agent-dist 是 CI 每次构建都会强推的分支：
+#   * 用完整的 refs/heads/ 路径，避免短名歧义；
+#   * 不加 --prune —— 它会在拉取与强推撞车的瞬间把本地跟踪引用删掉，报出
+#     「(none) -> origin/agent-dist」，看起来像分支不存在，实际只是竞态；
+#   * 失败重试几次，CI 刚跑完/正在跑时网络抖动很常见。
+FETCH_OK=0
+for attempt in 1 2 3 4 5; do
+  log "拉取 ${REMOTE}/${BRANCH}（第 ${attempt} 次）"
+  if git fetch --force --no-tags "$REMOTE" "+refs/heads/${BRANCH}:${TRACKING}" 2>&1; then
+    if git rev-parse --verify --quiet "${TRACKING}" >/dev/null; then
+      FETCH_OK=1
+      break
+    fi
+  fi
+  sleep 6
+done
+[[ "$FETCH_OK" == "1" ]] \
   || die "拉取 ${REMOTE}/${BRANCH} 失败（CI 可能还没跑完，或该分支尚未创建）"
+log "分支提交：$(git rev-parse --short "${TRACKING}")"
 
 REMOTE_VERSION="$(git show "${TRACKING}:VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
 log "分支里的版本：${REMOTE_VERSION:-未知}"
 [[ "$REMOTE_VERSION" == "$VERSION" ]] \
   || die "分支里是 ${REMOTE_VERSION:-未知}，本地 VERSION 是 $VERSION。先部署代码（deploy/update.sh），等 CI 产出同版本包后再取"
 
+# 正常情况下文件名就是 observatory-agent-<VERSION>.zip；如果 CI 那侧因为任何
+# 原因写成了别的名字，退回到"分支里唯一那个 zip"，而不是直接失败。
+if ! git cat-file -e "${TRACKING}:${NAME}" 2>/dev/null; then
+  ALT="$(git ls-tree --name-only "${TRACKING}" | grep -E '^observatory-agent-.*\.zip$' | head -1 || true)"
+  [[ -n "$ALT" ]] || die "分支 ${TRACKING} 里没有任何 observatory-agent-*.zip"
+  warn "分支里没有 ${NAME}，改用 ${ALT}"
+  NAME="$ALT"
+fi
+
 git show "${TRACKING}:${NAME}" > "${OUT_DIR}/${NAME}" \
-  || die "分支里没有 ${NAME}"
+  || die "无法从分支导出 ${NAME}"
 
 # GNU sha256sum 在文本模式输出 `<hash>  <file>`，但在 Git Bash（Windows runner）
 # 上会退化成二进制模式 `<hash> *<file>`。两种都接受，否则校验会被静默跳过。
