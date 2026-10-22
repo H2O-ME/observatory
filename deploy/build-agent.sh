@@ -43,7 +43,7 @@ warn() { printf '\033[33m[agent-build]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31m[agent-build] %s\033[0m\n' "$*" >&2; exit 1; }
 
 cd "$APP_DIR"
-VERSION="$(cat VERSION)"
+VERSION="$(tr -d '[:space:]' < VERSION)"
 OUT_DIR="$APP_DIR/agent/dist"
 mkdir -p "$OUT_DIR"
 

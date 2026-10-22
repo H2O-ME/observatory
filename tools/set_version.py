@@ -45,7 +45,11 @@ def read_root_version() -> str:
 def write_root_version(version: str) -> None:
     if not SEMVER.match(version):
         raise SystemExit(f"not a semantic version: {version!r}")
-    VERSION_FILE.write_text(version + "\n", encoding="utf-8")
+    # newline="\n" is essential: Path.write_text opens in text mode, so on Windows
+    # the default translation would turn "\n" into "\r\n" and commit
+    # "0.2.8\r\n". Shell scripts then read "0.2.8\r" via $(cat VERSION), which
+    # silently breaks every string comparison (see .gitattributes).
+    VERSION_FILE.write_text(version + "\n", encoding="utf-8", newline="\n")
 
 
 def bump_patch(version: str) -> str:
@@ -64,7 +68,7 @@ def sync(version: str) -> list[str]:
         if count != 1:
             raise SystemExit(f"{target}: expected exactly one FALLBACK_VERSION assignment, found {count}")
         if updated != original:
-            target.write_text(updated, encoding="utf-8")
+            target.write_text(updated, encoding="utf-8", newline="\n")
             changed.append(str(target.relative_to(ROOT)))
 
     for pkg_path in PACKAGE_JSONS:
@@ -73,7 +77,7 @@ def sync(version: str) -> list[str]:
         data = json.loads(pkg_path.read_text(encoding="utf-8"))
         if data.get("version") != version:
             data["version"] = version
-            pkg_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            pkg_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="\n")
             changed.append(str(pkg_path.relative_to(ROOT)))
     return changed
 

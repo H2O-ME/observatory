@@ -27,7 +27,9 @@ die()  { printf '\033[31m[agent-fetch] %s\033[0m\n' "$*" >&2; exit 1; }
 cd "$APP_DIR" || die "找不到 $APP_DIR"
 [[ -d .git ]] || die "$APP_DIR 不是 git 仓库"
 
-VERSION="$(cat VERSION)"
+# tr 是防御性的：VERSION 一旦带 CRLF，$(cat VERSION) 会得到 "0.2.8\r"，
+# 与分支里的 "0.2.8" 永远不相等（见 .gitattributes 的说明）。
+VERSION="$(tr -d '[:space:]' < VERSION)"
 NAME="observatory-agent-${VERSION}.zip"
 OUT_DIR="$APP_DIR/agent/dist"
 mkdir -p "$OUT_DIR"
