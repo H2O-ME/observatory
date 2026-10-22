@@ -29,7 +29,7 @@ from ..schemas import (
 from ..security import device_token_hash, new_device_token
 from ..services import audit, commands as command_service, events, ingest
 from ..services.packages import can_self_update
-from ..services.presence import snapshot
+from ..services.presence import merge_agent_report, snapshot
 from ..services.runtime import Runtime, get_runtime
 from ..version import is_newer
 
@@ -131,25 +131,7 @@ async def heartbeat(
     device.last_seen_ms = now_ms()
     if payload.agent_version:
         device.agent_version = payload.agent_version[:30]
-    if payload.sysinfo:
-        # Heartbeats carry a cheap subset; merge so a light payload never erases
-        # hostname/os/model collected at enrolment.
-        device.sysinfo = {**(device.sysinfo or {}), **payload.sysinfo}
-    capture = payload.state.get("capture") if isinstance(payload.state, dict) else None
-    if isinstance(capture, dict):
-        # Capture health is the difference between "online and working" and
-        # "online but there is no desktop to capture". Persist it so the console
-        # can explain a device that never produces frames.
-        device.sysinfo = {
-            **(device.sysinfo or {}),
-            "capture": {
-                "state": str(capture.get("state") or "")[:30],
-                "reason": str(capture.get("reason") or "")[:200],
-                "workers": capture.get("workers") if isinstance(capture.get("workers"), list) else [],
-                "sessions": int(capture.get("sessions") or 0),
-                "at_ms": now_ms(),
-            },
-        }
+    merge_agent_report(device, sysinfo=payload.sysinfo, state=payload.state)
     runtime.registry.attach(device.id, "poll", ip)
     await session.commit()
 

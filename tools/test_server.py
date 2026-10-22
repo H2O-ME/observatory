@@ -862,6 +862,94 @@ def cli_flow(version: str) -> None:
     check("cli enroll-code 生成注册码", result.returncode == 0 and len(result.stdout.strip()) >= 8, result.stdout[:80])
 
 
+def heartbeat_report_parity(client: TestClient, headers: dict) -> None:
+    """HTTP 与 WebSocket 两条心跳必须落同样的库。
+
+    回归背景：WS 分支过去整体覆盖 ``sysinfo`` 并完全忽略 ``state.capture``，而
+    HTTP 分支是合并 + 落 capture。设备一旦从轮询切到 WS，控制台就再也看不到
+    采集健康度，表现成"在线但采集状态为空"——一条链路上两个分支各写各的，
+    迟早会漂。现在两边都走 presence.merge_agent_report。
+
+    这里自己注册一台设备，避免动到前面用例依赖的 OBS-TEST0001 状态。
+    """
+    group("心跳落库：两条传输共用同一份逻辑")
+
+    from observatory.services.presence import merge_agent_report
+
+    uid = "OBS-TESTPARITY"
+    enroll = client.post(
+        "/api/v1/agent/enroll",
+        json={
+            "code": "test-enroll-code",
+            "uid": uid,
+            "hostname": "parity-host",
+            "os_name": "Windows",
+            "os_version": "11 23H2",
+            "arch": "AMD64",
+            "agent_version": "0.2.0",
+            "sysinfo": {"cpu_percent": 10.0, "mem_percent": 30.0, "mem_total": 8 * 1024**3},
+        },
+    )
+    check("注册用于校验的设备", enroll.status_code == 200, enroll.text[:160])
+    token = enroll.json().get("token", "")
+
+    def device() -> dict:
+        return next(d for d in client.get("/api/v1/devices", headers=headers).json()["devices"] if d["uid"] == uid)
+
+    before_sysinfo = device().get("sysinfo") or {}
+
+    response = client.post(
+        "/api/v1/agent/heartbeat",
+        headers={"X-Device-Token": token},
+        json={
+            "agent_version": "0.2.9",
+            "sysinfo": {"capture_probe": True},
+            "state": {"capture": {"state": "ok", "reason": "", "workers": [2], "sessions": 2}},
+        },
+    )
+    check("HTTP 心跳成功", response.status_code == 200, response.text[:160])
+
+    after = device()
+    after_sysinfo = after.get("sysinfo") or {}
+    check(
+        "sysinfo 是合并而不是整体覆盖",
+        set(before_sysinfo) <= set(after_sysinfo),
+        f"before={sorted(before_sysinfo)} after={sorted(after_sysinfo)}",
+    )
+    check("心跳新增字段已写入", after_sysinfo.get("capture_probe") is True)
+
+    capture = (after.get("presence") or {}).get("capture") or {}
+    check("capture 健康度已落库", capture.get("state") == "ok", json.dumps(capture, ensure_ascii=False))
+    check("capture 记录了采屏进程", capture.get("workers") == [2], str(capture.get("workers")))
+    check("capture 带写入时间", int(capture.get("at_ms") or 0) > 0)
+
+    # 共享 helper 的契约：合并、保留、不打脏数据。
+    class _Stub:
+        def __init__(self, sysinfo: dict) -> None:
+            self.sysinfo = sysinfo
+
+    stub = _Stub({"hostname": "keep-me", "mem_total": 123})
+    merge_agent_report(stub, sysinfo={"cpu_count": 8}, state={"capture": {"state": "no_session"}})
+    check("helper 保留原有 sysinfo", stub.sysinfo.get("hostname") == "keep-me", str(stub.sysinfo))
+    check("helper 合并新字段", stub.sysinfo.get("cpu_count") == 8)
+    check("helper 落 capture 并打时间戳", stub.sysinfo["capture"].get("at_ms", 0) > 0)
+
+    empty = _Stub({})
+    merge_agent_report(empty, sysinfo=None, state=None)
+    check("helper 收到空报告时不写脏数据", empty.sysinfo == {}, str(empty.sysinfo))
+
+    # 静态防漂移守卫：两条传输都必须走 helper，谁也不许自己写 row.sysinfo。
+    ws_src = (ROOT / "server" / "observatory" / "api" / "agent_ws.py").read_text(encoding="utf-8")
+    http_src = (ROOT / "server" / "observatory" / "api" / "agent.py").read_text(encoding="utf-8")
+    check("WS 分支不再直接覆盖 sysinfo", 'row.sysinfo = message["sysinfo"]' not in ws_src)
+    check(
+        "WS 的 hello 与 heartbeat 都走共享 helper",
+        ws_src.count("merge_agent_report(") >= 2,
+        str(ws_src.count("merge_agent_report(")),
+    )
+    check("HTTP 心跳走共享 helper", "merge_agent_report(" in http_src)
+
+
 def main() -> int:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     print(f"Observatory {version} 自检 · 数据目录 {DATA_DIR}")
@@ -894,6 +982,7 @@ def main() -> int:
         websockets_flow(client, headers, device_token, version)
         audit_flow(client, headers)
         spa_flow(client, version)
+        heartbeat_report_parity(client, headers)
 
     cli_flow(version)
     stale_name_scan()
