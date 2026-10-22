@@ -4,8 +4,11 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
-build/
-dist/
+# 注意：这里不要写通用的 build/ 或 dist/。那会把 agent/build/ 整个目录一起
+# 忽略掉——agent/build/ 装的是受控端的构建定义（PyInstaller spec、entry.py、
+# build.ps1），属于源码，必须进仓库，否则 CI 上没有构建脚本可用。
+/build/
+/dist/
 *.spec.bak
 
 # ---- Runtime data (never commit local captures or secrets) ----
