@@ -29,6 +29,7 @@ from ..security import device_token_hash
 from ..services import audit, commands as command_service, events, ingest
 from ..services.hub import AgentConnection
 from ..services.packages import can_self_update
+from ..services.presence import merge_agent_report
 from ..services.runtime import Runtime
 from ..version import is_newer
 
@@ -174,8 +175,10 @@ async def _handle_text(runtime: Runtime, device: Device, connection: AgentConnec
                 return
             row.agent_version = str(message.get("agent_version", row.agent_version))[:30]
             row.last_seen_ms = now_ms()
-            if isinstance(message.get("sysinfo"), dict):
-                row.sysinfo = message["sysinfo"]
+            # Same bookkeeping as the HTTP path: merge sysinfo and persist
+            # state.capture, otherwise a WebSocket device silently loses its
+            # capture health and the console cannot say why frames stop.
+            merge_agent_report(row, sysinfo=message.get("sysinfo"), state=message.get("state"))
             await session.commit()
             config = await runtime.store.effective(session, row.settings or {})
         await connection.send_json({"t": "config", "config": config, "server_time_ms": now_ms()})
@@ -188,8 +191,9 @@ async def _handle_text(runtime: Runtime, device: Device, connection: AgentConnec
             row.last_seen_ms = now_ms()
             if message.get("agent_version"):
                 row.agent_version = str(message["agent_version"])[:30]
-            if isinstance(message.get("sysinfo"), dict):
-                row.sysinfo = message["sysinfo"]
+            # The heartbeat carries the same payload the HTTP path merges; going
+            # through the shared helper keeps the two transports from drifting.
+            merge_agent_report(row, sysinfo=message.get("sysinfo"), state=message.get("state"))
             await session.commit()
             config = await runtime.store.effective(session, row.settings or {})
             update = None

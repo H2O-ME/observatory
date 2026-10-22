@@ -174,6 +174,40 @@ def _capabilities(state: str) -> dict[str, bool]:
     }
 
 
+def merge_agent_report(device: Device, *, sysinfo: object = None, state: object = None) -> None:
+    """Persist what an agent just reported, whichever transport carried it.
+
+    Every transport must call this: the same heartbeat payload can arrive over
+    HTTP long-poll/short-poll *or* over the WebSocket, and the two branches used
+    to do the bookkeeping separately. They drifted — the WebSocket branch
+    replaced ``sysinfo`` wholesale (instead of merging) and ignored
+    ``state.capture`` completely, so a device that upgraded from polling to a
+    WebSocket lost its capture health and the console reported "online, no
+    capture state" for a perfectly healthy host.
+    """
+
+    if isinstance(sysinfo, dict) and sysinfo:
+        # Merge, never replace: a light heartbeat payload must not erase
+        # hostname/os/model collected at enrolment.
+        device.sysinfo = {**(device.sysinfo or {}), **sysinfo}
+
+    capture = state.get("capture") if isinstance(state, dict) else None
+    if isinstance(capture, dict):
+        # Capture health is the difference between "online and working" and
+        # "online but there is no desktop to capture". Persist it so the console
+        # can explain a device that never produces frames.
+        device.sysinfo = {
+            **(device.sysinfo or {}),
+            "capture": {
+                "state": str(capture.get("state") or "")[:30],
+                "reason": str(capture.get("reason") or "")[:200],
+                "workers": capture.get("workers") if isinstance(capture.get("workers"), list) else [],
+                "sessions": int(capture.get("sessions") or 0),
+                "at_ms": now_ms(),
+            },
+        }
+
+
 def _capture_state(device: Device) -> dict:
     """Capture health as last reported by the agent, if it is recent enough."""
 
@@ -300,5 +334,6 @@ __all__ = [
     "STATE_UNINSTALLED",
     "STATE_UNINSTALLING",
     "WS_STALE_MS",
+    "merge_agent_report",
     "snapshot",
 ]
