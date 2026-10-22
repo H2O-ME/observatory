@@ -36,6 +36,46 @@ CREATE_NO_WINDOW = 0x08000000
 SWAP_WAIT_S = 120
 #: Name of the executable inside both the install directory and a staged payload.
 EXE_NAME = "observatory-agent.exe"
+#: How many times the helper tries to bring the service back up after the swap.
+SERVICE_START_ATTEMPTS = 6
+#: Linear backoff between start attempts (seconds); multiplied by the attempt number.
+SERVICE_START_BACKOFF_S = 3.0
+#: How long one start attempt may stay in START_PENDING before it counts as failed.
+SERVICE_START_SETTLE_S = 25.0
+#: After the service reports RUNNING, how long to wait before re-checking it is
+#: still alive (catches builds that crash immediately after start-up).
+SERVICE_CONFIRM_S = 3.0
+
+
+def verify_payload(payload_root: Path, version: str) -> tuple[bool, str]:
+    """Run the staged executable once to prove it can actually start.
+
+    This is deliberately done *before* the running service is stopped. A payload
+    that cannot even print its version (wrong Python runtime, missing
+    ``_internal``, antivirus quarantine, corrupt download) would otherwise cost
+    the machine its service: the old build is already gone and nothing on the box
+    restarts it. Validating first turns that failure mode into "update skipped,
+    keep running the current version".
+    """
+
+    exe = Path(payload_root) / EXE_NAME
+    if not exe.is_file():
+        return False, f"payload 缺少 {EXE_NAME}"
+    try:
+        completed = subprocess.run(  # noqa: S603 - fixed argv, no user input
+            [str(exe), "--version"],
+            capture_output=True,
+            timeout=60,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"payload 无法执行: {exc}"
+    reported = (completed.stdout or b"").decode("utf-8", "replace").strip()
+    if completed.returncode != 0:
+        return False, f"payload 退出码 {completed.returncode} (stderr={(completed.stderr or b'').decode('utf-8', 'replace').strip()[:200]})"
+    if version and reported != version:
+        return False, f"payload 报告版本 {reported!r}，期望 {version!r}"
+    return True, reported
 
 
 async def apply_update(
@@ -220,25 +260,52 @@ def spawn_apply_helper(payload_root: Path, version: str) -> subprocess.Popen | N
 
 # --------------------------------------------------------------- helper mode ---
 def apply_now(payload_root: str, target_dir: str, wait_pid: int, version: str) -> int:
-    """Runs in the detached helper. Blocks until the swap is done."""
+    """Runs in the detached helper. Blocks until the swap is done.
+
+    Return codes (also logged): 0 ok, 2 payload missing, 3 swap failed,
+    4 payload failed its pre-flight check, 5 rolled back after the new build
+    would not start, 6 rollback itself failed.
+    """
 
     from .logging_setup import setup_logging
 
     setup_logging("updater")
     log.info("updater starting: %s -> %s (waiting for pid %s)", payload_root, target_dir, wait_pid)
 
-    _wait_for_process_exit(wait_pid, SWAP_WAIT_S)
-    _stop_service()
-    time.sleep(1.0)
-
     source = Path(payload_root)
     target = Path(target_dir)
-    backup = target.with_name(target.name + f".old-{int(time.time())}")
 
     if not source.is_dir():
         log.error("payload directory missing: %s", source)
         return 2
 
+    # Last-ditch sanity check on the swap target. A layout mistake in
+    # INSTALL_DIR (it once resolved to ``<install>\_internal``) would otherwise
+    # rename the *support* directory, leaving the exe at the root pointing at a
+    # Python runtime that is no longer there. The install root is the one that
+    # holds the executable, so refuse anything else.
+    if not (target / EXE_NAME).is_file():
+        log.error(
+            "refusing to swap %s: it does not contain %s, so it is not the install root",
+            target,
+            EXE_NAME,
+        )
+        return 7
+
+    # Pre-flight: prove the staged build starts before touching the live install.
+    # Doing this first means a broken payload leaves the running service alone
+    # instead of stopping it and leaving the machine with nothing to restart.
+    ok, detail = verify_payload(source, version)
+    if not ok:
+        log.error("refusing to install %s: %s (keeping the current build)", version, detail)
+        return 4
+    log.info("payload pre-flight ok (reports %s)", detail)
+
+    _wait_for_process_exit(wait_pid, SWAP_WAIT_S)
+    _stop_service()
+    time.sleep(1.0)
+
+    backup = target.with_name(target.name + f".old-{int(time.time())}")
     moved = False
     try:
         if target.exists():
@@ -257,7 +324,24 @@ def apply_now(payload_root: str, target_dir: str, wait_pid: int, version: str) -
         _start_service()
         return 3
 
-    _start_service()
+    # The swap is not the finish line: if the new build cannot run as a service,
+    # put the previous one back rather than leaving the host offline.
+    if not _start_service():
+        log.error("new build did not come up; rolling back to the previous build")
+        try:
+            failed = target.with_name(target.name + f".failed-{int(time.time())}")
+            os.replace(target, failed)
+            if moved and backup.exists():
+                os.replace(backup, target)
+                moved = False
+            if _start_service():
+                log.warning("rolled back to previous build; update %s abandoned", version)
+                return 5
+            log.error("previous build did not start either; manual attention required")
+        except OSError as exc:
+            log.exception("rollback after failed start did not work: %s", exc)
+        return 6
+
     _cleanup_old(backup)
     log.info("update to %s finished", version)
     return 0
@@ -301,14 +385,73 @@ def _stop_service() -> None:
         log.debug("stop service failed: %s", exc)
 
 
-def _start_service() -> None:
-    try:
-        import win32serviceutil
+def _start_service() -> bool:
+    """Bring the service back up, retrying; True once it reports RUNNING.
 
-        win32serviceutil.StartService("ObservatoryAgent")
-        log.info("service started")
-    except Exception as exc:  # noqa: BLE001
-        log.error("could not start service: %s", exc)
+    A single ``StartService`` call used to be the last step of an update. If the
+    SCM was still settling, or antivirus held the freshly written exe for longer
+    than the start timeout, that one call failed, nothing retried, and the device
+    simply stayed offline until somebody logged in. Retrying here is what makes
+    the helper's last step reliable.
+    """
+
+    try:
+        import win32service
+        import win32serviceutil
+    except Exception as exc:  # noqa: BLE001 - non-Windows or broken pywin32
+        log.error("cannot manage the service: %s", exc)
+        return False
+
+    for attempt in range(1, SERVICE_START_ATTEMPTS + 1):
+        try:
+            status = win32serviceutil.QueryServiceStatus("ObservatoryAgent")[1]
+        except Exception as exc:  # noqa: BLE001
+            log.error("query service (attempt %s) failed: %s", attempt, exc)
+            status = None
+
+        if status == win32service.SERVICE_RUNNING:
+            log.info("service is running")
+            return True
+
+        if status not in (
+            win32service.SERVICE_START_PENDING,
+            win32service.SERVICE_CONTINUE_PENDING,
+        ):
+            try:
+                win32serviceutil.StartService("ObservatoryAgent")
+                log.info("StartService issued (attempt %s)", attempt)
+            except Exception as exc:  # noqa: BLE001
+                log.error("StartService (attempt %s) failed: %s", attempt, exc)
+
+        deadline = time.time() + SERVICE_START_SETTLE_S
+        while time.time() < deadline:
+            time.sleep(0.5)
+            try:
+                status = win32serviceutil.QueryServiceStatus("ObservatoryAgent")[1]
+            except Exception:  # noqa: BLE001
+                continue
+            if status == win32service.SERVICE_RUNNING:
+                # RUNNING is not proof of success: a build that crashes right
+                # after start-up also reports RUNNING for a moment. Confirm it is
+                # still alive a few seconds later before declaring victory.
+                time.sleep(SERVICE_CONFIRM_S)
+                try:
+                    status = win32serviceutil.QueryServiceStatus("ObservatoryAgent")[1]
+                except Exception:  # noqa: BLE001
+                    status = None
+                if status == win32service.SERVICE_RUNNING:
+                    log.info("service started and stayed up (attempt %s)", attempt)
+                    return True
+                log.warning("service came up then dropped to %s (attempt %s)", status, attempt)
+                break
+            if status == win32service.SERVICE_STOPPED:
+                break
+
+        log.warning("service not running after attempt %s, retrying", attempt)
+        time.sleep(SERVICE_START_BACKOFF_S * attempt)
+
+    log.error("could not start the service after %s attempts", SERVICE_START_ATTEMPTS)
+    return False
 
 
 def _cleanup_old(backup: Path) -> None:
@@ -328,4 +471,5 @@ __all__ = [
     "extract_payload",
     "spawn_apply_helper",
     "verify_helper_alive",
+    "verify_payload",
 ]
