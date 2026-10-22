@@ -392,6 +392,10 @@ def session_lifecycle() -> None:
     runner._pipes[1].connected.set()
     health = runner_module.AgentRunner._capture_health(runner)
     check("有采屏进程时上报正常", health["state"] == "ok", str(health))
+    # 会话 65537 是监听会话、没有登录用户，不能算进可采集会话数——否则会出现
+    # "1 个桌面、2 个会话"这种和 state 自相矛盾的报告。
+    check("会话数只统计有登录用户的会话", health["sessions"] == 1, str(health))
+    check("监听会话不计入会话数", 65537 in runner._sessions and health["sessions"] != len(runner._sessions), str(health))
 
 
 def large_result_transport() -> None:

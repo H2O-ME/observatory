@@ -24,7 +24,7 @@ __all__ = [
     "is_newer",
 ]
 
-FALLBACK_VERSION = "0.2.9"
+FALLBACK_VERSION = "0.2.10"
 
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 

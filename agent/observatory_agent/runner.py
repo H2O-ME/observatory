@@ -437,10 +437,14 @@ class AgentRunner:
             for state in self._sessions.values()
             if state.get("launch_error")
         ]
-        # 只有带真实登录用户名的会话才可能有可采集的桌面。残留会话（例如
-        # session 1，WTSQueryUserToken 返回 1008）永远采不了屏，如实报
-        # no_session，不能一直显示"正在启动"。
-        has_user = any(str(state.get("username") or "").strip() for state in self._sessions.values())
+        # 只有带真实登录用户名的会话才可能有可采集的桌面。监听会话（例如
+        # RDP-Tcp 上报的 65537）和拿不到用户令牌的残留会话也会出现在
+        # _sessions 里，但它们永远采不到屏。把这类会话算进 sessions，控制台就会
+        # 看到"1 个桌面、2 个会话"这种自相矛盾的报告，和这里的 state 语义打架。
+        with_user = [
+            state for state in self._sessions.values() if str(state.get("username") or "").strip()
+        ]
+        has_user = bool(with_user)
         if workers:
             state, reason = "ok", ""
         elif errors:
@@ -453,7 +457,7 @@ class AgentRunner:
             "state": state,
             "reason": reason,
             "workers": sorted(workers),
-            "sessions": len(self._sessions),
+            "sessions": len(with_user),
         }
 
     def _mark_capture_blocked(self, session_id: int, error: str) -> None:
