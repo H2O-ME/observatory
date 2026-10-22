@@ -20,7 +20,7 @@ cd "$APP_DIR" || die "找不到 $APP_DIR"
 
 [[ -d .git ]] || die "$APP_DIR 不是 git 仓库"
 
-log "当前版本：$(cat VERSION 2>/dev/null || echo 未知)"
+log "当前版本：$(tr -d '[:space:]' < VERSION 2>/dev/null || echo 未知)"
 
 if [[ -n "$(git status --porcelain)" ]]; then
   warn "工作区有未提交改动，先 stash 以保证 pull 干净"
@@ -43,7 +43,9 @@ if [[ "$SCRIPT_HASH_BEFORE" != "$SCRIPT_HASH_AFTER" && -z "${OBS_UPDATE_REEXEC:-
   OBS_UPDATE_REEXEC=1 exec bash "$SELF" "$@"
 fi
 
-VERSION="$(cat VERSION)"
+# tr 是防御性的：VERSION 一旦带 CRLF，$(cat VERSION) 会得到 "0.2.8\r"，
+# 之后所有字符串比较都会静默失败（见 .gitattributes 的说明）。
+VERSION="$(tr -d '[:space:]' < VERSION)"
 log "目标版本：$VERSION"
 
 COMPOSE=(docker compose -f deploy/docker-compose.yml --env-file server/.env)

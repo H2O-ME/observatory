@@ -1,0 +1,41 @@
+# 统一使用 LF 存储文本文件。
+#
+# 原因：tools/set_version.py 在 Windows 上用 Path.write_text(encoding="utf-8")
+# 写文件，文本模式的换行转换会把 \n 变成 \r\n，于是 VERSION 被以 "0.2.8\r\n" 提交。
+# 在 Linux 服务器上 $(cat VERSION) 会得到 "0.2.8\r"，导致
+#   [ "$VERSION" == "0.2.8" ]
+# 永远为假 —— 自动更新取包因此一直失败，而且现象很难看出（日志里只是莫名换行）。
+# 把换行策略固化在仓库里，比在每个脚本里防御更可靠。
+#
+# 注意：这里刻意只覆盖文本类扩展名，不动 .cmd / .bat / .ps1 —— Windows 批处理
+# 对 CRLF 更稳妥，保持它们原有的换行。
+VERSION text eol=lf
+
+*.py    text eol=lf
+*.sh    text eol=lf
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.js    text eol=lf
+*.jsx   text eol=lf
+*.json  text eol=lf
+*.html  text eol=lf
+*.css   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.md    text eol=lf
+*.toml  text eol=lf
+*.txt   text eol=lf
+.gitignore    text eol=lf
+.gitattributes text eol=lf
+Dockerfile    text eol=lf
+
+# 二进制：不要做任何换行转换
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.webp binary
+*.ico  binary
+*.gif  binary
+*.zip  binary
+*.exe  binary
+*.dll  binary
