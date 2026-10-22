@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,8 +46,32 @@ SPOOL_DIR = PROGRAM_DATA / "spool"
 STAGING_DIR = PROGRAM_DATA / "staging"
 CONFIG_PATH = PROGRAM_DATA / CONFIG_FILENAME
 
+def install_dir() -> Path:
+    """Where this build lives: the directory that holds the exe *and* ``_internal``.
+
+    This used to be ``Path(__file__).resolve().parent.parent``, which is only
+    correct for a plain source checkout (``agent/observatory_agent/config.py``).
+    A frozen onedir build puts the modules under ``<install>\\_internal\\
+    observatory_agent\\``, so ``parent.parent`` resolves to ``<install>\\
+    _internal`` — one level too deep.
+
+    That mattered at exactly one moment: the updater swaps ``INSTALL_DIR``, so
+    the first in-place update renamed ``_internal`` instead of the install root.
+    The old exe was left at the root with its ``_internal`` moved away, could not
+    load its Python DLL any more, and the service never came back. Resolve from
+    ``sys.executable`` when frozen.
+    """
+
+    override = os.environ.get("OBS_INSTALL_DIR")
+    if override:
+        return Path(override)
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
 #: Where this build lives. Used by the updater and the uninstaller.
-INSTALL_DIR = Path(os.environ.get("OBS_INSTALL_DIR") or Path(__file__).resolve().parent.parent)
+INSTALL_DIR = install_dir()
 
 
 def ensure_dirs() -> None:
@@ -216,6 +241,7 @@ __all__ = [
     "AgentConfig",
     "ConfigStore",
     "INSTALL_DIR",
+    "install_dir",
     "LOG_DIR",
     "PIPE_PREFIX",
     "PRODUCT",

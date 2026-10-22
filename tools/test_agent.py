@@ -210,17 +210,39 @@ def update_pipeline() -> None:
         (target / "observatory-agent.exe").write_bytes(b"MZ-0.2.0")
         (target / "stale.txt").write_text("old", encoding="utf-8")
 
+        # Pre-flight: a payload whose executable cannot start must not cost the
+        # running install anything. b"not-a-pe-image" is not a real PE file, so
+        # running it fails (WinError 193 on Windows / EACCES on POSIX) -- which is
+        # exactly the "bad build downloaded" case this guard exists for.
+        broken = work / "broken-build"
+        broken.mkdir()
+        (broken / "observatory-agent.exe").write_bytes(b"not-a-pe-image")
+        code_broken = updater.apply_now(str(broken), str(target), 0, "9.9.9")
+        check("坏包不通过预检", code_broken == 4, str(code_broken))
+        check("坏包不破坏现有安装", (target / "observatory-agent.exe").read_bytes() == b"MZ-0.2.0")
+
+        # The swap target has to be the install root (the directory holding the
+        # exe). An INSTALL_DIR resolving to _internal would rename the support
+        # directory and leave the exe with no Python runtime next to it.
+        wrong_root = work / "wrong-root"
+        (wrong_root / "_internal").mkdir(parents=True)
+        code_wrong = updater.apply_now(str(payload), str(wrong_root / "_internal"), 0, "0.2.1")
+        check("拒绝把 _internal 当作安装根目录", code_wrong == 7, str(code_wrong))
+        check("拒绝后不动那个目录", (wrong_root / "_internal").is_dir())
+
         calls = {"stopped": 0, "started": 0, "cleaned": 0}
         original = (
             updater._wait_for_process_exit,
             updater._stop_service,
             updater._start_service,
             updater._cleanup_old,
+            updater.verify_payload,
         )
         updater._wait_for_process_exit = lambda *a, **k: None
         updater._stop_service = lambda *a, **k: calls.__setitem__("stopped", calls["stopped"] + 1)
-        updater._start_service = lambda *a, **k: calls.__setitem__("started", calls["started"] + 1)
+        updater._start_service = lambda *a, **k: (calls.__setitem__("started", calls["started"] + 1), True)[1]
         updater._cleanup_old = lambda *a, **k: calls.__setitem__("cleaned", calls["cleaned"] + 1)
+        updater.verify_payload = lambda *a, **k: (True, "0.2.1")
         try:
             code = updater.apply_now(str(payload), str(target), 0, "0.2.1")
         finally:
@@ -229,6 +251,7 @@ def update_pipeline() -> None:
                 updater._stop_service,
                 updater._start_service,
                 updater._cleanup_old,
+                updater.verify_payload,
             ) = original
 
         check("更新助手返回成功", code == 0, str(code))
@@ -237,6 +260,35 @@ def update_pipeline() -> None:
         check("更新前先停服务", calls["stopped"] == 1, str(calls))
         check("更新后重启服务", calls["started"] == 1, str(calls))
         check("清理旧目录", calls["cleaned"] == 1, str(calls))
+
+        # Swap succeeds but the new build refuses to come up as a service: the
+        # helper has to put the previous build back, otherwise the host is left
+        # with a stopped service and nothing to restart it.
+        payload2 = work / "new-build-2"
+        payload2.mkdir()
+        (payload2 / "observatory-agent.exe").write_bytes(b"MZ-0.2.3")
+        target2 = work / "install2"
+        target2.mkdir()
+        (target2 / "observatory-agent.exe").write_bytes(b"MZ-0.2.2")
+
+        starts = {"n": 0}
+
+        def start_stub():
+            starts["n"] += 1
+            return starts["n"] > 1  # new build fails, rolled-back build works
+
+        original2 = (updater._stop_service, updater._start_service, updater.verify_payload)
+        updater._stop_service = lambda *a, **k: None
+        updater._start_service = start_stub
+        updater.verify_payload = lambda *a, **k: (True, "0.2.3")
+        try:
+            code2 = updater.apply_now(str(payload2), str(target2), 0, "0.2.3")
+        finally:
+            (updater._stop_service, updater._start_service, updater.verify_payload) = original2
+
+        check("新版本起不来时回滚", code2 == 5, str(code2))
+        check("回滚后旧版本仍在位", (target2 / "observatory-agent.exe").read_bytes() == b"MZ-0.2.2")
+        check("回滚共尝试两次启动", starts["n"] == 2, str(starts))
 
         missing = work / "not-there"
         check("载荷缺失时返回错误", updater.apply_now(str(missing), str(target), 0, "0.2.2") == 2)
@@ -909,10 +961,62 @@ def ghost_session_backoff() -> None:
         runner_module.launch_worker = original_launch
 
 
+def install_dir_resolution() -> None:
+    """The frozen layout must not resolve INSTALL_DIR to ``_internal``.
+
+    Getting this wrong is how a device bricked itself: the updater swapped
+    ``<install>\\_internal`` instead of the install root, the exe stayed at the
+    root with no Python runtime beside it, and the service could not start.
+    """
+    group("安装目录解析（冻结布局不能落到 _internal）")
+    from pathlib import Path as _Path
+
+    from observatory_agent import config as agent_config
+
+    source_dir = agent_config.install_dir()
+    check("源码布局下指向 agent 目录", source_dir.name == "agent", str(source_dir))
+
+    saved_frozen = getattr(sys, "frozen", None)
+    saved_exe = sys.executable
+    try:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            install_root = _Path(tmp) / "Observatory"
+            sys.frozen = True
+            sys.executable = str(install_root / "observatory-agent.exe")
+            frozen_dir = agent_config.install_dir()
+            check("冻结布局下指向 exe 所在目录", frozen_dir == install_root, str(frozen_dir))
+            check("冻结布局下不会解析到 _internal", frozen_dir.name != "_internal", str(frozen_dir))
+            check(
+                "冻结布局下与 exe 同级（onedir 的 _internal 在它下面）",
+                frozen_dir.parent == install_root.parent,
+                str(frozen_dir),
+            )
+    finally:
+        if saved_frozen is None:
+            if hasattr(sys, "frozen"):
+                del sys.frozen
+        else:
+            sys.frozen = saved_frozen
+        sys.executable = saved_exe
+
+    saved_override = os.environ.get("OBS_INSTALL_DIR")
+    try:
+        os.environ["OBS_INSTALL_DIR"] = str(_Path("/tmp/explicit-install"))
+        check("OBS_INSTALL_DIR 覆盖优先", agent_config.install_dir() == _Path("/tmp/explicit-install"))
+    finally:
+        if saved_override is None:
+            os.environ.pop("OBS_INSTALL_DIR", None)
+        else:
+            os.environ["OBS_INSTALL_DIR"] = saved_override
+
+
 def main() -> int:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     print(f"Observatory 受控端自检 · {version} · Python {sys.version.split()[0]}")
     version_and_config()
+    install_dir_resolution()
     framing()
     transport()
     transport_upgrade()
