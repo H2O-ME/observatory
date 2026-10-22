@@ -1,0 +1,138 @@
+name: build
+
+# 受控端是 PyInstaller 打出的 Windows 可执行文件。PyInstaller 不做交叉编译，
+# 所以这个 job 必须在真正的 Windows runner 上跑：Linux 上的 Python 只会产出
+# Linux 二进制，在部署服务器上装 Wine 去跑 Windows 版 Python 既慢又脆。
+#
+# 产物交付：构建完成后把 zip 提交到一个每次覆盖的 `agent-dist` 分支。部署
+# 服务器已有该仓库的 git 访问权限，直接 `git fetch origin agent-dist` 取包，
+# 因此不需要 PAT，也不需要往服务器上传 19MB 二进制。
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: 版本号一致性
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: VERSION 与各副本一致
+        run: python tools/set_version.py --check
+      - name: 标签与 VERSION 一致
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          version="$(cat VERSION)"
+          if [ "$tag" != "$version" ]; then
+            echo "tag v$tag 与 VERSION $version 不一致" >&2
+            exit 1
+          fi
+
+  server:
+    name: 服务端
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: 安装依赖
+        run: pip install -r server/requirements.txt
+      - name: 编译检查
+        run: python -m compileall -q server/observatory agent/observatory_agent
+      - name: 单元测试
+        env:
+          OBS_DATA_DIR: ${{ runner.temp }}/obs-data
+          OBS_SECRET_KEY: ci-secret-key-0123456789abcdef0123456789abcdef
+          OBS_ADMIN_PASSWORD: ci-password-123
+          OBS_ENROLL_CODE: ci-enroll
+        run: |
+          cd server
+          python ../tools/test_server.py
+
+  webui:
+    name: 控制台
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20", cache: npm, cache-dependency-path: webui/package-lock.json }
+      - name: 安装依赖
+        run: cd webui && (npm ci --no-audit --no-fund || npm install --no-audit --no-fund)
+      - name: 类型检查与构建
+        run: cd webui && npm run build
+
+  agent:
+    name: 受控端（Windows）
+    runs-on: windows-latest
+    needs: [version]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: x64
+      - name: 构建
+        shell: pwsh
+        run: pwsh -File agent/build/build.ps1
+      - name: 冒烟检查
+        shell: pwsh
+        run: |
+          $exe = "agent/build/dist/observatory-agent/observatory-agent.exe"
+          if (-not (Test-Path $exe)) { throw "没有产出 exe" }
+          $reported = (& $exe --version).Trim()
+          $expected = (Get-Content VERSION -Raw).Trim()
+          if ($reported -ne $expected) { throw "exe 报告 $reported，期望 $expected" }
+          Write-Host "version ok: $reported"
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: observatory-agent
+          path: agent/dist/observatory-agent-*.zip
+          if-no-files-found: error
+      # 交付给部署服务器：覆盖式推送单提交分支，历史里不会堆积二进制。
+      - name: 发布到 agent-dist 分支
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="$(cat VERSION)"
+          zip="agent/dist/observatory-agent-${version}.zip"
+          [ -f "$zip" ] || { echo "没有找到 $zip" >&2; exit 1; }
+          workdir="$(mktemp -d)"
+          cp "$zip" "$workdir/"
+          cd "$workdir"
+          git init -q -b agent-dist
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          printf '%s\n' "$version" > VERSION
+          sha256sum "observatory-agent-${version}.zip" > SHA256SUMS
+          git add -A
+          git commit -q -m "agent ${version}"
+          git push --force \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            agent-dist:agent-dist
+          echo "pushed agent-dist (${version})"
+      - name: 发布 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: agent/dist/observatory-agent-*.zip
+          generate_release_notes: true
