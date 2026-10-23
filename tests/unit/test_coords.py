@@ -27,7 +27,6 @@ def _two_screens():
     )
 
 
-@pytest.mark.skip(reason="W2: 等待 agent/observatory_agent/tasks/input.py 的纯函数坐标层")
 def test_negative_origin_second_monitor() -> None:
     from observatory_agent.tasks.input import to_absolute  # noqa: PLC0415
 
@@ -42,7 +41,6 @@ def test_negative_origin_second_monitor() -> None:
     assert to_absolute(desktop, 1.0, 1.0).x == 1919
 
 
-@pytest.mark.skip(reason="W2: 等待 tasks/input.py 的 DPI 感知缩放")
 def test_four_monitors_negative_origin_dpi_150() -> None:
     """四屏（左右 + 下 + 更高副屏）+ 负坐标 + 150% DPI：换算仍是物理像素。"""
 
@@ -71,7 +69,6 @@ def test_four_monitors_negative_origin_dpi_150() -> None:
     assert (to_absolute(desktop, 1.0, 1.0).x, to_absolute(desktop, 1.0, 1.0).y) == (4479, 2279)
 
 
-@pytest.mark.skip(reason="W2: 等待 tasks/input.py 的 DPI 感知缩放")
 def test_dpi_150_percent_error_within_2px() -> None:
     from observatory_agent.tasks.input import VirtualDesktop, to_absolute  # noqa: PLC0415
 
@@ -84,7 +81,6 @@ def test_dpi_150_percent_error_within_2px() -> None:
     assert point.y == 540
 
 
-@pytest.mark.skip(reason="W2: 归一化坐标 (0..10000) 与 SendInput 绝对坐标互转")
 def test_normalized_roundtrip_is_lossless_enough() -> None:
     from observatory_agent.tasks.input import from_normalized, to_normalized  # noqa: PLC0415
 

@@ -34,15 +34,23 @@ hiddenimports = [
     "pywintypes",
     "pythoncom",
     "servicemanager",
-    # Runtime-dispatched imports.
+    # Runtime-dispatched imports (imported inside functions, so static
+    # analysis cannot always see them).
     "mss.windows",
     "PIL._webp",
     "httpx",
     "websockets.asyncio.client",
-    "observatory_agent.worker",
-    "observatory_agent.updater",
-    "observatory_agent.uninstall",
-    "observatory_agent.service",
+    # 0.3.0 layout: main.py -> core/runtime.py lazily imports the Windows
+    # service/session/pipe helpers and the task handlers.
+    "observatory_agent.core.runtime",
+    "observatory_agent.win.service",
+    "observatory_agent.win.session",
+    "observatory_agent.win.pipe",
+    "observatory_agent.tasks.capture",
+    "observatory_agent.tasks.input",
+    "observatory_agent.tasks.fs",
+    "observatory_agent.tasks.update",
+    "observatory_agent.tasks.uninstall",
 ]
 
 excludes = [

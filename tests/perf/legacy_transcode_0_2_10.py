@@ -1,21 +1,18 @@
-"""Thumbnail generation.
+"""冻结的 0.2.10 服务端转码实现（N4 同轮配对基准，**不要修改**）。
 
-Run in a small worker pool: encoding a WebP is CPU-bound and blocking the event
-loop for 40ms per frame is what made the timeline crawl. Concurrency is capped so
-a burst of uploads cannot starve request handling on a small VPS.
+产品代码里的 `observatory/services/transcode.py` 会在 W3 删除；N4 判据要求
+"当轮配对 old × 容差"，因此这里保留 0.2.10 的两个纯函数作为不可变证据
+（与 `tests/contract/fixtures/agent_0_2_10.py` 同一策略）。
+
+只有测试可以 import 本模块；生产代码不得引用。
 """
 
 from __future__ import annotations
 
-import asyncio
 import io
-import logging
 
 from PIL import Image
 
-log = logging.getLogger(__name__)
-
-MAX_CONCURRENT = 2
 THUMB_QUALITY = 68
 
 
@@ -23,7 +20,9 @@ class ImageError(ValueError):
     pass
 
 
-def _encode_thumbnail(data: bytes, width: int) -> tuple[bytes, int, int]:
+def encode_thumbnail(data: bytes, width: int) -> tuple[bytes, int, int]:
+    """0.2.10 `_encode_thumbnail`：thumb 宽 320、q68、method=4、BILINEAR。"""
+
     try:
         with Image.open(io.BytesIO(data)) as image:
             image.load()
@@ -38,12 +37,12 @@ def _encode_thumbnail(data: bytes, width: int) -> tuple[bytes, int, int]:
             buffer = io.BytesIO()
             resized.save(buffer, format="WEBP", quality=THUMB_QUALITY, method=4)
             return buffer.getvalue(), resized.width, resized.height
-    except Exception as exc:  # noqa: BLE001 - any decoder failure is the same to us
+    except Exception as exc:  # noqa: BLE001 - 与 0.2.10 行为一致
         raise ImageError(f"无法解码图像: {exc}") from exc
 
 
-def _normalise_frame(data: bytes, max_width: int, quality: int) -> tuple[bytes, int, int]:
-    """Re-encode an uploaded frame to a predictable WebP."""
+def normalise_frame(data: bytes, max_width: int, quality: int) -> tuple[bytes, int, int]:
+    """0.2.10 `_normalise_frame`：超宽才缩放、WebP q=clamp(30..95)、method=4。"""
 
     with Image.open(io.BytesIO(data)) as image:
         image.load()
@@ -59,17 +58,4 @@ def _normalise_frame(data: bytes, max_width: int, quality: int) -> tuple[bytes, 
         return buffer.getvalue(), width, height
 
 
-class Thumbnailer:
-    def __init__(self, max_concurrent: int = MAX_CONCURRENT) -> None:
-        self._semaphore = asyncio.Semaphore(max_concurrent)
-
-    async def thumbnail(self, data: bytes, width: int) -> tuple[bytes, int, int]:
-        async with self._semaphore:
-            return await asyncio.to_thread(_encode_thumbnail, data, width)
-
-    async def normalize(self, data: bytes, max_width: int, quality: int) -> tuple[bytes, int, int]:
-        async with self._semaphore:
-            return await asyncio.to_thread(_normalise_frame, data, max_width, quality)
-
-
-__all__ = ["ImageError", "MAX_CONCURRENT", "Thumbnailer"]
+__all__ = ["ImageError", "THUMB_QUALITY", "encode_thumbnail", "normalise_frame"]

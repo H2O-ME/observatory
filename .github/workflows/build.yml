@@ -128,6 +128,8 @@ jobs:
           python -m pip install --quiet -r agent/requirements.txt
       - name: 受控端逻辑测试（含 windows_only 用例）
         run: python -m pytest tests/unit tests/contract -q -m "not perf"
+      - name: Windows 系统层真实冒烟（管道 ACL/身份/DPI/SendInput/update/uninstall staging）
+        run: python tools/win_smoke.py
       - name: 构建
         shell: pwsh
         run: pwsh -File agent/build/build.ps1

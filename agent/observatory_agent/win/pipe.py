@@ -441,7 +441,7 @@ class PipeServer:
                         "got pid=%s sid=%s session=%s image=%s",
                         self.session_id,
                         self.allowed_user_sid,
-                        self.session_id,
+                        self._expected_session_id,
                         identity.pid,
                         identity.user_sid,
                         identity.session_id,
@@ -459,8 +459,14 @@ class PipeServer:
                     self.connected.clear()
             finally:
                 self._handle = None
-                with contextlib.suppress(Exception):  # 断开/关闭失败的句柄由系统回收
-                    win32file.DisconnectNamedPipe(handle)
+                # 注意：DisconnectNamedPipe 在 win32pipe，不在 win32file；两者分开 suppress，
+                # 否则前半句 AttributeError 会让 CloseHandle 永远不执行 → 管道实例句柄泄漏、
+                # 下一次 FIRST_PIPE_INSTANCE 创建失败（win_smoke 的 pipe_identity 抓到的真实回归）。
+                with contextlib.suppress(Exception):
+                    import win32pipe
+
+                    win32pipe.DisconnectNamedPipe(handle)
+                with contextlib.suppress(Exception):
                     win32file.CloseHandle(handle)
 
     def _create_instance(self, win32pipe: Any) -> Any:

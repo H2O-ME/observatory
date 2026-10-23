@@ -347,7 +347,9 @@ class Link:
         http_poll_interval_s: float = MIN_HTTP_ROUND_S,
     ) -> None:
         self._clock = clock or Clock()
-        self._outbox = outbox or Outbox(outbox_limits)
+        # 注意不能用 ``outbox or Outbox(...)``：Outbox 定义了 __len__，空队列是"假值"，
+# 会把调用方注入的持久化 outbox 悄悄换成一份新的内存队列（W1 真机 e2e 踩到）。
+        self._outbox = outbox if outbox is not None else Outbox(outbox_limits)
         self._token = str(token or "")
         self._base_urls = [url.rstrip("/") for url in (base_urls or []) if str(url).strip()]
         self._base_index = 0

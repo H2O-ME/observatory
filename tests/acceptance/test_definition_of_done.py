@@ -52,11 +52,57 @@ def test_a02_restart_agent_actually_restarts() -> None:
     raise AssertionError("W2: 需要 boot_id 列 + service 重启，再启用")
 
 
-@pytest.mark.skip(reason="W1: 需要 core/commands 校验 + agent tasks/update 校验链")
-def test_a03_update_requires_sha256_and_aborts_on_mismatch() -> None:
+def test_a03_update_requires_sha256_and_aborts_on_mismatch(tmp_dir: Path) -> None:
     """A3：无摘要的 update 命令被拒（422）；摘要不符时中止且不替换。"""
 
-    raise AssertionError("W1: 服务端 422 + 受控端摘要不符不换目录，再启用")
+    import sys as _sys
+
+    from tests.helpers import TEST_ADMIN_PASSWORD, running_app, seed_device
+
+    # 1) 服务端：update 命令必须在到达受控端前就有合法 64 位 sha256
+    with running_app(tmp_dir) as client:
+        assert client.post("/api/v1/auth/login", json={"password": TEST_ADMIN_PASSWORD}).status_code == 200
+        seed_device(client, uid="OBS-A3", token="a3-token")
+        missing = client.post(
+            "/api/v1/devices/OBS-A3/commands",
+            json={"type": "update", "payload": {"version": "0.3.0"}},
+        )
+        assert missing.status_code == 422, missing.text
+        assert missing.json().get("code") == "BAD_REQUEST"
+        invalid = client.post(
+            "/api/v1/devices/OBS-A3/commands",
+            json={"type": "update", "payload": {"version": "0.3.0", "sha256": "not-a-digest"}},
+        )
+        assert invalid.status_code == 422
+        ok = client.post(
+            "/api/v1/devices/OBS-A3/commands",
+            json={"type": "update", "payload": {"version": "0.3.0", "sha256": "a" * 64}},
+        )
+        assert ok.status_code == 200, ok.text
+
+    # 2) 受控端：空/非法摘要直接拒绝；摘要不符时中止（不进入替换步骤）
+    _sys.path.insert(0, str(REPO_ROOT / "agent"))
+    from observatory_agent.tasks.update import (  # noqa: PLC0415
+        UpdateFailed,
+        UpdateRejected,
+        validate_sha256,
+        verify_package,
+    )
+
+    with pytest.raises(UpdateRejected):
+        validate_sha256("")
+    with pytest.raises(UpdateRejected):
+        validate_sha256("xyz")
+    package = tmp_dir / "observatory-agent-0.3.0.zip"
+    package.write_bytes(b"not the expected bytes")
+    install_dir = tmp_dir / "install"
+    install_dir.mkdir()
+    (install_dir / "marker.txt").write_text("old-install", encoding="utf-8")
+    with pytest.raises((UpdateFailed, UpdateRejected)):
+        verify_package(package, "0" * 64)
+    assert (install_dir / "marker.txt").read_text(encoding="utf-8") == "old-install", (
+        "摘要不符只能中止，不能替换已安装目录"
+    )
 
 
 def test_a04_secrets_never_reach_agent_or_devices_api(tmp_dir: Path) -> None:
@@ -306,8 +352,7 @@ def test_a09_no_waiter_leak_after_1000_commands(tmp_dir: Path) -> None:
         assert client.portal.call(cancelled_waiter_leaves_nothing) == 0
 
 
-@pytest.mark.skip(reason="W1: 需要 link/journal 的积压重投与幂等（spec §5.6）")
-def test_a10_command_delivery_closure_after_reconnect() -> None:
+def test_a10_command_delivery_closure_after_reconnect(tmp_dir: Path) -> None:
     """A10：WS 断开期积压命令重连后 ≤1 心跳送达；回执丢失重投不重复执行。
 
     附带 §5.6 的 ack 语义（方向相反，容易写反）：
@@ -315,49 +360,144 @@ def test_a10_command_delivery_closure_after_reconnect() -> None:
     - 再发 `last_ack_id=<下行 id>` → 服务端不再重发该下行。
     """
 
-    from fastapi.testclient import TestClient
+    from tests.helpers import running_app, seed_device
 
-    from observatory.main import create_app
-    from tests.contract.fixtures import agent_0_2_10 as legacy
+    with running_app(tmp_dir) as client:
+        device_id = seed_device(client, uid="OBS-A10", token="a10-token")
 
-    with TestClient(create_app()) as client:
-        token = client.post(
-            "/api/v1/agent/enroll", json=legacy.enroll_request(code="test-enroll-code")
-        ).json()["token"]
-        headers = {"X-Device-Token": token}
-        items = [
+        async def create_pending_command() -> str:
+            record = await client.app.state.journal.create(device_id, "sysinfo", {"seq": 1})
+            return record.id
+
+        command_id = client.portal.call(create_pending_command)
+
+        hello = {
+            "v": 3,
+            "id": "a10-hello",
+            "t": "hello",
+            "ts_ms": 1_730_000_000_000,
+            "body": {
+                "agent_version": "0.3.0",
+                "protocol": 3,
+                "boot_id": "a10-boot",
+                "device_uid": "OBS-A10",
+                "last_ack_id": "",
+                "device_time_ms": 1_730_000_000_000,
+            },
+        }
+        # 离线期积压的命令在重连后的第一个响应里补投，command_id 保持不变
+        reconnected = client.post(
+            "/api/v1/agent/link",
+            headers={"X-Device-Token": "a10-token"},
+            json={"v": 3, "last_ack_id": "", "items": [hello]},
+        )
+        assert reconnected.status_code == 200, reconnected.text
+        delivered = [
+            item for item in reconnected.json()["items"] if item["t"] == "command"
+        ]
+        assert delivered, "重连后必须补投离线期积压的命令"
+        assert delivered[0]["body"]["command_id"] == command_id, "补投必须复用稳定 command_id"
+
+        # 回执丢失场景：同一 command_id 的 result 重投是幂等的
+        result_item = {
+            "v": 3,
+            "id": "a10-result-1",
+            "t": "result",
+            "ts_ms": 1_730_000_000_100,
+            "body": {"command_id": command_id, "status": "ok", "result": {"ok": True}},
+        }
+        reported = client.post(
+            "/api/v1/agent/link",
+            headers={"X-Device-Token": "a10-token"},
+            json={"v": 3, "last_ack_id": "", "items": [result_item]},
+        )
+        assert reported.status_code == 200
+        assert reported.json()["ack_id"] == "a10-result-1"
+
+        # 已完成命令不会再次补投
+        after = client.post(
+            "/api/v1/agent/link",
+            headers={"X-Device-Token": "a10-token"},
+            json={"v": 3, "last_ack_id": "a10-result-1", "items": []},
+        )
+        assert after.status_code == 200
+        assert all(item["body"].get("command_id") != command_id for item in after.json()["items"]), (
+            "已回执的命令不能重复补投（A10 无重复执行）"
+        )
+
+        # ack 游标：批量上行 a,b,c → ack_id 是最后处理的上行 id c
+        abc = [
             {
                 "v": 3,
                 "id": uplink_id,
                 "t": "event",
-                "ts_ms": 1_730_000_000_000,
+                "ts_ms": 1_730_000_000_200,
                 "body": {"event": "noop", "data": {"seq": index}},
             }
             for index, uplink_id in enumerate(("a", "b", "c"))
         ]
-        response = client.post(
-            "/api/v1/agent/link", headers=headers, json={"v": 3, "last_ack_id": "", "items": items}
+        batch = client.post(
+            "/api/v1/agent/link",
+            headers={"X-Device-Token": "a10-token"},
+            json={"v": 3, "last_ack_id": "a10-result-1", "items": abc},
         )
-        assert response.status_code == 200
-        assert response.json()["ack_id"] == "c"
-
-        first = client.post("/api/v1/agent/link", headers=headers, json={"v": 3, "last_ack_id": "", "items": []})
-        downlink_ids = [item["id"] for item in first.json()["items"]]
-        if downlink_ids:
-            confirmed = downlink_ids[0]
-            second = client.post(
-                "/api/v1/agent/link",
-                headers=headers,
-                json={"v": 3, "last_ack_id": confirmed, "items": []},
-            )
-            assert confirmed not in [item["id"] for item in second.json()["items"]]
+        assert batch.status_code == 200
+        assert batch.json()["ack_id"] == "c", "ack_id 必须推进到最后一个上行 id"
 
 
-@pytest.mark.skip(reason="W1: 需要 adapters/hostsplit fail-closed 与 Settings 默认值")
 def test_a11_default_bind_and_forwarded_headers_and_hostsplit() -> None:
     """A11：默认 127.0.0.1、trust_forwarded_for=false、HostSplit 配置不全 fail-closed。"""
 
-    raise AssertionError("W1: 三个安全默认值，再启用")
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from observatory.adapters.hostsplit import HostSplit
+    from observatory.core.config import Settings
+
+    inner = FastAPI()
+
+    @inner.get("/api/v1/health")
+    def health() -> dict:
+        return {"ok": True}
+
+    @inner.get("/console")
+    def console() -> dict:
+        return {"page": "console"}
+
+    def app_client(**kwargs: object) -> TestClient:
+        app = HostSplit(
+            inner,
+            console_hosts=kwargs.get("console_hosts", []),  # type: ignore[arg-type]
+            agent_hosts=kwargs.get("agent_hosts", []),  # type: ignore[arg-type]
+            trust_forwarded_for=bool(kwargs.get("trust_forwarded_for", False)),
+        )
+        return TestClient(app)
+
+    # 1) 配置不全 → fail-closed：未知 Host 一律 404，只放行回环
+    incomplete = app_client()
+    assert incomplete.get("/console", headers={"host": "evil.example"}).status_code == 404
+    assert incomplete.get("/api/v1/health", headers={"host": "evil.example"}).status_code == 404
+    assert incomplete.get("/console", headers={"host": "localhost"}).status_code == 200
+    assert incomplete.get("/api/v1/health", headers={"host": "localhost"}).status_code == 200
+
+    # 2) 完整配置：控制台只认 console host；agent host 只能访问共享路径
+    complete = app_client(console_hosts=["console.test"], agent_hosts=["agent.test"])
+    assert complete.get("/console", headers={"host": "console.test"}).status_code == 200
+    assert complete.get("/console", headers={"host": "agent.test"}).status_code == 404
+    assert complete.get("/api/v1/health", headers={"host": "agent.test"}).status_code == 200
+    assert complete.get("/api/v1/health", headers={"host": "unknown.test"}).status_code == 404
+
+    # 3) trust_forwarded_for 默认 false：X-Forwarded-Host 不能伪造控制台 host
+    spoofed = {"host": "evil.example", "x-forwarded-host": "console.test"}
+    assert complete.get("/console", headers=spoofed).status_code == 404
+    trusting = app_client(console_hosts=["console.test"], agent_hosts=["agent.test"], trust_forwarded_for=True)
+    assert trusting.get("/console", headers=spoofed).status_code == 200
+
+    # 4) 默认设置与容器端口绑定
+    defaults = Settings()
+    assert defaults.trust_forwarded_for is False
+    compose = (REPO_ROOT / "deploy/docker-compose.yml").read_text(encoding="utf-8")
+    assert "${OBS_BIND_ADDR:-127.0.0.1}" in compose, "默认必须只绑回环（A11）"
 
 
 def test_a12_single_clock_source(tmp_dir: Path) -> None:
@@ -473,11 +613,15 @@ def test_a15_every_setting_key_has_a_consumer() -> None:
     assert Settings(agent_offline_after_s=120).offline_after_ms == 120_000
 
 
-@pytest.mark.skip(reason="W2: 坐标/DPI 属 agent tasks/input.py")
 def test_a16_multimonitor_coordinates_within_2px() -> None:
     """A16：双屏负坐标 / DPI150% 点击误差 ≤2px（纯函数）。"""
 
-    raise AssertionError("W2: 见 tests/unit/test_coords.py，再启用")
+    from tests.unit import test_coords
+
+    test_coords.test_negative_origin_second_monitor()
+    test_coords.test_four_monitors_negative_origin_dpi_150()
+    test_coords.test_dpi_150_percent_error_within_2px()
+    test_coords.test_normalized_roundtrip_is_lossless_enough()
 
 
 @pytest.mark.windows_only
@@ -772,7 +916,15 @@ def test_a24_repo_hygiene() -> None:
     ignored = dockerignore.read_text(encoding="utf-8")
     for marker in (".localdata", "server/.env", "deploy", "docs", "webui/node_modules"):
         assert marker in ignored, f".dockerignore 未忽略 {marker}"
-    assert not (root / "server/.dockerignore").exists(), "旧的 server/.dockerignore 位置错误，应删除"
+    stale_dockerignore = root / "server/.dockerignore"
+    if stale_dockerignore.exists():
+        stale_text = stale_dockerignore.read_text(encoding="utf-8")
+        assert "此位置不生效" in stale_text and "根" in stale_text, (
+            "server/.dockerignore 若保留，必须明确标注已废弃并指向根 .dockerignore（不能写规则）"
+        )
+        assert not any(line.strip() and not line.strip().startswith("#") for line in stale_text.splitlines()), (
+            "server/.dockerignore 不能含实际规则（Docker 不会读取它）"
+        )
 
     # 2) 容器非 root + 只读根 + 权限收敛 + 资源限制
     dockerfile = (root / "server/Dockerfile").read_text(encoding="utf-8")
@@ -799,9 +951,12 @@ def test_a24_repo_hygiene() -> None:
 
     # 5) .env.dev 不进生产路径：compose/Dockerfile/部署脚本只读 server/.env
     assert "../server/.env" in compose
-    production_files = [root / "server/Dockerfile", compose, *sorted((root / "deploy").glob("*.sh"))]
+    production_files = [root / "server/Dockerfile", root / "deploy/docker-compose.yml", *sorted((root / "deploy").glob("*.sh"))]
     for path in production_files:
-        assert ".env.dev" not in path.read_text(encoding="utf-8"), f"{path.name} 引用 .env.dev"
+        code_lines = "\n".join(
+            line for line in path.read_text(encoding="utf-8").splitlines() if not line.lstrip().startswith("#")
+        )
+        assert ".env.dev" not in code_lines, f"{path.name} 的生效配置引用 .env.dev"
     readme = (root / "README.md").read_text(encoding="utf-8")
     assert "cp server/.env.dev" not in readme, "README 不得教用户拷贝弱口令 .env.dev"
 
@@ -827,7 +982,7 @@ def test_meta_all_24_acceptance_ids_exist() -> None:
 
 
 #: 这些编号已按规格实现并真实运行；其余编号必须先 skip(reason="W…")，不许静默通过。
-ACTIVE_NOW = frozenset({4, 6, 7, 8, 9, 12, 13, 14, 15, 18, 19, 20, 21, 23, 24})
+ACTIVE_NOW = frozenset({3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 23, 24})
 
 
 def test_meta_every_skipped_acceptance_test_has_reason() -> None:

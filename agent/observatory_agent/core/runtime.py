@@ -437,7 +437,8 @@ class ServiceRuntime:
         config = self._store.config
         if self._link_factory is not None:
             return self._link_factory(config, self)
-        outbox = self._outbox or self._open_outbox()
+        # 同 Link：Outbox 有 __len__，不能写 ``self._outbox or ...``（空队列是假值）。
+        outbox = self._outbox if self._outbox is not None else self._open_outbox()
         self._outbox = outbox
         probe_base_s = PROBE_BASE_S
         raw_probe = os.environ.get("OBS_PROBE_BASE_S", "").strip()

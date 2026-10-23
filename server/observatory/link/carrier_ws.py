@@ -22,6 +22,7 @@ from ..core.crypto import DEVICE_TOKEN_HEADER
 from ..core.errors import AppError, ErrorCode
 from ..core.log import log_event
 from .agent_config import build_agent_config
+from .agent_state import make_agent_report_reporter
 from .envelope import (
     EnvelopeError,
     FramingError,
@@ -103,6 +104,7 @@ async def link_ws(websocket: WebSocket) -> None:
         carrier="ws",
         protocol=PROTOCOL_VERSION,
         agent_config=await build_agent_config(websocket.app, identity.settings),
+        device_reporter=make_agent_report_reporter(websocket.app),
     )
     await registry.register(identity.device_id, session)
     session.note_carrier("ws", PROTOCOL_VERSION)

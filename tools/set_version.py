@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 VERSION_FILE = ROOT / "VERSION"
 
 TARGETS = [
-    ROOT / "server" / "observatory" / "version.py",
+    ROOT / "server" / "observatory" / "core" / "config.py",
     ROOT / "agent" / "observatory_agent" / "version.py",
 ]
 PATTERN = re.compile(r'^FALLBACK_VERSION\s*=\s*"[^"]*"$', re.MULTILINE)

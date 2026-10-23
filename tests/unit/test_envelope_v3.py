@@ -1,8 +1,10 @@
-"""协议 v3 信封单元测试（spec §5.1/§5.3）。W1 起启用。"""
+"""协议 v3 信封单元测试（spec §5.1/§5.3）。"""
 
 from __future__ import annotations
 
+import json
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -15,43 +17,78 @@ def _envelope():
     return envelope
 
 
-@pytest.mark.skip(reason="W1: 等待 server/observatory/link/envelope.py")
 def test_envelope_roundtrip() -> None:
     envelope = _envelope()
     body = {"agent_version": "0.3.0", "state": {"transport": "ws"}}
-    blob = envelope.encode("heartbeat", body, ts_ms=1_730_000_000_000)
-    decoded = envelope.decode(blob)
-    assert decoded["v"] == 3
-    assert decoded["t"] == "heartbeat"
-    assert decoded["body"] == body
-    assert decoded["ts_ms"] == 1_730_000_000_000
-    uuid.UUID(decoded["id"])  # id 必须是 uuid4
+    wire = envelope.encode_envelope(envelope.new_envelope("heartbeat", body, ts_ms=1_730_000_000_000))
+    assert isinstance(wire, dict), "线上格式必须是 JSON 对象（§5.6 权威格式）"
+    decoded = envelope.decode_envelope(wire)
+    assert decoded.v == 3
+    assert decoded.t == "heartbeat"
+    assert decoded.body == body
+    assert decoded.ts_ms == 1_730_000_000_000
+    uuid.UUID(decoded.id)
 
 
-@pytest.mark.skip(reason="W1: 等待 link/envelope.py 的 id 注入与校验")
 def test_envelope_id_is_unique_and_preserved() -> None:
     envelope = _envelope()
-    first = envelope.decode(envelope.encode("ping", {}))
-    second = envelope.decode(envelope.encode("ping", {}))
-    assert first["id"] != second["id"]
-    # 显式 id 必须保真（重投同一封信时 id 不变）
-    fixed = envelope.decode(envelope.encode("ping", {}, msg_id="a" * 32))
-    assert fixed["id"] == "a" * 32
+    first = envelope.new_envelope("ping")
+    second = envelope.new_envelope("ping")
+    assert first.id != second.id
+    fixed = envelope.new_envelope("ping", msg_id="a" * 32)
+    assert envelope.decode_envelope(envelope.encode_envelope(fixed)).id == "a" * 32
 
 
-@pytest.mark.skip(reason="W1: 未知 t 的忽略与可观测策略在 link/session.py 中实现")
-def test_unknown_type_is_ignored_not_fatal() -> None:
+def test_unknown_type_is_ignored_not_fatal(tmp_dir: Path) -> None:
+    """未知 t 必须可解码；session 只处理已知类型（忽略而不是 500）。"""
+
     envelope = _envelope()
-    decoded = envelope.decode(envelope.encode("future_type", {"x": 1}))
-    session = __import__("observatory.link.session", fromlist=["AgentSession"])
-    assert hasattr(session.AgentSession, "handle_envelope")
-    assert decoded["t"] == "future_type"
+    decoded = envelope.decode_envelope(envelope.encode_envelope(envelope.new_envelope("future_type", {"x": 1})))
+    assert decoded.t == "future_type"
+
+    from tests.helpers import running_app, seed_device
+
+    with running_app(tmp_dir) as client:
+        seed_device(client, uid="OBS-UNKNOWN", token="unknown-type-token")
+        batch = {
+            "v": 3,
+            "last_ack_id": "",
+            "items": [
+                {
+                    "v": 3,
+                    "id": "unknown-1",
+                    "t": "future_type",
+                    "ts_ms": 1_730_000_000_000,
+                    "body": {"x": 1},
+                }
+            ],
+        }
+        response = client.post("/api/v1/agent/link", headers={"X-Device-Token": "unknown-type-token"}, json=batch)
+        assert response.status_code == 200, response.text
 
 
-@pytest.mark.skip(reason="W1: 上行 id 5 分钟 LRU 去重在 link/session.py")
-def test_uplink_id_dedupes_within_window() -> None:
-    from observatory.link.session import UplinkDeduper  # noqa: PLC0415
+def test_uplink_id_dedupes_within_window(tmp_dir: Path) -> None:
+    """同一上行 id 重投不重复处理（5 分钟 LRU）。"""
 
-    deduper = UplinkDeduper(window_s=300)
-    assert deduper.first_seen("id-1") is True
-    assert deduper.first_seen("id-1") is False
+    from tests.helpers import running_app, seed_device
+
+    item = {
+        "v": 3,
+        "id": "dup-1",
+        "t": "event",
+        "ts_ms": 1_730_000_000_000,
+        "body": {"event": "transport", "data": {"seq": 1}},
+    }
+    with running_app(tmp_dir) as client:
+        seed_device(client, uid="OBS-DEDUPE", token="dedupe-token")
+        for _ in range(2):
+            response = client.post(
+                "/api/v1/agent/link",
+                headers={"X-Device-Token": "dedupe-token"},
+                json={"v": 3, "last_ack_id": "", "items": [item]},
+            )
+            assert response.status_code == 200
+        sessions = client.app.state.links.sessions()
+        assert sessions
+        assert sessions[0].stats()["duplicate"] >= 1, "重复的上行 id 必须被去重计数"
+        assert json.dumps(item)  # 输入不变
