@@ -43,11 +43,14 @@ def configure(
     static: Any | None = None,
     session_scope: Callable[[], Any] | None = None,
     client_factory: Callable[[], Any] | None = None,
+    clock: Callable[[], int] | None = None,
+    api_base: str | None = None,
 ) -> None:
-    """装配期注入（幂等）：静态配置、归档 worker 的会话工厂、HTTP 客户端工厂。
+    """装配期注入（幂等）：静态配置、归档 worker 的会话/HTTP 工厂、时钟与 API 根地址。
 
     ``session_scope`` 需要返回一个异步上下文管理器：``async with session_scope() as s``。
-    未注入时归档 worker 会退回 ``core.db.session_scope``（见 ``archive._open_session``）。
+    ``clock``/``api_base`` 主要给端到端测试用（可控时间、指向本地假 GitHub）；
+    生产留空即使用系统时钟与 ``settings.archive_api_base``。
     """
 
     global _session_scope
@@ -58,12 +61,14 @@ def configure(
     configure_settings(static)
     if session_scope is not None:
         _session_scope = session_scope
-    archive.set_service(
-        archive.ArchiveService(
-            session_scope=_session_scope,
-            **({"client_factory": client_factory} if client_factory is not None else {}),
-        )
-    )
+    options: dict[str, Any] = {"session_scope": _session_scope}
+    if client_factory is not None:
+        options["client_factory"] = client_factory
+    if clock is not None:
+        options["clock"] = clock
+    if api_base is not None:
+        options["api_base"] = api_base
+    archive.set_service(archive.ArchiveService(**options))
 
 
 def ensure_dirs(settings: MediaSettings | None = None) -> None:

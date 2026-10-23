@@ -89,6 +89,8 @@ class Settings(BaseSettings):
     login_rate_window_s: int = Field(default=300, ge=10)
     enroll_rate_limit: int = Field(default=20, ge=1)
     enroll_rate_window_s: int = Field(default=300, ge=10)
+    link_rate_limit: int = Field(default=240, ge=1)
+    link_rate_window_s: int = Field(default=60, ge=1)
 
     # ---- behaviour ----------------------------------------------------------
     log_level: str = "INFO"

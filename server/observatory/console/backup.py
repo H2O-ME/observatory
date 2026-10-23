@@ -241,8 +241,9 @@ async def retrieve_backup_entry(
     if local is not None:
         raise AppError.bad_request("本地副本仍然存在，直接下载即可")
     media_archive = await _media_archive()
+    cfg = await _media_settings(session)
     try:
-        frame = await media_archive.restore(session, row)
+        frame = await media_archive.restore(session, row, settings=cfg)
     except Exception as exc:  # noqa: BLE001 - mapped to the uniform error body
         error_cls = getattr(media_archive, "ArchiveError", None)
         if error_cls is not None and isinstance(exc, error_cls):
@@ -274,8 +275,9 @@ async def delete_backup_entry(
 ) -> dict[str, Any]:
     row = await _load_entry(session, entry_id)
     media_archive = await _media_archive()
+    cfg = await _media_settings(session)
     try:
-        removed = await media_archive.delete_entry(session, row)
+        removed = await media_archive.delete_entry(session, row, settings=cfg)
     except Exception as exc:  # noqa: BLE001 - mapped to the uniform error body
         error_cls = getattr(media_archive, "ArchiveError", None)
         if error_cls is not None and isinstance(exc, error_cls):

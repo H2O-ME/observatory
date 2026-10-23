@@ -172,7 +172,10 @@ def device_out(
         "os_version": str(_pick(device, "os_version") or ""),
         "arch": str(_pick(device, "arch") or ""),
         "agent_version": str(_pick(device, "agent_version") or ""),
-        "protocol": int(_pick(device, "protocol") or 0),
+        # Presence is the single live judgement (C4): after N2 the DB column can
+        # still say 2 until the next migration touch, while the active v3 session
+        # already speaks protocol 3. Report what is actually connected.
+        "protocol": int(state.get("protocol") or _pick(device, "protocol") or 0),
         "boot_id": _pick(device, "boot_id"),
         "enrolled_at_ms": int(_pick(device, "enrolled_at_ms") or 0),
         "last_seen_ms": int(_pick(device, "last_seen_ms") or 0),
@@ -197,16 +200,22 @@ def file_entry_out(raw: dict[str, Any]) -> dict[str, Any]:
     device_time = raw.get("device_time_ms")
     if device_time is None:
         device_time = raw.get("mtime_ms")
+    created = raw.get("device_created_ms")
+    if created is None:
+        created = raw.get("created_ms")
     entry = {
         "name": str(raw.get("name", "")),
         "path": str(raw.get("path", "")),
         "is_dir": bool(raw.get("is_dir")),
         "size": int(raw.get("size") or 0),
         "device_time_ms": int(device_time or 0),
+        "device_created_ms": int(created or 0),
         "hidden": bool(raw.get("hidden")),
         "drive": str(raw.get("drive", "")),
         "free": int(raw.get("free") or 0),
         "filesystem": str(raw.get("filesystem", "")),
+        "readonly": bool(raw.get("readonly")),
+        "attributes": int(raw.get("attributes") or 0),
     }
     return entry
 

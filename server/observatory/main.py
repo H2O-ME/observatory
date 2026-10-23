@@ -23,13 +23,14 @@ from . import presence
 from .adapters.hostsplit import HostSplit
 from .core import clock, errors
 from .core.config import PRODUCT, Settings, get_settings, parse_version, resolve_version
+from .core.crypto import RateLimiter
 from .core.db import Database
 from .core.log import configure_logging, log_event
 from .core.models import Package
 from .link.carrier_http import router as link_http_router
 from .link.carrier_ws import router as link_ws_router
 from .link.journal import CommandJournal
-from .link.registry import InMemoryDeviceDirectory, registry
+from .link.registry import DatabaseDeviceDirectory, registry
 
 log = logging.getLogger(__name__)
 
@@ -124,6 +125,26 @@ def _mount_legacy_agent(app: FastAPI) -> None:
     log.info("legacy agent v2 router mounted at /api/v1/agent (enroll/heartbeat/commands/frames/ws)")
 
 
+def _load_agent_config_provider() -> Any | None:
+    """Console-backed provider for ``welcome.config`` (same function as its DTO).
+
+    ``console/dto.device_safe_config`` delegates to ``core.settings_spec.agent_view``;
+    link never imports console, so the finished dict is produced here and injected.
+    """
+
+    try:
+        from .console.deps import store
+        from .console.dto import device_safe_config
+    except ImportError as exc:
+        log.warning("console agent-config provider unavailable (%s); welcome.config uses safe defaults", exc)
+        return None
+
+    async def provider(session: Any, device_settings: dict[str, Any]) -> dict[str, Any]:
+        return device_safe_config(await store().effective(session, device_settings))
+
+    return provider
+
+
 def _uptime_s(app: FastAPI) -> int:
     started = getattr(app.state, "started_at_ms", 0)
     return max(0, (clock.now_ms() - started) // 1000) if started else 0
@@ -148,8 +169,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.journal = CommandJournal(database.sessionmaker, settings=settings, clock=clock.SYSTEM_CLOCK)
     app.state.links = registry
     app.state.clock = clock.SYSTEM_CLOCK
-    app.state.device_directory = InMemoryDeviceDirectory(settings.secret_key)
+    app.state.device_directory = DatabaseDeviceDirectory(database.sessionmaker, settings)
     app.state.started_at_ms = clock.now_ms()
+    app.state.agent_config_provider = _load_agent_config_provider()
+    directory_name = type(app.state.device_directory).__name__
     latest_agent_version = None
     try:
         latest_agent_version = await _latest_agent_version(database)
@@ -161,10 +184,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         latest_agent_version=latest_agent_version,
         clock=clock.SYSTEM_CLOCK,
     )
-    log.warning("W0 device directory is in-memory: /api/v1/agent/link accepts any non-empty token (W1 replaces it)")
+    log_event(
+        log,
+        logging.INFO,
+        "device_directory.ready",
+        directory=directory_name,
+        agent_config_provider="console" if app.state.agent_config_provider else "defaults",
+    )
     await _start_media(app, database)
     task = asyncio.create_task(_housekeeping(app), name="observatory-housekeeping")
-    log_event(log, logging.INFO, "app.started", version=resolve_version(), schema_version=report.to_version)
+    log_event(
+        log,
+        logging.INFO,
+        "app.started",
+        version=resolve_version(),
+        schema_version=report.to_version,
+        device_directory=directory_name,
+        agent_config="console" if app.state.agent_config_provider else "defaults",
+    )
     try:
         yield
     finally:
@@ -196,6 +233,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.db = None
     app.state.journal = None
     app.state.links = registry
+    app.state.device_directory = None
+    app.state.agent_config_provider = None
+    app.state.link_limiter = RateLimiter(settings.link_rate_limit, settings.link_rate_window_s)
 
     app.add_middleware(
         HostSplit,

@@ -30,6 +30,10 @@ log = logging.getLogger(__name__)
 
 DAY_MS = 86_400_000
 
+#: GitHub API 根地址。单独成项而不是硬编码，是为了让端到端测试指向本地假 GitHub，
+#: 也顺带支持 GitHub Enterprise 自建域名（0.2.10 把地址写死在 archive.py 里）。
+GITHUB_API_DEFAULT = "https://api.github.com"
+
 _TRUE_STRINGS = frozenset({"1", "true", "yes", "on"})
 _FALSE_STRINGS = frozenset({"0", "false", "no", "off"})
 
@@ -67,6 +71,8 @@ class MediaSettings:
     archive_token: str = ""
     archive_branch: str = "main"
     archive_path_prefix: str = "frames"
+    #: GitHub API 根地址（e2e 用本地假 GitHub；自建实例同理）。
+    archive_api_base: str = GITHUB_API_DEFAULT
     archive_queue_size: int = 256
     archive_max_attempts: int = 8
     archive_retry_base_s: int = 15
@@ -198,6 +204,10 @@ def defaults() -> MediaSettings:
         frames_dir=frames_dir,
         thumbs_dir=thumbs_dir,
         max_frame_bytes=_as_int(getattr(static, "max_frame_bytes", None), 6 * 1024 * 1024, minimum=64 * 1024),
+        archive_api_base=_as_text(
+            getattr(static, "archive_api_base", None) or os.environ.get("OBS_ARCHIVE_API_BASE"),
+            GITHUB_API_DEFAULT,
+        ),
     )
     return _DEFAULTS
 
@@ -263,6 +273,9 @@ def resolve(source: Any = None, *, base: MediaSettings | None = None) -> MediaSe
         archive_token=_as_text(read("archive_token", start.archive_token), start.archive_token),
         archive_branch=_as_text(read("archive_branch", start.archive_branch), start.archive_branch),
         archive_path_prefix=_as_text(read("archive_path_prefix", start.archive_path_prefix), start.archive_path_prefix),
+        archive_api_base=_as_text(
+            read("archive_api_base", read("github_api_base", start.archive_api_base)), start.archive_api_base
+        ),
         archive_verify_readback=_as_bool(
             read("archive_verify_readback", start.archive_verify_readback), start.archive_verify_readback
         ),

@@ -221,10 +221,21 @@ def service(request: Request) -> PackageService:
 
 
 async def latest_package(session: AsyncSession, kind: str = "agent") -> Package | None:
-    result = await session.execute(
-        select(Package).where(Package.kind == kind).order_by(Package.created_at_ms.desc())
-    )
-    return result.scalars().first()
+    """Highest semantic version, not the most recently uploaded row (G2)."""
+
+    result = await session.execute(select(Package).where(Package.kind == kind))
+    packages = list(result.scalars().all())
+    valid: list[Package] = []
+    for package in packages:
+        try:
+            parse_version(package.version)
+        except (PackageError, ValueError):
+            log.warning("ignoring package with invalid version: %s", package.version)
+            continue
+        valid.append(package)
+    if not valid:
+        return None
+    return max(valid, key=lambda item: parse_version(item.version))
 
 
 async def latest_version(session: AsyncSession) -> str | None:
@@ -273,6 +284,10 @@ async def update_status(
                     "notes": package.notes,
                     "created_at_ms": package.created_at_ms,
                     "download_url": service(request).url_for(package),
+                    # G2: "latest" is the highest semantic version, not the most
+                    # recently uploaded file. There is deliberately no manual
+                    # "set latest" endpoint; this field is the UI's source of truth.
+                    "latest": latest is not None and package.version == latest,
                 }
                 for package in packages
             ],
@@ -305,7 +320,9 @@ async def upload_package(
         ip=client_ip(request),
         detail={"version": package.version, "bytes": package.size_bytes, "sha256": package.sha256},
     )
-    presence.set_latest_agent_version(package.version)
+    highest = await latest_version(session)
+    if highest is not None:
+        presence.set_latest_agent_version(highest)
     return stamp(
         {
             "version": package.version,
@@ -315,6 +332,7 @@ async def upload_package(
             "notes": package.notes,
             "created_at_ms": package.created_at_ms,
             "download_url": packages.url_for(package),
+            "latest": highest is not None and package.version == highest,
         }
     )
 

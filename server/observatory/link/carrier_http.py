@@ -12,12 +12,15 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Request
 
+from ..core.clock import now_ms
 from ..core.config import Settings
 from ..core.crypto import DEVICE_TOKEN_HEADER
 from ..core.errors import AppError
 from ..core.log import log_event
+from .agent_config import build_agent_config
 from .envelope import UplinkBatch, decode_uplink_batch, encode_downlink_batch
 from .journal import CommandJournal
+from .limits import client_ip, enforce
 from .registry import DeviceDirectory, LinkRegistry
 from .session import AgentSession
 
@@ -56,15 +59,27 @@ async def link_http(
     directory = _directory(request)
 
     token = request.headers.get(DEVICE_TOKEN_HEADER, "").strip()
+    enforce(
+        getattr(request.app.state, "link_limiter", None),
+        token,
+        client_ip(request.headers, request.client, settings),
+    )
     if not token:
         raise AppError.auth("缺少设备令牌")
+    # Invalid token → None → 401; uninstalled device raises AppError.gone → 410.
     identity = await directory.authenticate(token)
     if identity is None:
         raise AppError.auth("设备令牌无效")
 
     batch: UplinkBatch = decode_uplink_batch(payload)
     session = registry.get(identity.device_id)
-    if session is None or getattr(session, "closed", False):
+    # A legacy adapter (protocol 2) is a valid AgentSession but not a v3 link:
+    # replace it so this device gets the proper v3 outbox/command semantics.
+    is_new = session is None or bool(getattr(session, "closed", False)) or session.protocol != batch.protocol
+    stale = False
+    if not is_new:
+        stale = now_ms() - int(session.last_seen_ms or 0) > settings.poll_stale_ms
+    if is_new:
         session = AgentSession(
             device_id=identity.device_id,
             uid=identity.uid,
@@ -72,8 +87,30 @@ async def link_http(
             settings=settings,
             carrier="http",
             protocol=batch.protocol,
+            agent_config=await build_agent_config(request.app, identity.settings),
         )
         await registry.register(identity.device_id, session)
+        replayed = await session.replay_pending()
+        log_event(
+            log,
+            logging.INFO,
+            "link.http.session_new",
+            device_id=identity.device_id,
+            uid=identity.uid,
+            replayed=replayed,
+        )
+    elif stale:
+        # The agent was offline longer than the poll window: refresh the safe
+        # config and drain commands journaled while nobody was listening.
+        session.agent_config = await build_agent_config(request.app, identity.settings)
+        replayed = await session.replay_pending()
+        log_event(
+            log,
+            logging.INFO,
+            "link.http.resumed",
+            device_id=identity.device_id,
+            replayed=replayed,
+        )
     session.note_carrier("http", batch.protocol)
     session.touch()
 

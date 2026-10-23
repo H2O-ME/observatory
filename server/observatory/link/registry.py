@@ -13,12 +13,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..core.config import Settings
 from ..core.crypto import device_token_hash
 from ..core.errors import AppError
 from ..core.log import log_event
+from ..core.models import Device
+from .session import AgentSession, SessionProtocol
 
 log = logging.getLogger(__name__)
 
@@ -31,23 +38,29 @@ class DeviceIdentity:
     uid: str
     token_hash: str = ""
     protocol: int = 3
+    agent_version: str = ""
+    boot_id: str = ""
+    settings: Mapping[str, Any] = field(default_factory=dict)
 
 
 @runtime_checkable
 class DeviceDirectory(Protocol):
-    """Resolve an ``X-Device-Token`` to a device identity."""
+    """Resolve an ``X-Device-Token`` to a device identity.
+
+    Invalid/empty tokens return ``None`` (carriers map that to 401). A valid
+    token for an uninstalled device raises ``AppError.gone`` so the carrier can
+    answer 410 and the agent stops reconnecting instead of retrying forever.
+    """
 
     async def authenticate(self, token: str) -> DeviceIdentity | None:
         """Return the identity for *token*, or ``None`` when it is invalid."""
 
 
 class InMemoryDeviceDirectory:
-    """W0 stand-in for the database-backed directory (W1 replaces this wiring).
+    """**Test-only** deterministic directory (never wired in production).
 
-    A non-empty token authenticates and deterministically maps to a device id.
-    It exists only so the skeleton can receive a v3 envelope without a devices
-    table lookup; it never weakens the v3 production path because ``main``
-    logs a prominent warning while it is in use.
+    Production uses :class:`DatabaseDeviceDirectory`; this stand-in exists for
+    unit tests that do not want to seed SQLite rows.
     """
 
     def __init__(self, secret_key: str) -> None:
@@ -63,34 +76,81 @@ class InMemoryDeviceDirectory:
         return DeviceIdentity(device_id=device_id, uid=uid, token_hash=digest, protocol=3)
 
 
-@runtime_checkable
-class SessionLike(Protocol):
-    """The frozen surface a registered session must expose (v3 or legacy)."""
+class DatabaseDeviceDirectory:
+    """Authenticate device tokens against the ``devices`` table (W1 security).
 
-    device_id: int
-    uid: str
-    carrier: str
-    protocol: int
-    last_seen_ms: int
+    Token storage is the same HMAC used by console enrollment and legacy
+    enrollment (``device_token_hash(token, settings.secret_key)``), so a token
+    rotated during re-enrollment immediately invalidates the previous one.
+    """
 
-    async def send(self, kind: str, body: dict[str, Any], *, deadline_ms: int) -> str:
-        """Queue one downlink envelope and return its message id."""
+    def __init__(self, sessionmaker: async_sessionmaker[AsyncSession], settings: Settings) -> None:
+        self._sessionmaker = sessionmaker
+        self._secret_key = settings.secret_key
+
+    async def authenticate(self, token: str) -> DeviceIdentity | None:
+        cleaned = (token or "").strip()
+        if not cleaned:
+            return None
+        digest = device_token_hash(cleaned, self._secret_key)
+        async with self._sessionmaker() as session:
+            device = (
+                await session.execute(
+                    select(Device).where(
+                        Device.token_hash == digest,
+                        Device.token_hash != "",
+                    )
+                )
+            ).scalars().first()
+        if device is None:
+            return None
+        if device.uninstalled_at_ms:
+            raise AppError.gone("受控端已卸载，旧令牌不再可用")
+        return DeviceIdentity(
+            device_id=int(device.id),
+            uid=str(device.uid or ""),
+            token_hash=digest,
+            protocol=int(device.protocol or 3),
+            agent_version=str(device.agent_version or ""),
+            boot_id=str(device.boot_id or ""),
+            settings=dict(device.settings or {}),
+        )
+
+
+#: Backward-compatible alias — the actual contract is ``SessionProtocol``.
+SessionLike = SessionProtocol
 
 
 class LinkRegistry:
-    """One live session per device id; replacement closes the stale session."""
+    """One live session per device id; replacement closes the stale session.
+
+    Exactly one implementation family is allowed: :class:`AgentSession` (v3 and
+    legacy adapters both subclass it). A duck-typed session is rejected loudly so
+    C1 cannot silently regress into two state machines.
+    """
 
     def __init__(self) -> None:
-        self._sessions: dict[int, Any] = {}
+        self._sessions: dict[int, SessionProtocol] = {}
         self._lock = threading.Lock()
 
-    def get(self, device_id: int) -> Any | None:
+    def get(self, device_id: int) -> SessionProtocol | None:
         with self._lock:
             return self._sessions.get(int(device_id))
 
-    async def register(self, device_id: int, session: Any, *, replace: bool = True) -> Any | None:
+    async def register(
+        self,
+        device_id: int,
+        session: SessionProtocol,
+        *,
+        replace: bool = True,
+    ) -> SessionProtocol | None:
         """Bind *session* to *device_id*. Returns the replaced session, if any."""
 
+        if not isinstance(session, AgentSession):
+            raise TypeError(
+                "registry only accepts link.session.AgentSession; "
+                f"got {type(session).__name__} (legacy adapters must subclass AgentSession)"
+            )
         key = int(device_id)
         with self._lock:
             previous = self._sessions.get(key)
@@ -110,8 +170,8 @@ class LinkRegistry:
         log_event(log, logging.DEBUG, "registry.registered", device_id=key, carrier=getattr(session, "carrier", "?"))
         return previous
 
-    async def register_legacy(self, device_id: int, session: Any) -> Any | None:
-        """Legacy 0.2.x entry point: a duck-typed session joins the same registry."""
+    async def register_legacy(self, device_id: int, session: SessionProtocol) -> SessionProtocol | None:
+        """Legacy 0.2.x entry point; the adapter must subclass ``AgentSession``."""
 
         return await self.register(device_id, session)
 
@@ -190,6 +250,7 @@ def require_session(device_id: int) -> Any:
 
 
 __all__ = [
+    "DatabaseDeviceDirectory",
     "DeviceDirectory",
     "DeviceIdentity",
     "InMemoryDeviceDirectory",

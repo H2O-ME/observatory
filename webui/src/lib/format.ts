@@ -45,12 +45,6 @@ export function formatTime(ms: number): string {
   return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
-export function formatTimeShort(ms: number): string {
-  if (!ms) return "—";
-  const date = new Date(ms);
-  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-
 export function formatDate(ms: number): string {
   if (!ms) return "—";
   const date = new Date(ms);
@@ -87,19 +81,6 @@ export function frameTimeMs(value: { device_time_ms?: number; ts_ms?: number } |
   return 0;
 }
 
-export function formatPercent(value: number | null | undefined, digits = 0): string {
-  if (value === null || value === undefined) return "—";
-  const number = Number(value);
-  if (!Number.isFinite(number)) return "—";
-  return `${number.toFixed(digits)}%`;
-}
-
-export function basename(path: string): string {
-  const cleaned = path.replace(/[\\/]+$/, "");
-  const parts = cleaned.split(/[\\/]/);
-  return parts[parts.length - 1] || cleaned;
-}
-
 export function dirname(path: string): string | null {
   const cleaned = path.replace(/[\\/]+$/, "");
   if (!cleaned) return null;
@@ -113,17 +94,10 @@ export function dirname(path: string): string | null {
 
 export function joinPath(parent: string, name: string): string {
   if (!parent) return name;
-  const separator = parent.includes("\\") ? "\\" : "/";
+  // A bare drive ("C:") has no separator of its own; it must become "C:\name",
+  // not "C:/name" — the agent treats both, but keeping one form avoids duplicate
+  // path strings in the UI (same directory shown twice).
+  const separator = /^[A-Za-z]:$/.test(parent) ? "\\" : parent.includes("\\") ? "\\" : "/";
   const trimmed = parent.replace(/[\\/]+$/, "");
   return `${trimmed}${separator}${name}`;
-}
-
-export function initials(value: string): string {
-  const trimmed = (value || "?").trim();
-  return trimmed.slice(0, 2).toUpperCase();
-}
-
-export function prettyNumber(value: number | null | undefined): string {
-  if (value === null || value === undefined) return "—";
-  return Number(value).toLocaleString("zh-CN");
 }

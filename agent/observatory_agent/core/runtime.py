@@ -45,6 +45,7 @@ import os
 import subprocess
 import threading
 import time
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -57,11 +58,12 @@ from .config import (
     ConfigStore,
     ensure_dirs,
     outbox_limits_from_env,
+    outbox_path,
 )
 from .envelope import EnvelopeError, envelope_from_dict, new_envelope, new_id
-from .link import Link, LinkClosed
+from .link import PROBE_BASE_S, Link, LinkClosed
 from .logging import read_tail, setup_logging
-from .outbox import OutboxFull
+from .outbox import Outbox, OutboxFull, SqliteOutboxStore
 
 log = logging.getLogger(__name__)
 
@@ -74,10 +76,6 @@ CAPTURE_HEALTH_STALE_MS = 60_000
 #: worker 拉起失败后的递进冷却：30s → 60s → … → 30 分钟。
 LAUNCH_COOLDOWN_S = 30.0
 LAUNCH_BACKOFF_MAX_S = 1800.0
-#: 更新包文件名前缀/后缀（``tasks/update.stage_update`` 的命名约定）；
-#: ``PackageFetcher`` 只收到目标路径，版本号从这里解析。
-UPDATE_ARCHIVE_PREFIX = "observatory-agent-"
-UPDATE_ARCHIVE_SUFFIX = ".zip"
 #: 重启/更新/卸载前给上行信封留出的发送时间（之后进程可能立即退出）。
 RESULT_FLUSH_S = 1.0
 #: 控制会话 TTL 的兜底清理间隔（服务端会发 control stop，这里只防泄漏）。
@@ -86,6 +84,28 @@ CONTROL_REAP_S = 300.0
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+#: 更新包内版本文件（``agent/build/build.ps1`` 把仓库 VERSION 放在 zip 根）。
+PACKAGE_VERSION_FILE = "VERSION"
+
+
+def read_package_version(archive: Path) -> str:
+    """读更新包根部的 ``VERSION``（纯函数，便于单测/拒绝错包）。
+
+    返回去空白后的版本字符串；包损坏、缺文件、非 UTF-8 时返回空串，由调用方
+    决定拒绝升级（不允许"猜一个版本继续装"）。
+    """
+
+    try:
+        with zipfile.ZipFile(archive) as bundle:
+            try:
+                raw = bundle.read(PACKAGE_VERSION_FILE)
+            except KeyError:
+                return ""
+    except (OSError, zipfile.BadZipFile):
+        return ""
+    return raw.decode("utf-8", "replace").strip()
 
 
 def _session_dict(item: Any) -> dict[str, Any]:
@@ -195,6 +215,7 @@ class ServiceRuntime:
         self._service_mode = bool(service_mode)
         self._link_factory = link_factory
         self._link: Link | None = None
+        self._outbox: Outbox | None = None
         self._dispatcher = CommandDispatcher()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -202,12 +223,15 @@ class ServiceRuntime:
         self._stop_flag = threading.Event()
         self._pipes: dict[int, Any] = {}
         self._processes: dict[int, int] = {}
+        self._local_workers: dict[int, Any] = {}
         self._launch_failures: dict[int, tuple[int, float]] = {}
         self._sessions: list[Any] = []
         self._session_state: dict[int, dict[str, Any]] = {}
         self._controllers: dict[str, int] = {}
         self._health = CaptureHealthAggregator()
         self._updating = False
+        self._update_running = False
+        self._update_task: Any = None
         self._started_at_ms = _now_ms()
         self._sysinfo_cache: dict[str, Any] = {}
         self._last_launch_log_s: dict[int, float] = {}
@@ -305,6 +329,9 @@ class ServiceRuntime:
             if link is not None:
                 with contextlib.suppress(Exception):  # 关闭链路失败只能记录
                     await link.close()
+            outbox = self._outbox
+            if outbox is not None:
+                outbox.close()
             self._shutdown_workers()
             log.info("服务运行时已停止")
 
@@ -323,8 +350,11 @@ class ServiceRuntime:
         if self._store.config.token:
             return
         code = self._enroll_code()
-        if not code:
-            log.error("设备尚未注册，且没有注册码（请用安装脚本安装，或设置 OBS_ENROLL_CODE）")
+        install_token = self._install_token()
+        if not code and not install_token:
+            log.error(
+                "设备尚未注册，且没有注册码/安装令牌（请用安装脚本安装，或设置 OBS_ENROLL_CODE）"
+            )
             return
         try:
             await self._enroll(self._link, code)
@@ -334,6 +364,12 @@ class ServiceRuntime:
     def _enroll_code(self) -> str:
         config = self._store.config
         return str(config.enroll_code or os.environ.get("OBS_ENROLL_CODE", "")).strip()
+
+    def _install_token(self) -> str:
+        """一次性安装令牌（A18）：安装器只传 ``--install-token``，不传注册码。"""
+
+        config = self._store.config
+        return str(config.install_token or os.environ.get("OBS_INSTALL_TOKEN", "")).strip()
 
     async def _enroll(self, link: Link, code: str) -> str:
         from .. import __version__
@@ -372,8 +408,8 @@ class ServiceRuntime:
 
         link = self._link
         code = self._enroll_code()
-        if link is None or not code:
-            log.error("设备令牌失效，且没有注册码，无法重新注册")
+        if link is None or not (code or self._install_token()):
+            log.error("设备令牌失效，且没有注册码/安装令牌，无法重新注册")
             return None
         try:
             return await self._enroll(link, code)
@@ -382,10 +418,49 @@ class ServiceRuntime:
             return None
 
     # -- 链路 ------------------------------------------------------------
+    def _open_outbox(self) -> Outbox:
+        """持久化 outbox（W1）：磁盘不可用时降级为内存，但必须 loud 失败。"""
+
+        limits = outbox_limits_from_env()
+        try:
+            store = SqliteOutboxStore(outbox_path())
+        except Exception as exc:  # noqa: BLE001 - 磁盘损坏不能阻止受控端上线
+            log.exception(
+                "打开持久化 outbox 失败（%s），本次运行降级为内存队列：进程重启会丢未确认上行",
+                exc,
+            )
+            return Outbox(limits)
+        log.info("持久化 outbox 已打开 path=%s", outbox_path())
+        return Outbox(limits, store=store)
+
     def _build_link(self) -> Link:
         config = self._store.config
         if self._link_factory is not None:
             return self._link_factory(config, self)
+        outbox = self._outbox or self._open_outbox()
+        self._outbox = outbox
+        probe_base_s = PROBE_BASE_S
+        raw_probe = os.environ.get("OBS_PROBE_BASE_S", "").strip()
+        if raw_probe:
+            try:
+                probe_base_s = max(1.0, float(raw_probe))
+            except ValueError:
+                log.warning("OBS_PROBE_BASE_S=%r 不是数字，使用默认 %ss", raw_probe, PROBE_BASE_S)
+        else:
+            # A15：transport_reprobe_s 是 CarrierPolicy 向上探测的起始间隔。
+            try:
+                probe_base_s = max(1.0, float(config.setting("transport_reprobe_s", PROBE_BASE_S)))
+            except (TypeError, ValueError):
+                log.warning(
+                    "transport_reprobe_s=%r 不是数字，使用默认 %ss",
+                    config.setting("transport_reprobe_s", PROBE_BASE_S),
+                    PROBE_BASE_S,
+                )
+        try:
+            poll_interval_s = max(1.0, float(config.setting("poll_interval_s", 5)))
+        except (TypeError, ValueError):
+            log.warning("poll_interval_s 配置非法，使用默认 5s")
+            poll_interval_s = 5.0
         return Link(
             token=config.token,
             base_urls=config.base_urls,
@@ -393,11 +468,14 @@ class ServiceRuntime:
             agent_version=self._safe_version(),
             boot_id=config.boot_id,
             clock=self._store.clock,
+            outbox=outbox,
             outbox_limits=outbox_limits_from_env(),
             heartbeat_payload=self._heartbeat_payload,
             on_carrier_change=self._on_carrier_change,
             on_unauthorized=self._reauth,
             heartbeat_interval_s=int(config.setting("heartbeat_interval_s", 20)),
+            probe_base_s=probe_base_s,
+            http_poll_interval_s=poll_interval_s,
         )
 
     def _heartbeat_payload(self) -> dict[str, Any]:
@@ -458,7 +536,13 @@ class ServiceRuntime:
             if session_id not in active:
                 log.info("会话 %s 已结束，停止 worker 管道", session_id)
                 self._stop_worker(session_id)
-        if not self._service_mode:
+        if not self._service_mode and os.environ.get("OBS_WORKER_IN_CONSOLE", "").strip().lower() not in {
+            "1",
+            "true",
+            "yes",
+        }:
+            # 前台模式默认不拉起用户会话 worker（0.2.10 行为，避免调试时冒出采集进程）；
+            # E2E/现场排障可用 OBS_WORKER_IN_CONSOLE=1 打开完整链路（命令→worker→帧）。
             return
         target = self._select_target()
         if target is None:
@@ -466,15 +550,30 @@ class ServiceRuntime:
         self._ensure_worker(target)
 
     def _select_target(self) -> int | None:
-        try:
-            from ..win.session import select_capturable
-        except ImportError:  # pragma: no cover
+        """按 ``capture_scope`` 选择要采集的会话（A15 的消费者）。
+
+        ``session``（默认）：优先当前交互用户会话（非 console 会话），没有则退回
+        console 会话；``console``：优先 console 会话。状态过滤与 0.2.10 一致
+        （必须有真实用户名且处于 active/connected），避免在残留会话上反复重试。
+        """
+
+        scope = str(self._store.setting("capture_scope", "session")).strip().lower()
+        entries = [_session_dict(item) for item in self._sessions]
+        candidates = [
+            entry
+            for entry in entries
+            if str(entry.get("username") or "").strip()
+            and str(entry.get("state") or "").lower() in {"active", "connected"}
+        ]
+        if not candidates:
             return None
-        try:
-            return select_capturable(self._sessions)
-        except Exception as exc:  # noqa: BLE001 - 选择器是纯函数，异常说明输入形状错了
-            log.warning("选择可采集会话失败：%s", exc)
-            return None
+        console = [entry for entry in candidates if entry.get("is_console")]
+        if scope == "console":
+            chosen = (console or candidates)[0]
+        else:
+            interactive = [entry for entry in candidates if not entry.get("is_console")]
+            chosen = (interactive or console or candidates)[0]
+        return int(chosen.get("session_id") or 0) or None
 
     def _ensure_worker(self, session_id: int) -> None:
         pipe = self._pipes.get(session_id)
@@ -513,20 +612,68 @@ class ServiceRuntime:
         try:
             allowed_sid = session_user_sid(session_id)
         except Exception as exc:  # noqa: BLE001 - 没有用户令牌的残留会话无法建管道
-            log.info("会话 %s 无法解析用户 SID，跳过 worker：%s", session_id, exc)
-            return None
+            if self._service_mode:
+                log.info("会话 %s 无法解析用户 SID，跳过 worker：%s", session_id, exc)
+                return None
+            # 前台/调试模式与服务进程同用户：WTSQueryUserToken 需要 SE_TCB，
+            # 普通管理员也没有；此时用当前进程令牌的 SID 仍然满足"只允许本用户"。
+            allowed_sid = self._current_user_sid()
+            if not allowed_sid:
+                log.error("会话 %s 无法确定允许的用户 SID，跳过 worker", session_id)
+                return None
+            log.info("前台模式：会话 %s 使用当前进程 SID 校验 worker 管道", session_id)
+        # 生产（service）模式严格要求 worker 镜像=本安装目录 exe；前台调试模式下
+# 用户可能用 venv python / 不同解释器路径启动，本机进程身份已由 SID+会话校验，
+# 不再卡镜像路径（否则 A17 在调试场景会把合法 worker 拒之门外）。
+        expected_image = executable_path() if self._service_mode else None
         server = PipeServer(
             session_id,
             allowed_user_sid=allowed_sid,
             on_message=lambda header, payload, sid=session_id: self._on_pipe_message(sid, header, payload),
-            expected_image_path=executable_path(),
+            expected_image_path=expected_image,
         )
         server.start()
         self._pipes[session_id] = server
         log.info("会话 %s 的 worker 管道已开始监听", session_id)
         return server
 
+    @staticmethod
+    def _current_user_sid() -> str | None:
+        """当前进程用户的 SID（前台模式用来替代 WTSQueryUserToken）。"""
+
+        try:
+            import win32api
+            import win32security
+        except ImportError:  # pragma: no cover - 非 Windows
+            return None
+        try:
+            token = win32security.OpenProcessToken(
+                win32api.GetCurrentProcess(), win32security.TOKEN_QUERY
+            )
+            try:
+                sid = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+            finally:
+                win32api.CloseHandle(token)
+            return str(win32security.ConvertSidToStringSid(sid))
+        except Exception as exc:  # noqa: BLE001 - 取不到 SID 时由调用方拒绝建管道
+            log.warning("读取当前进程用户 SID 失败：%s", exc)
+            return None
+
     def _launch_worker(self, session_id: int) -> None:
+        if not self._service_mode:
+            # 前台/调试模式：直接在当前会话 spawn worker（无需 CreateProcessAsUser，
+            # 普通用户也能跑完整链路；service 模式仍走跨会话拉起）。
+            try:
+                from ..win.session import spawn_local, worker_arguments
+
+                process = spawn_local(worker_arguments(session_id))
+            except Exception as exc:  # noqa: BLE001 - 拉起失败要可观测并按退避重试
+                log.warning("会话 %s 前台模式拉起 worker 失败：%s", session_id, exc)
+                return
+            self._local_workers[session_id] = process
+            self._processes[session_id] = int(process.pid)
+            log.info("会话 %s 的 worker 已拉起（前台模式）pid=%s", session_id, process.pid)
+            return
         try:
             from ..win.session import launch_worker
         except ImportError as exc:  # pragma: no cover
@@ -568,12 +715,26 @@ class ServiceRuntime:
                 log.debug("向会话 %s 发送 stop 失败：%s", session_id, exc)
             server.stop()
         self._processes.pop(session_id, None)
+        worker = self._local_workers.pop(session_id, None)
+        if worker is not None and worker.poll() is None:
+            try:
+                worker.terminate()
+                worker.wait(timeout=5)
+            except Exception as exc:  # noqa: BLE001 - worker 已退出/无权限时只记录
+                log.debug("终止前台模式 worker 失败：%s", exc)
         self._launch_failures.pop(session_id, None)
         self._health.remove(session_id)
 
     def _shutdown_workers(self) -> None:
         for session_id in list(self._pipes):
             self._stop_worker(session_id)
+        for session_id, worker in list(self._local_workers.items()):
+            if worker.poll() is None:
+                try:
+                    worker.terminate()
+                except Exception as exc:  # noqa: BLE001 - 退出阶段只记录
+                    log.debug("终止本地 worker %s 失败：%s", session_id, exc)
+            self._local_workers.pop(session_id, None)
 
     def _on_pipe_message(self, session_id: int, header: dict[str, Any], payload: bytes) -> None:
         """管道线程回调：把消息投递到 asyncio 循环（不在这里做 IO/等待）。"""
@@ -785,16 +946,11 @@ class ServiceRuntime:
         try:
             from ..tasks import update as update_task
 
-            update_task.register_handlers(
-                self._dispatcher,
-                fetch=self._fetch_package,
-                staging_dir=STAGING_DIR,
-                install_dir=INSTALL_DIR,
-                request_shutdown=self._request_shutdown,
-                on_event=self._update_event,
-                spawn_task=self._spawn,
-                current_pid=os.getpid(),
-            )
+            # 复用 agent-sys 的更新处理器（校验/事件/后台任务/停服），
+            # 但 fetch 必须绑定"本次命令的 version"：做一个薄包装，避免从
+            # staging 文件名反解版本，也避免共享可变的版本状态。
+            self._update_task = update_task
+            self._dispatcher.register("update", self._cmd_update)
         except Exception:  # noqa: BLE001 - 处理器缺失必须显式告警（更新命令会回执失败）
             log.exception("注册 update 处理器失败，更新命令将不可用")
         try:
@@ -812,31 +968,76 @@ class ServiceRuntime:
         except Exception:  # noqa: BLE001 - 注册失败时卸载命令会回执失败，服务保持在线
             log.exception("注册 uninstall 处理器失败，卸载命令将不可用")
 
+    def _cmd_update(self, command: Command) -> CommandResult:
+        """更新命令的唯一入口：并发保护 + 绑定本次版本的 fetch。
+
+        ``tasks.update.make_update_handler`` 的 ``PackageFetcher`` 只接收目标路径，
+        不接收版本；这里**按命令**构造处理器，把 version 闭包进 fetch，这样既不改
+        agent-sys 的文件，也不靠 staging 文件名反解版本。
+        """
+
+        version = str(command.payload.get("version") or "").strip()
+        if self._update_running:
+            return CommandResult(
+                ok=False,
+                result={"version": version},
+                error="已有更新在进行中",
+                error_code="BAD_REQUEST",
+            )
+        task = self._update_task
+        if task is None:
+            return CommandResult(
+                ok=False,
+                result={"version": version},
+                error="更新组件不可用",
+                error_code="INTERNAL",
+            )
+        handler = task.make_update_handler(
+            fetch=lambda destination: self._fetch_package(version, destination),
+            staging_dir=STAGING_DIR,
+            install_dir=INSTALL_DIR,
+            request_shutdown=self._request_shutdown,
+            on_event=self._update_event,
+            spawn_task=self._spawn,
+            current_pid=os.getpid(),
+        )
+        result = handler(command)
+        if result.ok:
+            self._update_running = True
+            self._updating = True
+        return result
+
     def _spawn(self, coroutine: Any) -> Any:
         """把后台协程挂到运行时事件循环（处理器的 ``spawn_task`` 注入点）。"""
 
         return asyncio.get_running_loop().create_task(coroutine)
 
-    async def _fetch_package(self, destination: Path) -> None:
-        """``PackageFetcher``：下载安装包（版本号从 staging 文件名解析）。
+    async def _fetch_package(self, version: str, destination: Path) -> None:
+        """``PackageFetcher``：下载安装包，并**读包内 VERSION** 校验与 offer 一致。
 
-        ``tasks/update.stage_update`` 固定把目标命名为
-        ``observatory-agent-<version>.zip``，而 ``PackageFetcher`` 协议只给了目标
-        路径；版本从文件名反解，避免把版本号复制成两份状态。
+        版本来源只有服务端下发的 version（闭包注入），不再从 staging 文件名反解；
+        包内版本不符/缺失时删除下载文件并拒绝升级（错包绝不能进 swap 阶段）。
         """
 
         from ..tasks.update import UpdateFailed
 
-        name = Path(destination).name
-        if not (name.startswith(UPDATE_ARCHIVE_PREFIX) and name.endswith(UPDATE_ARCHIVE_SUFFIX)):
-            raise UpdateFailed(f"无法从安装包文件名解析版本: {name}", step="fetch")
-        version = name[len(UPDATE_ARCHIVE_PREFIX) : -len(UPDATE_ARCHIVE_SUFFIX)]
         if not version:
-            raise UpdateFailed(f"安装包文件名为空版本: {name}", step="fetch")
+            raise UpdateFailed("更新请求缺少 version", step="fetch")
         link = self._link
         if link is None:
             raise UpdateFailed("链路未建立，无法下载安装包", step="fetch")
-        await link.download_package(version, Path(destination))
+        target = Path(destination)
+        await link.download_package(version, target)
+        actual = read_package_version(target)
+        if not actual:
+            target.unlink(missing_ok=True)
+            raise UpdateFailed("安装包缺少根目录 VERSION，拒绝升级", step="fetch")
+        if actual != version:
+            target.unlink(missing_ok=True)
+            raise UpdateFailed(
+                f"安装包自称版本 {actual!r} 与目标 {version!r} 不一致，拒绝升级", step="fetch"
+            )
+        log.info("安装包版本校验通过 version=%s bytes=%s", version, target.stat().st_size)
 
     async def _cmd_sysinfo(self, _command: Command) -> CommandResult:
         info = await asyncio.to_thread(
@@ -896,9 +1097,13 @@ class ServiceRuntime:
     async def _update_event(self, name: str, data: dict[str, Any] | None = None) -> None:
         """更新流程事件回调：维护 ``state.updating`` 并原样上报事件。"""
 
-        if name in {"update_downloading", "update_extracting", "update_precheck", "update_helper_started"}:
+        if name == "update_started":
+            self._update_running = True
+            self._updating = True
+        elif name in {"update_downloading", "update_extracting", "update_precheck", "update_helper_started"}:
             self._updating = True
         elif name in {"update_failed", "update_ready"}:
+            self._update_running = False
             self._updating = False
         await self._send_event(name, data)
 
@@ -945,8 +1150,10 @@ class ServiceRuntime:
         return min(connected)
 
     async def _forward_control(self, body: dict[str, Any]) -> None:
-        # 规格 §5.6 的 control body 用 "op"；兼容 0.2.10 风格的 "action" 与输入事件。
-        action = str(body.get("op") or body.get("action") or "")
+        # 规格 §5.6（W1 定稿）：{session, action: start|input|stop, fps?, quality?,
+        # deadline_ms?, ev?}；输入事件不再有独立信封类型，统一走 action="input"。
+        # 兼容读取旧字段 "op"（W0 草稿），新服务端只发 action。
+        action = str(body.get("action") or body.get("op") or "")
         session_token = str(body.get("session") or "")
         if not action:
             if body.get("ev"):

@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { Camera, Power, RotateCcw, Trash2, TriangleAlert, Unplug } from "lucide-react";
 
 import { Meter } from "@/components/meter";
+import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -128,6 +129,8 @@ export function OverviewView({ device, onRefresh }: Props) {
   const navigate = useNavigate();
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  /** One dialog for all destructive actions; `null` = closed. */
+  const [pending, setPending] = useState<null | "restart" | "uninstall" | "purge" | "delete">(null);
 
   const capabilities = capabilitiesOf(device.presence);
   const transport = transportOf(device.presence);
@@ -145,11 +148,13 @@ export function OverviewView({ device, onRefresh }: Props) {
     onSuccess: (command) => {
       setMessage(`已下发命令 ${command.type}（${command.status}）`);
       setError("");
+      setPending(null);
       onRefresh();
     },
     onError: (failure) => {
       setError(errorText(failure, "命令下发失败"));
       setMessage("");
+      setPending(null);
     },
   });
 
@@ -158,9 +163,13 @@ export function OverviewView({ device, onRefresh }: Props) {
     onSuccess: (result) => {
       setMessage(result.message);
       setError("");
+      setPending(null);
       onRefresh();
     },
-    onError: (failure) => setError(errorText(failure, "卸载失败")),
+    onError: (failure) => {
+      setError(errorText(failure, "卸载失败"));
+      setPending(null);
+    },
   });
 
   const purgeFrames = useMutation({
@@ -168,11 +177,17 @@ export function OverviewView({ device, onRefresh }: Props) {
     onSuccess: (result) => {
       setMessage(result.message);
       setError("");
+      setPending(null);
       void queryClient.invalidateQueries({ queryKey: ["device", device.uid] });
       void queryClient.invalidateQueries({ queryKey: ["devices"] });
+      void queryClient.invalidateQueries({ queryKey: ["timeline"] });
+      void queryClient.invalidateQueries({ queryKey: ["frames"] });
       onRefresh();
     },
-    onError: (failure) => setError(errorText(failure, "清理失败")),
+    onError: (failure) => {
+      setError(errorText(failure, "清理失败"));
+      setPending(null);
+    },
   });
 
   const remove = useMutation({
@@ -181,7 +196,10 @@ export function OverviewView({ device, onRefresh }: Props) {
       void queryClient.invalidateQueries({ queryKey: ["devices"] });
       navigate("/wall", { replace: true });
     },
-    onError: (failure) => setError(errorText(failure, "删除失败")),
+    onError: (failure) => {
+      setError(errorText(failure, "删除失败"));
+      setPending(null);
+    },
   });
 
   const cpu = num(device.sysinfo, "cpu_percent");
@@ -279,7 +297,7 @@ export function OverviewView({ device, onRefresh }: Props) {
           <dt className="text-faint">受控端</dt>
           <dd className="truncate font-mono text-soft">
             v{device.agent_version || "?"}
-            {device.protocol ? ` · ${device.protocol}` : ""}
+            {device.protocol ? ` · 协议 ${device.protocol}` : ""}
           </dd>
           <dt className="text-faint">注册时间</dt>
           <dd className="truncate text-soft">{formatDateTime(device.enrolled_at_ms)}</dd>
@@ -337,9 +355,7 @@ export function OverviewView({ device, onRefresh }: Props) {
             variant="outline"
             disabled={!commandBusAvailable || act.isPending}
             title={commandBusAvailable ? "重启受控端服务（不会重启机器）" : "没有可用的命令通道"}
-            onClick={() => {
-              if (window.confirm("确定重启受控端服务？机器不会重启。")) act.mutate({ type: "restart_agent", confirm: true });
-            }}
+            onClick={() => setPending("restart")}
           >
             <Power className="size-3.5" />
             重启受控端
@@ -349,10 +365,7 @@ export function OverviewView({ device, onRefresh }: Props) {
             variant="destructive"
             disabled={!capabilities.uninstall || uninstall.isPending}
             title={capabilities.uninstall ? "以 SYSTEM 权限自我清理，不弹 UAC" : "设备当前不可下发卸载指令"}
-            onClick={() => {
-              if (window.confirm("远程卸载会在目标机以 SYSTEM 权限自我清理，不会弹出 UAC。确定继续？"))
-                uninstall.mutate();
-            }}
+            onClick={() => setPending("uninstall")}
           >
             <Unplug className="size-3.5" />
             远程卸载
@@ -372,9 +385,7 @@ export function OverviewView({ device, onRefresh }: Props) {
             size="sm"
             variant="outline"
             disabled={purgeFrames.isPending}
-            onClick={() => {
-              if (window.confirm("删除该设备的所有历史画面？此操作不可恢复。")) purgeFrames.mutate();
-            }}
+            onClick={() => setPending("purge")}
           >
             <Trash2 className="size-3.5" />
             清空历史画面
@@ -384,9 +395,7 @@ export function OverviewView({ device, onRefresh }: Props) {
             variant="destructive"
             disabled={remove.isPending || !canDeleteRecord}
             title={canDeleteRecord ? "删除这台设备的历史记录" : "设备仍有活动通道，请先远程卸载"}
-            onClick={() => {
-              if (window.confirm("删除设备记录？设备必须已离线或已卸载。")) remove.mutate();
-            }}
+            onClick={() => setPending("delete")}
           >
             <Trash2 className="size-3.5" />
             删除设备记录
@@ -397,6 +406,39 @@ export function OverviewView({ device, onRefresh }: Props) {
           删除记录会同时清除本地画面与该设备在归档仓库中的文件；在线设备必须先远程卸载，避免留下仍会尝试上报的机器。
         </p>
       </section>
+
+      <ConfirmDialog
+        open={pending !== null}
+        onOpenChange={(open) => {
+          if (!open) setPending(null);
+        }}
+        title={
+          pending === "restart"
+            ? "重启受控端服务"
+            : pending === "uninstall"
+              ? "远程卸载"
+              : pending === "purge"
+                ? "清空历史画面"
+                : "删除设备记录"
+        }
+        description={
+          pending === "restart"
+            ? "受控端服务会立即重启，机器不会重启；重启期间实时控制与文件操作会短暂中断。"
+            : pending === "uninstall"
+              ? "受控端服务以 SYSTEM 权限自我清理：停止服务、删除程序与自启动，不会弹出 UAC。设备记录随后标记为已卸载。"
+              : pending === "purge"
+                ? "删除该设备在本地的全部历史画面与缩略图，不可恢复；归档仓库中的远端副本不受影响。"
+                : "删除设备记录并清理本地数据；设备必须已离线或已卸载。此操作不可撤销。"
+        }
+        confirmLabel={pending === "delete" ? "删除记录" : pending === "uninstall" ? "卸载" : "继续"}
+        busy={act.isPending || uninstall.isPending || purgeFrames.isPending || remove.isPending}
+        onConfirm={() => {
+          if (pending === "restart") act.mutate({ type: "restart_agent", confirm: true });
+          else if (pending === "uninstall") uninstall.mutate();
+          else if (pending === "purge") purgeFrames.mutate();
+          else if (pending === "delete") remove.mutate();
+        }}
+      />
     </div>
   );
 }

@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..core.clock import Clock, SYSTEM_CLOCK, now_ms
@@ -237,6 +237,38 @@ class CommandJournal:
         async with self._sessionmaker() as session:
             rows = (await session.execute(statement)).scalars().all()
         return [CommandRecord.from_model(row) for row in rows]
+
+    async def replay_for_device(self, device_id: int, limit: int = 50) -> list[CommandRecord]:
+        """Claim undelivered commands after a carrier reconnect (at-least-once).
+
+        Rows stay ``dispatched`` so a lost result triggers another replay on the
+        next reconnect; the stable command id lets the agent dedupe execution.
+        Expired commands are skipped (housekeeping marks them timeout).
+        """
+
+        now = self._clock.now_ms()
+        statement = (
+            select(Command)
+            .where(
+                Command.device_id == int(device_id),
+                Command.status.in_(("pending", "dispatched")),
+                or_(Command.expires_at_ms == 0, Command.expires_at_ms > now),
+            )
+            .order_by(Command.created_at_ms.asc())
+            .limit(max(1, limit))
+        )
+        async with self._sessionmaker() as session:
+            rows = list((await session.execute(statement)).scalars().all())
+            if not rows:
+                return []
+            for row in rows:
+                row.status = "dispatched"
+                row.dispatched_at_ms = now
+                row.attempts = int(row.attempts or 0) + 1
+            await session.commit()
+            records = [CommandRecord.from_model(row) for row in rows]
+        log_event(log, logging.INFO, "journal.replayed", device_id=device_id, count=len(records))
+        return records
 
     # -- scoped waiting ----------------------------------------------------
     @asynccontextmanager

@@ -19,7 +19,9 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from ..core.clock import SYSTEM_CLOCK
 from ..core.config import Settings
 from ..core.crypto import DEVICE_TOKEN_HEADER
+from ..core.errors import AppError, ErrorCode
 from ..core.log import log_event
+from .agent_config import build_agent_config
 from .envelope import (
     EnvelopeError,
     FramingError,
@@ -29,6 +31,7 @@ from .envelope import (
     new_envelope,
 )
 from .journal import CommandJournal
+from .limits import client_ip, enforce
 from .registry import DeviceDirectory, LinkRegistry
 from .session import AgentSession
 
@@ -40,6 +43,9 @@ CLOSE_AUTH = 4401
 CLOSE_BAD_PROTOCOL = 4400
 CLOSE_REPLACED = 4000
 CLOSE_IDLE = 4408
+#: Uninstalled device: terminal, the agent must stop reconnecting (Lead ruling).
+CLOSE_UNINSTALLED = 4410
+CLOSE_RATE = 4429
 
 
 def _settings(websocket: WebSocket) -> Settings:
@@ -68,7 +74,22 @@ async def link_ws(websocket: WebSocket) -> None:
 
     await websocket.accept()
     token = websocket.headers.get(DEVICE_TOKEN_HEADER, "").strip()
-    identity = await directory.authenticate(token) if token else None
+    try:
+        enforce(
+            getattr(websocket.app.state, "link_limiter", None),
+            token,
+            client_ip(websocket.headers, websocket.client, settings),
+        )
+    except AppError as exc:
+        await websocket.close(code=CLOSE_RATE, reason=exc.message)
+        return
+    try:
+        identity = await directory.authenticate(token) if token else None
+    except AppError as exc:
+        # GONE → dedicated 4410 so the agent stops retrying; anything else is auth.
+        code = CLOSE_UNINSTALLED if exc.code == ErrorCode.GONE else CLOSE_AUTH
+        await websocket.close(code=code, reason=exc.message)
+        return
     if identity is None:
         await websocket.close(code=CLOSE_AUTH, reason="invalid device token")
         return
@@ -81,20 +102,30 @@ async def link_ws(websocket: WebSocket) -> None:
         clock=clock,
         carrier="ws",
         protocol=PROTOCOL_VERSION,
+        agent_config=await build_agent_config(websocket.app, identity.settings),
     )
     await registry.register(identity.device_id, session)
     session.note_carrier("ws", PROTOCOL_VERSION)
     session.touch()
     session.set_close_hook(_close_hook(websocket))
+    replayed = 0
+    try:
+        replayed = await session.replay_pending()
+    except Exception as exc:  # noqa: BLE001 - live link must survive a journal read failure
+        log_event(log, logging.ERROR, "link.ws.replay_failed", device_id=identity.device_id, error=str(exc))
     log_event(
         log,
         logging.INFO,
         "link.ws.connected",
         device_id=identity.device_id,
         uid=identity.uid,
+        replayed=replayed,
     )
 
     send_lock = asyncio.Lock()
+    #: The downlink pump waits for the first inbound message so the first
+    #: downlink the agent sees is `welcome`, not a replayed command (§5.6).
+    link_ready = asyncio.Event()
 
     async def send_envelope(envelope) -> bool:
         async with send_lock:
@@ -112,6 +143,7 @@ async def link_ws(websocket: WebSocket) -> None:
                 return False
 
     async def pump_downlink() -> None:
+        await link_ready.wait()
         while not session.closed:
             queued = session.outbox.pending()
             if queued:
@@ -162,6 +194,7 @@ async def link_ws(websocket: WebSocket) -> None:
         ack = session.ack_envelope()
         if ack is not None:
             await send_envelope(ack)
+        link_ready.set()
 
     async def handle_binary(blob: bytes) -> None:
         try:
@@ -180,6 +213,7 @@ async def link_ws(websocket: WebSocket) -> None:
             )
             return
         await session.on_binary(header, body)
+        link_ready.set()
 
     pump = asyncio.create_task(pump_downlink(), name=f"link-ws-pump-{identity.device_id}")
     idle_s = max(5.0, settings.ws_stale_ms / 1000.0)
@@ -232,6 +266,8 @@ __all__ = [
     "CLOSE_AUTH",
     "CLOSE_BAD_PROTOCOL",
     "CLOSE_IDLE",
+    "CLOSE_RATE",
     "CLOSE_REPLACED",
+    "CLOSE_UNINSTALLED",
     "router",
 ]

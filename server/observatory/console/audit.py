@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.clock import now_ms
 from ..core.db import get_session
+from ..core.errors import AppError
 from ..core.models import AuditEntry, Device
 from .deps import client_ip, require_admin
 from .dto import stamp
@@ -90,8 +91,13 @@ async def list_audit(
     offset: int = Query(default=0, ge=0),
     action: str = Query(default=""),
     device_uid: str = Query(default=""),
+    actor: str = Query(default=""),
+    ts_from_ms: int = Query(default=0, ge=0),
+    ts_to_ms: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
+    if ts_from_ms and ts_to_ms and ts_from_ms > ts_to_ms:
+        raise AppError.bad_request("ts_from_ms 不能大于 ts_to_ms")
     statement = select(AuditEntry)
     counter = select(func.count(AuditEntry.id))
     if action:
@@ -100,6 +106,15 @@ async def list_audit(
     if device_uid:
         statement = statement.where(AuditEntry.device_uid == device_uid)
         counter = counter.where(AuditEntry.device_uid == device_uid)
+    if actor:
+        statement = statement.where(AuditEntry.actor == actor)
+        counter = counter.where(AuditEntry.actor == actor)
+    if ts_from_ms:
+        statement = statement.where(AuditEntry.ts_ms >= ts_from_ms)
+        counter = counter.where(AuditEntry.ts_ms >= ts_from_ms)
+    if ts_to_ms:
+        statement = statement.where(AuditEntry.ts_ms <= ts_to_ms)
+        counter = counter.where(AuditEntry.ts_ms <= ts_to_ms)
 
     total = int((await session.execute(counter)).scalar() or 0)
     rows = list(

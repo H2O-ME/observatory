@@ -37,7 +37,7 @@
 | 自动更新 | 安装一次后服务端上传新包即自动替换；sha256 + 预检 + 失败回滚，无 UAC |
 | 远程卸载 | SYSTEM 自我清理，不弹 UAC；失败可观测并保持在线 |
 | 双域名 | 两域名互为备份提供安装与设备接口；控制台只在 `control.tianhw.top` |
-| 安装凭据 | **一次性安装令牌**：单次使用、TTL（默认 30 分钟）、绑定首台设备、可撤销 |
+| 安装凭据 | **一次性安装令牌**：单次使用、TTL（控制台设置，默认 24 小时）、绑定首台设备、可撤销 |
 | 版本机制 | 根目录 `VERSION` 是唯一来源，服务端/受控端/安装脚本/控制台同一版本号 |
 
 ## 架构
@@ -181,7 +181,8 @@ python -m pytest tests/ -q            # 0.3.0 主测试套件（unit/contract/ac
 python tools/test_server.py           # 对外自检入口（兼容保留）
 python tools/test_agent.py            # 受控端逻辑自检（Windows 组自动跳过）
 python tools/test_e2e_live.py         # 真起服务端+受控端（仅 Windows）
-python tools/check_deployment.py --password <密码> --code <令牌或注册码>   # 已部署实例公网体检
+python tools/check_deployment.py --password <密码> --token <一次性令牌>   # 已部署实例公网体检
+# 省略 --token 时会登录后现场签发；--code 仅用于验证 legacy 共享注册码
 cd webui && npm run build             # 类型检查 + 生产构建
 ```
 
