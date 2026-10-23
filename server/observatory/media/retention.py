@@ -91,10 +91,16 @@ def archive_gate_open(
 
     * 归档未启用 / 关闭门控 → 允许（与 0.2.10 行为一致）；
     * 已上传 / 已删除 → 允许；
-    * 待上传、失败或根本没有归档行 → 等 "保留天数 + 宽限天数" 之后才允许。
+    * **没有归档行 → 允许**：没有登记就没有"必须先归档"的承诺（归档未开启时的存量、
+      legacy 行、或登记本身失败），把它们按"待上传"无限期扣住会让配额永远达不到
+      目标——这正是 0.2.10 配额死不达标bug的另一种形态（W1 端到端实测发现）；
+    * 待上传 / 失败（确有归档登记但未完成）→ 等 "保留天数 + 宽限天数" 之后才允许，
+      避免归档长期失败把磁盘占满。
     """
 
     if not settings.archive_enabled or not settings.archive_gate_retention:
+        return True
+    if archive_status is None:
         return True
     if archive_status in (archive.STATUS_UPLOADED, archive.STATUS_DELETED):
         return True

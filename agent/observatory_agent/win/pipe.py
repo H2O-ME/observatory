@@ -310,6 +310,8 @@ class PipeServer:
         allowed_user_sid: str,
         on_message: Callable[[dict[str, Any], bytes], None],
         expected_image_path: str | Path | None = None,
+        expected_session_id: int | None = None,
+        security_attributes: Any | None = None,
         poll_s: float = POLL_INTERVAL_S,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -317,6 +319,11 @@ class PipeServer:
         self.allowed_user_sid = allowed_user_sid
         self.on_message = on_message
         self.expected_image_path = expected_image_path
+        #: 生产环境等于 ``session_id``；只有测试需要"管道名 ≠ 期望会话"时才单独指定。
+        self._expected_session_id = int(session_id if expected_session_id is None else expected_session_id)
+        #: 仅 ``tools/win_smoke.py`` 或特殊受限环境使用；``None`` 时必须走
+        #: :func:`pipe_security_attributes` 的受限 DACL（A17），生产代码不得传 Everyone。
+        self._security_attributes = security_attributes
         self._poll_s = poll_s
         self._sleep = sleep
         self._stop = threading.Event()
@@ -335,18 +342,40 @@ class PipeServer:
 
     def stop(self) -> None:
         self._stop.set()
-        handle = self._handle
-        self._handle = None
-        if handle is not None:
-            with contextlib.suppress(Exception):  # 关闭句柄是为了打断阻塞的 ConnectNamedPipe
+        # Windows 上 CloseHandle 对"另一线程正阻塞在 ConnectNamedPipe"的同步管道句柄不可靠
+        # （会一直等挂起的 I/O），0.3.0 的服务停止/升级会挂死。所以正常路径**不由 stop 线程
+        # 关句柄**：反复用只读哑客户端把 ConnectNamedPipe 解开，让 _run 自己走 finally 关闭，
+        # 避免两个线程同时 close 造成实例泄漏。只有线程 10s 还不退时才兜底强关。
+        thread = self._thread
+        if thread is None:
+            self.connected.clear()
+            return
+        deadline = time.monotonic() + 10.0
+        while thread.is_alive() and time.monotonic() <= deadline:
+            with contextlib.suppress(Exception):  # 实例可能还在创建/已连接（231）
                 import win32file
 
-                win32file.CloseHandle(handle)
-        thread = self._thread
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=5.0)
-            if thread.is_alive():
-                log.warning("pipe server thread for session %s did not exit in 5s", self.session_id)
+                probe = win32file.CreateFile(
+                    pipe_name(self.session_id),
+                    win32file.GENERIC_READ,
+                    0,
+                    None,
+                    win32file.OPEN_EXISTING,
+                    0,
+                    None,
+                )
+                win32file.CloseHandle(probe)
+            thread.join(timeout=0.2)
+        if thread.is_alive():
+            log.warning("pipe server thread for session %s did not exit in 10s", self.session_id)
+            handle = self._handle
+            self._handle = None
+            if handle is not None:
+                with contextlib.suppress(Exception):
+                    import win32file
+
+                    win32file.CloseHandle(handle)
+            thread.join(timeout=2.0)
         self.connected.clear()
 
     # -- io ----------------------------------------------------------------
@@ -384,6 +413,8 @@ class PipeServer:
                 self._sleep(2.0)
                 continue
             self._handle = handle
+            if self._stop.is_set():
+                break  # stop() 可能在创建实例后才到达；交给 finally 关闭，避免实例泄漏
             try:
                 try:
                     win32pipe.ConnectNamedPipe(handle, None)
@@ -401,7 +432,7 @@ class PipeServer:
                     continue
                 if not identity_trusted(
                     identity,
-                    expected_session_id=self.session_id,
+                    expected_session_id=self._expected_session_id,
                     expected_user_sid=self.allowed_user_sid,
                     expected_image_path=self.expected_image_path,
                 ):
@@ -435,7 +466,9 @@ class PipeServer:
     def _create_instance(self, win32pipe: Any) -> Any:
         open_mode = win32pipe.PIPE_ACCESS_DUPLEX | _FILE_FLAG_FIRST_PIPE_INSTANCE
         pipe_mode = win32pipe.PIPE_TYPE_BYTE | win32pipe.PIPE_READMODE_BYTE | win32pipe.PIPE_WAIT
-        attributes = pipe_security_attributes(allowed_user_sid=self.allowed_user_sid)
+        attributes = self._security_attributes
+        if attributes is None:
+            attributes = pipe_security_attributes(allowed_user_sid=self.allowed_user_sid)
         try:
             return win32pipe.CreateNamedPipe(
                 pipe_name(self.session_id),

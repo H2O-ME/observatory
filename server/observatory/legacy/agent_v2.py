@@ -14,10 +14,10 @@ results, upload frames and upgrade without reinstalling (N2).
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import struct
-from dataclasses import dataclass, field
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request, WebSocket, WebSocketDisconnect
@@ -39,11 +39,11 @@ from ..core.errors import AppError, ErrorCode
 from ..core.models import Device
 from ..console import audit
 from ..console.deps import client_ip, store
-from ..console.dto import budget_ms, device_safe_config
+from ..console.dto import device_safe_config
 from ..console.install import consume_install_token, validate_install_token
 from ..console.updates import PackageService
-from ..link.envelope import Result
 from ..link.registry import registry as links
+from ..link.session import AgentSession
 
 log = logging.getLogger(__name__)
 
@@ -51,9 +51,12 @@ router = APIRouter(prefix="/agent", tags=["agent-legacy"])
 legacy_router = router
 
 POLL_HOLD_MAX_S = 20
+POLL_WAIT_STEP_S = 0.1
 
 _ENROLL_LIMITER: RateLimiter | None = None
-_HTTP_SESSIONS: dict[int, "LegacyHttpSession"] = {}
+#: The old long-poll carrier keeps one AgentSession per device, exactly like the
+#: v3 HTTP carrier. Registry values are always `link.session.AgentSession` (C1).
+_HTTP_SESSIONS: dict[int, AgentSession] = {}
 
 
 def _limiter(settings: Any) -> RateLimiter:
@@ -120,236 +123,176 @@ async def _require_device(
     return device
 
 
-async def _touch_http(request: Request, session: AsyncSession, device: Device) -> "LegacyHttpSession":
-    """Register/refresh the duck-typed HTTP carrier so presence sees it online."""
+async def _touch_http(
+    request: Request,
+    session: AsyncSession,
+    device: Device,
+    *,
+    register: bool = True,
+) -> AgentSession:
+    """Return the one AgentSession backing the 0.2.x long-poll carrier.
 
-    sess = _HTTP_SESSIONS.get(device.id)
-    if sess is None:
-        sess = LegacyHttpSession(device_id=device.id, uid=device.uid)
-        _HTTP_SESSIONS[device.id] = sess
-    sess.journal = _journal(request)
-    sess.touch()
-    await links.register_legacy(device.id, sess)
-    return sess
+    The registry holds the *same* class as the v3 carriers; the legacy adapter
+    below only translates wire formats and owns no state the journal does not.
+    """
 
-
-@dataclass
-class LegacyControlStream:
-    token: str
-    queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=4))
-    closed: bool = False
-
-
-class LegacyCarrier:
-    """Duck-typed ``AgentSession`` for the 0.2.x protocol."""
-
-    protocol = 2
-
-    def __init__(self, *, device_id: int, uid: str, carrier: str) -> None:
-        self.device_id = device_id
-        self.uid = uid
-        self.carrier = carrier
-        self.last_seen_ms = now_ms()
-        self.journal: Any = None
-        self._streams: dict[str, LegacyControlStream] = {}
-
-    def touch(self) -> None:
-        self.last_seen_ms = now_ms()
-
-    async def close(self, code: int = 1000, reason: str = "") -> None:
-        self.last_seen_ms = 0
-
-    # -- downlink ----------------------------------------------------------
-    async def _send_json(self, payload: dict[str, Any]) -> bool:
-        raise NotImplementedError
-
-    async def send(self, kind: str, body: dict[str, Any], *, deadline_ms: int = 0) -> str:
-        raise NotImplementedError
-
-    # -- request/response --------------------------------------------------
-    async def request(self, kind: str, body: dict[str, Any], *, timeout_s: float) -> Result:
-        if self.journal is None:
-            raise RuntimeError("legacy carrier has no journal bound")
-        deadline = self.journal.deadline_for(kind)
-        started = now_ms()
-        record = await self.journal.create(self.device_id, kind, body, actor="console", timeout_ms=deadline)
-        async with self.journal.expect(record.id) as slot:
-            envelope = record.to_envelope_body(deadline_ms=deadline)
-            sent = await self.send("command", envelope, deadline_ms=deadline)
-            if not sent:
-                return Result(
-                    ok=False,
-                    status="error",
-                    result=None,
-                    error="兼容链路不可用",
-                    error_code=str(ErrorCode.UNSUPPORTED),
-                    retryable=True,
-                    command_id=record.id,
-                    deadline_ms=deadline,
-                    server_time_ms=now_ms(),
-                    latency_ms=0,
-                )
-            settled = await slot.wait(timeout_s)
-        if settled is not None:
-            return settled
-        await self.journal.mark_timeout(record.id)
-        return Result.timed_out(
-            command_id=record.id,
-            error=f"受控端在 {timeout_s:.0f} 秒内没有响应",
-            deadline_ms=deadline,
-            server_time_ms=now_ms(),
-            latency_ms=max(0, now_ms() - started),
+    effective = await _effective(session, device)
+    current = links.get(device.id)
+    settings = request.app.state.settings
+    # A live v3 session wins over a stray old-protocol heartbeat/poll. Replacing
+    # it would flap presence back to protocol 2 in the middle of an upgrade.
+    v3_live = (
+        current is not None
+        and int(getattr(current, "protocol", 0) or 0) >= 3
+        and now_ms() - int(getattr(current, "last_seen_ms", 0) or 0) <= int(settings.poll_stale_ms)
+    )
+    agent_session = _HTTP_SESSIONS.get(device.id)
+    if agent_session is None or agent_session.closed:
+        agent_session = AgentSession(
+            device_id=device.id,
+            uid=device.uid,
+            journal=_journal(request),
+            settings=settings,
+            carrier="poll",
+            protocol=2,
+            agent_config=device_safe_config(effective),
         )
-
-    # -- control streams ---------------------------------------------------
-    def open_control(self, token: str) -> LegacyControlStream:
-        stream = self._streams.get(token)
-        if stream is None:
-            stream = LegacyControlStream(token=token)
-            self._streams[token] = stream
-        return stream
-
-    def close_control(self, token: str) -> None:
-        stream = self._streams.pop(token, None)
-        if stream is not None:
-            stream.closed = True
-
-    def push_control(self, token: str, payload: bytes) -> bool:
-        stream = self._streams.get(token)
-        if stream is None or stream.closed:
-            log.warning("legacy control frame for unknown session %s", token)
-            return False
-        while stream.queue.full():
-            try:
-                stream.queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-        try:
-            stream.queue.put_nowait(payload)
-        except asyncio.QueueFull as exc:
-            log.warning("legacy control queue full for session %s: %s", token, exc)
-            return False
-        return True
+        _HTTP_SESSIONS[device.id] = agent_session
+        if not v3_live:
+            # First contact after a restart: pending commands created while no
+            # session existed are queued here, then delivered by the next drain.
+            await agent_session.replay_pending()
+    agent_session.touch()
+    if register and not v3_live:
+        if current is None or current is agent_session:
+            await links.register(device.id, agent_session)
+    return agent_session
 
 
-class LegacyHttpSession(LegacyCarrier):
-    carrier = "poll"
+async def _take_outbox_commands(agent_session: AgentSession) -> list[Any]:
+    """Drain queued downlink commands into the old long-poll/heartbeat shape.
 
-    def __init__(self, *, device_id: int, uid: str) -> None:
-        super().__init__(device_id=device_id, uid=uid, carrier="poll")
+    The old protocol has no downlink ack, so envelopes are acked as soon as they
+    are serialised. Rows stay ``pending`` until the agent reports a result, which
+    is what the journal's at-least-once replay expects (C3).
+    """
 
-    async def send(self, kind: str, body: dict[str, Any], *, deadline_ms: int = 0) -> str:
-        if kind == "command":
-            # The long-poll carrier cannot push: the command stays pending and is
-            # claimed by the next GET /agent/commands. Returning "" makes the
-            # caller leave the journal row deliverable instead of marking it sent.
-            return ""
-        # Config/control/ping have no 0.2.x long-poll counterpart.  The next
-        # heartbeat returns the config, and control requires a WebSocket.
-        log.info("legacy http carrier ignoring %s downlink device=%s", kind, self.uid)
-        return ""
+    commands: list[Any] = []
+    for envelope in agent_session.outbox.pending():
+        if envelope.t == "command":
+            command_id = str(envelope.body.get("command_id") or envelope.id)
+            record = await agent_session.journal.get(command_id)
+            if record is None:
+                log.warning("legacy outbox command %s vanished from journal", command_id)
+            elif int(record.device_id) == int(agent_session.device_id):
+                commands.append(record)
+        agent_session.outbox.ack(envelope.id)
+    return commands
 
 
-class LegacyWsSession(LegacyCarrier):
-    carrier = "ws"
+async def _wait_http_commands(agent_session: AgentSession, hold_s: float) -> list[Any]:
+    deadline = now_ms() + int(max(0.0, hold_s) * 1000)
+    while True:
+        commands = await _take_outbox_commands(agent_session)
+        if commands or now_ms() >= deadline:
+            return commands
+        await asyncio.sleep(POLL_WAIT_STEP_S)
 
-    def __init__(self, *, device_id: int, uid: str, websocket: WebSocket) -> None:
-        super().__init__(device_id=device_id, uid=uid, carrier="ws")
+
+class LegacyWsWire:
+    """Translate one old WebSocket connection to/from an ``AgentSession``.
+
+    This object is deliberately *not* registered: it is a transport adapter, so
+    the shared registry keeps exactly one session type (C1).
+    """
+
+    def __init__(self, websocket: WebSocket, session: AgentSession) -> None:
         self.websocket = websocket
+        self.session = session
 
-    async def _send_json(self, payload: dict[str, Any]) -> bool:
+    async def send_json(self, payload: dict[str, Any]) -> bool:
         try:
             await self.websocket.send_json(payload)
             return True
-        except Exception as exc:  # noqa: BLE001 - socket closed by the peer is normal
-            log.info("legacy ws send failed uid=%s: %s", self.uid, exc)
+        except Exception as exc:  # noqa: BLE001 - peer close is a normal legacy event
+            log.info("legacy ws send failed uid=%s: %s", self.session.uid, exc)
             return False
 
-    async def forward_binary(self, blob: bytes) -> bool:
-        """Forward a browser control frame to the 0.2.x agent unchanged (C7)."""
-
+    async def send_bytes(self, blob: bytes) -> bool:
         try:
             await self.websocket.send_bytes(blob)
             return True
-        except Exception as exc:  # noqa: BLE001 - socket closed by the peer is normal
-            log.info("legacy ws binary forward failed uid=%s: %s", self.uid, exc)
+        except Exception as exc:  # noqa: BLE001 - peer close is a normal legacy event
+            log.info("legacy ws binary send failed uid=%s: %s", self.session.uid, exc)
             return False
 
-    async def _mark_command_dispatched(self, command_id: str) -> None:
-        if self.journal is None:
-            return
-        claimed = await self.journal.claim_pending(self.device_id, 20)
-        if not any(record.id == command_id for record in claimed):
-            log.debug("command %s was not pending when marking dispatched", command_id)
-
-    async def send(self, kind: str, body: dict[str, Any], *, deadline_ms: int = 0) -> str:
+    async def send_envelope(self, envelope: Any) -> bool:
+        kind = envelope.t
+        body = envelope.body if isinstance(envelope.body, dict) else {}
         if kind == "command":
-            command_id = str(body.get("command_id") or body.get("id") or "")
             command = {
-                "id": command_id,
+                "id": str(body.get("command_id") or envelope.id),
                 "type": str(body.get("type") or body.get("kind") or ""),
                 "payload": body.get("payload") or {},
-                "status": "dispatched",
-                "result": None,
-                "error": None,
-                "created_at_ms": now_ms(),
-                "dispatched_at_ms": now_ms(),
-                "finished_at_ms": None,
+                # 0.2.10's WS command object has no status/result fields; it reads
+                # only id/type/payload and ignores timeout_ms, but the old server
+                # always sent it, so keep the exact legacy shape.
+                "timeout_ms": int(body.get("deadline_ms") or envelope.ts_ms or 90_000),
             }
-            ok = await self._send_json({"t": "command", "command": command})
-            if ok:
-                await self._mark_command_dispatched(command_id)
-            return command_id if ok else ""
+            return await self.send_json({"t": "command", "command": command})
         if kind == "config":
-            await self._send_json({"t": "config", "config": body.get("config") or {}})
-            return ""
+            return await self.send_json({"t": "config", "config": body.get("config") or {}})
         if kind == "ping":
-            await self._send_json({"t": "ping", "ts": now_ms()})
-            return ""
+            return await self.send_json({"t": "ping", "ts": int(envelope.ts_ms or now_ms())})
         if kind == "control":
-            action = str(body.get("action") or "")
-            if action == "start":
-                await self._send_json(
-                    {
-                        "t": "ctrl_start",
-                        "session": body.get("session"),
-                        "fps": body.get("fps"),
-                        "quality": body.get("quality"),
-                        "ttl_s": body.get("ttl_s"),
-                    }
-                )
-            elif action == "input":
-                await self._send_json(
-                    {"t": "ctrl_in", "session": body.get("session"), "ev": body.get("ev") or {}}
-                )
-            elif action == "stop":
-                await self._send_json({"t": "ctrl_stop", "session": body.get("session")})
-            else:
-                log.warning("legacy ws unknown control action %r uid=%s", action, self.uid)
-            return ""
-        log.warning("legacy ws ignoring unknown downlink kind=%r uid=%s", kind, self.uid)
-        return ""
+            return await self._send_control(body)
+        if kind == "result":
+            log.debug("legacy ws ignoring server result envelope for uid=%s", self.session.uid)
+            return True
+        log.warning("legacy ws ignoring unknown downlink kind=%r uid=%s", kind, self.session.uid)
+        return True
 
+    async def _send_control(self, body: dict[str, Any]) -> bool:
+        action = str(body.get("action") or "")
+        token = body.get("session")
+        if action == "start":
+            return await self.send_json(
+                {
+                    "t": "ctrl_start",
+                    "session": token,
+                    "fps": body.get("fps"),
+                    "quality": body.get("quality"),
+                    "ttl_s": body.get("ttl_s"),
+                }
+            )
+        if action == "input":
+            if isinstance(body.get("data_b64"), str):
+                try:
+                    blob = base64.b64decode(str(body["data_b64"]), validate=True)
+                except (ValueError, TypeError) as exc:
+                    log.warning("legacy control base64 decode failed uid=%s: %s", self.session.uid, exc)
+                    return True
+                return await self.send_bytes(blob)
+            return await self.send_json({"t": "ctrl_in", "session": token, "ev": body.get("ev") or {}})
+        if action == "stop":
+            return await self.send_json({"t": "ctrl_stop", "session": token})
+        log.warning("legacy ws unknown control action %r uid=%s", action, self.session.uid)
+        return True
 
-async def _claim(journal: Any, device_id: int) -> list[Any]:
-    return list(await journal.claim_pending(device_id, 10))
+    async def pump(self) -> None:
+        """Push queued envelopes to the old socket, translating each one."""
 
-
-async def _poll_for_commands(journal: Any, device_id: int, hold_s: float) -> list[Any]:
-    """Wait up to ``hold_s`` for a command; the legacy long-poll equivalent."""
-
-    deadline = now_ms() + int(hold_s * 1000)
-    while True:
-        commands = await _claim(journal, device_id)
-        if commands:
-            return commands
-        if now_ms() >= deadline:
-            return []
-        await asyncio.sleep(0.25)
-
-
-def _legacy_commands(commands: list[Any]) -> list[dict[str, Any]]:
-    return [record.to_legacy() for record in commands]
+        while not self.session.closed:
+            queued = self.session.outbox.pending()
+            if queued:
+                for envelope in queued:
+                    if not await self.send_envelope(envelope):
+                        return
+                    self.session.outbox.ack(envelope.id)
+                continue
+            changed = await self.session.outbox.wait_for_change(POLL_HOLD_MAX_S)
+            if not changed and self.session.closed:
+                return
 
 
 async def _update_offer(request: Request, session: AsyncSession, device: Device) -> dict[str, Any] | None:
@@ -457,10 +400,9 @@ async def heartbeat(
     _merge_report(device, sysinfo=payload.get("sysinfo"), state=payload.get("state"))
     await session.commit()
 
-    await _touch_http(request, session, device)
+    agent_session = await _touch_http(request, session, device)
     effective = await _effective(session, device)
-    journal = _journal(request)
-    commands = await _claim(journal, device.id)
+    commands = await _take_outbox_commands(agent_session)
     update = None
     if effective.get("auto_update", True):
         update = await _update_offer(request, session, device)
@@ -471,7 +413,7 @@ async def heartbeat(
         "poll_hold_s": min(POLL_HOLD_MAX_S, int(getattr(settings, "poll_hold_s", POLL_HOLD_MAX_S) or POLL_HOLD_MAX_S)),
         "update": update,
         "uninstall": any(getattr(record, "kind", "") == "uninstall" for record in commands),
-        "commands": _legacy_commands(commands),
+        "commands": [record.to_legacy() for record in commands],
     }
 
 
@@ -485,17 +427,16 @@ async def poll_commands(
     settings = request.app.state.settings
     hold_max = min(POLL_HOLD_MAX_S, int(getattr(settings, "poll_hold_s", POLL_HOLD_MAX_S) or POLL_HOLD_MAX_S))
     hold = max(0, min(hold_max, int(wait)))
-    journal = _journal(request)
-    commands = await _claim(journal, device.id)
+    agent_session = await _touch_http(request, session, device)
+    commands = await _take_outbox_commands(agent_session)
     if not commands and hold:
-        await _touch_http(request, session, device)
-        commands = await _poll_for_commands(journal, device.id, hold)
+        commands = await _wait_http_commands(agent_session, hold)
 
     device.last_seen_ms = now_ms()
     await session.commit()
     effective = await _effective(session, device)
     return {
-        "commands": _legacy_commands(commands),
+        "commands": [record.to_legacy() for record in commands],
         "server_time_ms": now_ms(),
         "config": device_safe_config(effective),
         "update": await _update_offer(request, session, device),
@@ -582,11 +523,6 @@ def _decode_frame(blob: bytes) -> tuple[dict[str, Any], bytes]:
     return header, blob[4 + header_len :]
 
 
-async def _send_pending(ws_session: LegacyWsSession, journal: Any) -> None:
-    for record in await _claim(journal, ws_session.device_id):
-        await ws_session.send("command", record.to_envelope_body(deadline_ms=budget_ms(record.kind)))
-
-
 @router.websocket("/ws")
 async def agent_socket(websocket: WebSocket) -> None:
     settings = websocket.app.state.settings
@@ -607,11 +543,6 @@ async def agent_socket(websocket: WebSocket) -> None:
         return
 
     await websocket.accept()
-    ws_session = LegacyWsSession(device_id=device.id, uid=device.uid, websocket=websocket)
-    await links.register_legacy(device.id, ws_session)
-    journal = _journal(websocket)
-    ws_session.journal = journal
-
     async with websocket.app.state.db.sessionmaker() as session:
         row = await session.get(Device, device.id)
         if row is None:
@@ -623,29 +554,44 @@ async def agent_socket(websocket: WebSocket) -> None:
         effective = await _effective(session, row)
         update = await PackageService(settings).update_offer(session, row)
 
-    await websocket.send_json(
-        {
-            "t": "welcome",
-            "device_uid": device.uid,
-            "server_version": resolve_version(),
-            "server_time_ms": now_ms(),
-            "heartbeat_interval_s": int(effective.get("heartbeat_interval_s", 20)),
-            "config": device_safe_config(effective),
-            "update": update,
-            "poll_hold_s": min(POLL_HOLD_MAX_S, int(getattr(settings, "poll_hold_s", POLL_HOLD_MAX_S) or POLL_HOLD_MAX_S)),
-        }
+    journal = _journal(websocket)
+    agent_session = AgentSession(
+        device_id=device.id,
+        uid=device.uid,
+        journal=journal,
+        settings=settings,
+        carrier="ws",
+        protocol=2,
+        agent_config=device_safe_config(effective),
     )
-    # A10/N2: commands that arrived while the old agent was offline are drained
-    # on reconnect instead of waiting for an HTTP heartbeat that never comes.
-    await _send_pending(ws_session, journal)
+    wire = LegacyWsWire(websocket, agent_session)
+    await links.register(device.id, agent_session)
+    # A10/N2: commands that arrived while the old agent was offline are queued
+    # before the pump starts, so welcome always precedes the first replay.
+    await agent_session.replay_pending()
 
-    idle = max(30, int(getattr(settings, "ws_idle_timeout_s", 90) or 90))
+    pump = asyncio.create_task(wire.pump(), name=f"legacy-ws-pump-{device.id}")
     try:
+        await wire.send_json(
+            {
+                "t": "welcome",
+                "device_uid": device.uid,
+                "server_version": resolve_version(),
+                "server_time_ms": now_ms(),
+                "heartbeat_interval_s": int(effective.get("heartbeat_interval_s", 20)),
+                "config": device_safe_config(effective),
+                "update": update,
+                "poll_hold_s": min(
+                    POLL_HOLD_MAX_S, int(getattr(settings, "poll_hold_s", POLL_HOLD_MAX_S) or POLL_HOLD_MAX_S)
+                ),
+            }
+        )
+        idle = max(30, int(getattr(settings, "ws_idle_timeout_s", 90) or 90))
         while True:
             try:
                 message = await asyncio.wait_for(websocket.receive(), timeout=idle)
             except asyncio.TimeoutError:
-                if not await ws_session._send_json({"t": "ping", "ts": now_ms()}):
+                if not await wire.send_json({"t": "ping", "ts": now_ms()}):
                     break
                 continue
             if message.get("type") == "websocket.disconnect":
@@ -653,15 +599,21 @@ async def agent_socket(websocket: WebSocket) -> None:
             text = message.get("text")
             blob = message.get("bytes")
             if text is not None:
-                await _handle_text(websocket, ws_session, text)
+                await _handle_text(websocket, agent_session, wire, text)
             elif blob is not None:
-                await _handle_binary(websocket, ws_session, blob)
-            ws_session.touch()
-            links.touch(ws_session.device_id)
+                await _handle_binary(websocket, agent_session, blob)
+            agent_session.touch()
+            links.touch(agent_session.device_id)
     except WebSocketDisconnect:
         pass
     finally:
-        await links.unregister(ws_session.device_id, ws_session)
+        pump.cancel()
+        try:
+            await pump
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001 - pump already finished or cancelled
+            pass
+        await links.unregister(agent_session.device_id, agent_session)
+        await agent_session.close(code=1001, reason="legacy carrier closed")
         async with websocket.app.state.db.sessionmaker() as session:
             row = await session.get(Device, device.id)
             if row is not None:
@@ -669,11 +621,16 @@ async def agent_socket(websocket: WebSocket) -> None:
                 await session.commit()
 
 
-async def _handle_text(websocket: WebSocket, ws_session: LegacyWsSession, text: str) -> None:
+async def _handle_text(
+    websocket: WebSocket,
+    agent_session: AgentSession,
+    wire: LegacyWsWire,
+    text: str,
+) -> None:
     try:
         message = json.loads(text)
     except ValueError:
-        log.warning("legacy agent %s sent invalid JSON", ws_session.uid)
+        log.warning("legacy agent %s sent invalid JSON", agent_session.uid)
         return
     if not isinstance(message, dict):
         return
@@ -682,7 +639,7 @@ async def _handle_text(websocket: WebSocket, ws_session: LegacyWsSession, text: 
 
     if kind == "hello":
         async with websocket.app.state.db.sessionmaker() as session:
-            row = await session.get(Device, ws_session.device_id)
+            row = await session.get(Device, agent_session.device_id)
             if row is None:
                 return
             row.agent_version = str(message.get("agent_version", row.agent_version))[:30]
@@ -693,11 +650,11 @@ async def _handle_text(websocket: WebSocket, ws_session: LegacyWsSession, text: 
             _merge_report(row, sysinfo=message.get("sysinfo"), state=message.get("state"))
             await session.commit()
             config = device_safe_config(await _effective(session, row))
-        await ws_session._send_json({"t": "config", "config": config, "server_time_ms": now_ms()})
+        await wire.send_json({"t": "config", "config": config, "server_time_ms": now_ms()})
 
     elif kind == "heartbeat":
         async with websocket.app.state.db.sessionmaker() as session:
-            row = await session.get(Device, ws_session.device_id)
+            row = await session.get(Device, agent_session.device_id)
             if row is None:
                 return
             row.last_seen_ms = now_ms()
@@ -710,7 +667,7 @@ async def _handle_text(websocket: WebSocket, ws_session: LegacyWsSession, text: 
             await session.commit()
             config = await _effective(session, row)
             update = await PackageService(websocket.app.state.settings).update_offer(session, row)
-        await ws_session._send_json(
+        await wire.send_json(
             {
                 "t": "pong",
                 "server_time_ms": now_ms(),
@@ -743,42 +700,43 @@ async def _handle_text(websocket: WebSocket, ws_session: LegacyWsSession, text: 
                 session,
                 action=f"agent.{name}"[:64],
                 actor="agent",
-                device_uid=ws_session.uid,
+                device_uid=agent_session.uid,
                 detail=data,
             )
 
     elif kind == "uninstall_ack":
         async with websocket.app.state.db.sessionmaker() as session:
-            row = await session.get(Device, ws_session.device_id)
+            row = await session.get(Device, agent_session.device_id)
             if row is not None:
                 row.uninstalled_at_ms = now_ms()
                 await session.commit()
-        await links.unregister(ws_session.device_id, ws_session)
+        await links.unregister(agent_session.device_id, agent_session)
 
     elif kind == "pong":
-        ws_session.touch()
+        agent_session.touch()
 
     else:
-        log.debug("legacy agent %s sent unknown message %r", ws_session.uid, kind)
+        log.debug("legacy agent %s sent unknown message %r", agent_session.uid, kind)
 
 
-async def _handle_binary(websocket: WebSocket, ws_session: LegacyWsSession, blob: bytes) -> None:
+async def _handle_binary(websocket: WebSocket, agent_session: AgentSession, blob: bytes) -> None:
     try:
         header, payload = _decode_frame(blob)
     except (ValueError, json.JSONDecodeError, UnicodeDecodeError, struct.error) as exc:
-        log.warning("legacy agent %s sent malformed binary frame: %s", ws_session.uid, exc)
+        log.warning("legacy agent %s sent malformed binary frame: %s", agent_session.uid, exc)
         return
 
     kind = header.get("t")
     if kind == "ctrl":
         token = str(header.get("session") or "")
         if token:
-            ws_session.push_control(token, payload)
+            if not agent_session.push_control_frame(token, payload):
+                log.warning("legacy control frame for unknown session %s uid=%s", token, agent_session.uid)
         else:
-            log.warning("legacy control frame without session uid=%s", ws_session.uid)
+            log.warning("legacy control frame without session uid=%s", agent_session.uid)
         return
     if kind != "frame":
-        log.debug("legacy agent %s sent unknown binary %r", ws_session.uid, kind)
+        log.debug("legacy agent %s sent unknown binary %r", agent_session.uid, kind)
         return
 
     try:
@@ -787,7 +745,7 @@ async def _handle_binary(websocket: WebSocket, ws_session: LegacyWsSession, blob
         raise AppError.internal("媒体层未就绪，无法接收画面") from exc
 
     async with websocket.app.state.db.sessionmaker() as session:
-        row = await session.get(Device, ws_session.device_id)
+        row = await session.get(Device, agent_session.device_id)
         if row is None:
             return
         await media_ingest.store_frame(
@@ -806,10 +764,7 @@ async def _handle_binary(websocket: WebSocket, ws_session: LegacyWsSession, blob
 
 
 __all__ = [
-    "LegacyCarrier",
-    "LegacyControlStream",
-    "LegacyHttpSession",
-    "LegacyWsSession",
+    "LegacyWsWire",
     "agent_socket",
     "legacy_router",
     "router",

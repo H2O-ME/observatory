@@ -11,7 +11,8 @@ import asyncio
 import base64
 import logging
 from collections import OrderedDict
-from typing import Any, Awaitable, Callable
+from collections.abc import Mapping
+from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
 
 from ..core.clock import Clock, SYSTEM_CLOCK, client_timeout_s, server_deadline_ms
 from ..core.config import Settings, resolve_version
@@ -32,6 +33,48 @@ log = logging.getLogger(__name__)
 CONTROL_QUEUE_MAX = 4
 
 CloseHook = Callable[[int, str], Awaitable[None]]
+
+
+@runtime_checkable
+class SessionProtocol(Protocol):
+    """The minimal frozen session interface (C1).
+
+    ``registry`` and both carriers may rely **only** on this surface. There is
+    exactly one implementation family: :class:`AgentSession`. Legacy 0.2.x
+    carriers must subclass it and translate their wire shapes, never register a
+    second duck-typed state machine (that is what caused the mixed-registry bug).
+    """
+
+    device_id: int
+    uid: str
+    carrier: str
+    protocol: int
+    last_seen_ms: int
+    agent_config: dict[str, Any]
+    clock: Clock
+    closed: bool
+
+    def touch(self) -> None: ...
+
+    def note_carrier(self, carrier: str, protocol: int | None = None) -> None: ...
+
+    async def send(self, kind: str, body: dict[str, Any], *, deadline_ms: int) -> str: ...
+
+    async def request(
+        self,
+        kind: str,
+        body: dict[str, Any],
+        *,
+        timeout_s: float | None = None,
+    ) -> Result: ...
+
+    async def replay_pending(self, limit: int = 50) -> int: ...
+
+    async def close(self, *, code: int = 1000, reason: str = "") -> None: ...
+
+    def open_control(self, token: str) -> ControlStream: ...
+
+    def push_control_frame(self, token: str, payload: bytes) -> bool: ...
 
 
 class ControlStream:
@@ -85,6 +128,7 @@ class AgentSession:
         clock: Clock | None = None,
         carrier: str = "http",
         protocol: int = PROTOCOL_VERSION,
+        agent_config: Mapping[str, Any] | None = None,
     ) -> None:
         self.device_id = int(device_id)
         self.uid = str(uid)
@@ -93,6 +137,10 @@ class AgentSession:
         self.journal = journal
         self.settings = settings
         self.clock = clock or SYSTEM_CLOCK
+        #: Agent-safe settings projection computed outside link (A4): the carrier
+        #: injects ``agent_view(SettingsStore.effective(...))`` so link never
+        #: imports console and there is only one whitelist implementation.
+        self.agent_config: dict[str, Any] = dict(agent_config or {})
         self.last_seen_ms = self.clock.now_ms()
         self.connected_at_ms = self.last_seen_ms
         self.agent_version = ""
@@ -160,6 +208,33 @@ class AgentSession:
             msg_id=envelope.id,
         )
         return envelope.id
+
+    async def replay_pending(self, limit: int = 50) -> int:
+        """Re-enqueue commands that were created while the device was offline.
+
+        Called by both carriers when a session (re)appears. The command id is
+        stable, so a command delivered twice is deduped by the agent (C3).
+        """
+
+        if self.closed:
+            return 0
+        records = await self.journal.replay_for_device(self.device_id, limit=limit)
+        existing = {envelope.id for envelope in self.outbox.pending()}
+        queued = 0
+        for record in records:
+            if record.id in existing:
+                continue
+            envelope = new_envelope(
+                "command",
+                record.to_envelope_body(deadline_ms=record.deadline_ms),
+                msg_id=record.id,
+                clock=self.clock,
+            )
+            self.outbox.put(envelope)
+            queued += 1
+        if queued:
+            log_event(log, logging.INFO, "session.replayed", device_id=self.device_id, count=queued)
+        return queued
 
     async def request(
         self,
@@ -388,8 +463,9 @@ class AgentSession:
                 "server_version": resolve_version(),
                 "heartbeat_interval_s": self.settings.heartbeat_interval_s,
                 "server_time_ms": self.clock.now_ms(),
-                # W1 replaces this with the agent-safe settings projection.
-                "config": {},
+                # Agent-safe projection built by the carrier via
+                # core.settings_spec.agent_view (same function as console DTO).
+                "config": dict(self.agent_config),
             },
             clock=self.clock,
         )
@@ -471,4 +547,4 @@ class AgentSession:
         self.push_control_frame(token, payload)
 
 
-__all__ = ["AgentSession", "CONTROL_QUEUE_MAX", "ControlStream"]
+__all__ = ["AgentSession", "CONTROL_QUEUE_MAX", "ControlStream", "SessionProtocol"]

@@ -42,7 +42,6 @@ SPECS: dict[str, Spec] = {
     "thumb_width": Spec("int", 320, 96, 640, per_device=True, description="缩略图宽度"),
     "capture_scope": Spec("choice", "session", choices=("session", "console"), per_device=True, description="采集目标会话"),
     # ---- transport ---------------------------------------------------------
-    "ws_enabled": Spec("bool", True, per_device=True, description="允许 WebSocket 载体"),
     "poll_interval_s": Spec("int", 5, 2, 120, per_device=True, description="轮询间隔（秒）"),
     "transport_reprobe_s": Spec("int", 120, 30, 3600, per_device=True, description="向上探测间隔（秒）"),
     # ---- live control ------------------------------------------------------
@@ -54,7 +53,6 @@ SPECS: dict[str, Spec] = {
     "file_upload_max_mb": Spec("int", 512, 1, 8192, per_device=True, description="单文件上传上限（MB）"),
     # ---- updates -----------------------------------------------------------
     "auto_update": Spec("bool", True, per_device=True, description="允许自动更新"),
-    "update_channel": Spec("choice", "stable", choices=("stable", "beta"), description="更新通道"),
     # ---- retention ---------------------------------------------------------
     "frame_retention_days": Spec("int", 14, 1, 365, description="画面保留天数"),
     "audit_retention_days": Spec("int", 180, 7, 3650, description="审计保留天数"),

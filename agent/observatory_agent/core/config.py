@@ -6,9 +6,10 @@
    默认域名常量；其余模块（``link``/``main``）一律从配置读，不再自己写死
    （旧代码在 ``config.py:32`` 与 ``client.py:50`` 各写了一份）。
 2. **配置项要么生效要么不存在**（C8）：``DEFAULT_SETTINGS`` 只列受控端真正
-   消费的键；``ws_enabled`` / ``poll_interval_s`` / ``transport_reprobe_s``
-   这类 0.2.10 的安慰剂开关不再出现（载体选优由 ``core/link.py`` 的退避状态机
-   负责，不再是可以配错的开关）。
+   消费的键；``poll_interval_s``（HTTP 载体轮询间隔）、``transport_reprobe_s``
+   （向上探测起始间隔）、``capture_scope``（采集哪个会话）都各有唯一消费者，
+   0.2.10 的 ``ws_enabled`` 这类安慰剂开关不再出现（载体选优由
+   ``core/link.py`` 的退避状态机负责，不再是可以配错的开关）。
 3. **时钟单一来源**（C5 的受控端侧）：``Clock`` 用服务端 ``server_time_ms``
    校准出 ``device_time_offset_ms``；所有上行时间字段统一叫 ``device_time_ms``。
 
@@ -105,6 +106,21 @@ CONFIG_PATH: Path = PROGRAM_DATA / CONFIG_FILENAME
 INSTALL_DIR: Path = install_dir()
 
 
+def outbox_path() -> Path:
+    """持久化 outbox 的 sqlite 文件（W1：进程被杀后未确认上行可续传）。
+
+    ``OBS_OUTBOX_PATH`` 供测试/多实例隔离；默认落在数据目录，随卸载清理。
+    """
+
+    override = os.environ.get("OBS_OUTBOX_PATH", "").strip()
+    if override:
+        return Path(override)
+    return PROGRAM_DATA / "outbox.sqlite3"
+
+
+OUTBOX_PATH: Path = outbox_path()
+
+
 def ensure_dirs() -> None:
     for path in (PROGRAM_DATA, LOG_DIR, STAGING_DIR):
         path.mkdir(parents=True, exist_ok=True)
@@ -128,6 +144,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "file_upload_max_mb": 512,
     "auto_update": True,
     "heartbeat_interval_s": 20,
+    #: A15：HTTP 载体两轮之间的间隔（也是长轮询的等待上限语义）。
+    "poll_interval_s": 5,
+    #: A15：HTTP 载体稳定后向上探测 WS 的起始间隔（CarrierPolicy）。
+    "transport_reprobe_s": 120,
+    #: A15：采集目标会话（"session" = 当前交互会话，"console" = 控制台会话）。
+    "capture_scope": "session",
 }
 
 #: 服务端配置里的敏感键（A4）。服务端本来就不该下发这些；受控端再挡一层，
@@ -513,6 +535,7 @@ __all__ = [
     "PIPE_PREFIX",
     "PRODUCT",
     "PROGRAM_DATA",
+    "OUTBOX_PATH",
     "SECRET_KEYS",
     "SERVICE_DESCRIPTION",
     "SERVICE_DISPLAY_NAME",
@@ -526,5 +549,6 @@ __all__ = [
     "new_boot_id",
     "new_device_uid",
     "outbox_limits_from_env",
+    "outbox_path",
     "program_data_dir",
 ]

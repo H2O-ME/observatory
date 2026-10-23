@@ -25,6 +25,9 @@ import type {
   ApiErrorBody,
   ApiErrorCode,
   AuditList,
+  BackupDetail,
+  BackupList,
+  BackupOverview,
   Command,
   CommandList,
   ControlGrant,
@@ -36,6 +39,10 @@ import type {
   FileList,
   FileOpRequest,
   FileOpResult,
+  FrameList,
+  InstallInfo,
+  InstallToken,
+  InstallTokenCreated,
   LatestFrame,
   LiveEvent,
   LoginResult,
@@ -321,7 +328,7 @@ async function requestBinary(
       credentials: "same-origin",
       signal: controller.signal,
     });
-    const serverTime = Number(response.headers.get("X-Server-Time") ?? "");
+    const serverTime = Number(response.headers.get("X-Server-Time-Ms") ?? "");
     if (Number.isFinite(serverTime) && serverTime > 0) syncClock(serverTime);
     const deadlineHeader = Number(response.headers.get("X-Deadline-Ms") ?? "");
     rememberDeadline(options.opKey, Number.isFinite(deadlineHeader) ? deadlineHeader : null);
@@ -478,8 +485,11 @@ export const api = {
       opKey: "devices.patch",
     });
   },
-  deleteDevice(uid: string) {
-    return request<OkResult>(devicePath(uid), { method: "DELETE", opKey: "devices.delete" });
+  deleteDevice(uid: string, purgeRemote = true) {
+    return request<OkResult>(`${devicePath(uid)}${query({ purge_remote: purgeRemote ? "true" : "false" })}`, {
+      method: "DELETE",
+      opKey: "devices.delete",
+    });
   },
   uninstallDevice(uid: string) {
     // `confirm` is part of the server contract (A1 / §2.3); omitting it was a 422.
@@ -496,8 +506,8 @@ export const api = {
       opKey: "devices.commands.create",
     });
   },
-  listCommands(uid: string, limit = 50) {
-    return request<CommandList>(`${devicePath(uid)}/commands${query({ limit })}`, {
+  listCommands(uid: string, limit = 50, offset = 0) {
+    return request<CommandList>(`${devicePath(uid)}/commands${query({ limit, offset })}`, {
       opKey: "devices.commands.list",
     });
   },
@@ -513,6 +523,20 @@ export const api = {
   },
   latestFrame(uid: string) {
     return request<LatestFrame>(`${devicePath(uid)}/frames/latest`, { opKey: "frames.latest" });
+  },
+  listFrames(
+    uid: string,
+    params: { fromMs?: number; toMs?: number; limit?: number; offset?: number } = {},
+  ) {
+    return request<FrameList>(
+      `${devicePath(uid)}/frames${query({
+        from_ms: params.fromMs,
+        to_ms: params.toMs,
+        limit: params.limit,
+        offset: params.offset,
+      })}`,
+      { opKey: "frames.list" },
+    );
   },
   timeline(uid: string, fromMs: number, toMs: number, bucketMs?: number) {
     return request<Timeline>(
@@ -616,6 +640,67 @@ export const api = {
     return request<OkResult>(`${API_ROOT}/updates/agent/${encodeURIComponent(version)}`, {
       method: "DELETE",
       opKey: "updates.delete",
+    });
+  },
+
+  // ---- install / enrolment tokens ------------------------------------
+  /** Installer artifacts + enrolment note (the console's `GET /install`). */
+  getInstall() {
+    return request<InstallInfo>(`${API_ROOT}/install`, { opKey: "install.get" });
+  },
+  listInstallTokens() {
+    return request<{ tokens: InstallToken[] }>(`${API_ROOT}/install-tokens`, {
+      opKey: "install.tokens.list",
+    });
+  },
+  /** Mint a one-shot enrolment token. The plaintext token is returned once. */
+  createInstallToken(ttlS?: number) {
+    return request<InstallTokenCreated>(`${API_ROOT}/install-tokens`, {
+      method: "POST",
+      json: ttlS === undefined ? {} : { ttl_s: ttlS },
+      opKey: "install.tokens.create",
+    });
+  },
+  deleteInstallToken(id: number) {
+    return request<OkResult>(`${API_ROOT}/install-tokens/${id}`, {
+      method: "DELETE",
+      opKey: "install.tokens.delete",
+    });
+  },
+
+  // ---- backup / archive (A14) ----------------------------------------
+  backupOverview() {
+    return request<BackupOverview>(`${API_ROOT}/backup`, { opKey: "backup.overview" });
+  },
+  listBackup(params: { status?: string; deviceUid?: string; limit?: number; offset?: number } = {}) {
+    return request<BackupList>(
+      `${API_ROOT}/backup/entries${query({
+        status: params.status,
+        device_uid: params.deviceUid,
+        limit: params.limit,
+        offset: params.offset,
+      })}`,
+      { opKey: "backup.list" },
+    );
+  },
+  backupDetail(entryId: number) {
+    return request<BackupDetail>(`${API_ROOT}/backup/entries/${entryId}`, { opKey: "backup.detail" });
+  },
+  /** Local copy download URL (cookie-authenticated, like frame images). */
+  backupFileUrl(entryId: number) {
+    return `${API_ROOT}/backup/entries/${entryId}/file`;
+  },
+  retrieveBackup(entryId: number) {
+    return request<OkResult & { frame_id: number }>(`${API_ROOT}/backup/entries/${entryId}/retrieve`, {
+      method: "POST",
+      json: {},
+      opKey: "backup.retrieve",
+    });
+  },
+  deleteBackup(entryId: number) {
+    return request<OkResult>(`${API_ROOT}/backup/entries/${entryId}`, {
+      method: "DELETE",
+      opKey: "backup.delete",
     });
   },
 };

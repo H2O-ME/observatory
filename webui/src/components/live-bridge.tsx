@@ -71,9 +71,17 @@ export function LiveBridge() {
       if (event.type === "frame_added") {
         // The wall renders `latest_frame_id` from the device list, so a new frame
         // also invalidates the list (the 0.2.x bridge forgot this and the wall
-        // waited for its poll).
+        // waited for its poll). The timeline drill-down and the archive counters
+        // move with it.
         void queryClient.invalidateQueries({ queryKey: ["devices"] });
+        void queryClient.invalidateQueries({ queryKey: ["frames"] });
         void queryClient.invalidateQueries({ queryKey: ["timeline"] });
+        void queryClient.invalidateQueries({ queryKey: ["backup-overview"] });
+        void queryClient.invalidateQueries({ queryKey: ["backup-entries"] });
+      }
+      if (event.type === "device_removed") {
+        void queryClient.invalidateQueries({ queryKey: ["backup-overview"] });
+        void queryClient.invalidateQueries({ queryKey: ["backup-entries"] });
       }
       if (event.type === "command_created" || event.type === "command_updated") {
         void queryClient.invalidateQueries({ queryKey: ["commands"] });

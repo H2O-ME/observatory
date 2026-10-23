@@ -160,21 +160,20 @@ async def create_command(
     )
     links = get_links(request)
     agent_session = links.get(device.id)
-    journal = get_journal(request)
     if agent_session is not None:
-        sent = await agent_session.send(
-            "command",
-            record.to_envelope_body(deadline_ms=deadline_ms),
-            deadline_ms=deadline_ms,
-        )
-        if sent:
-            # The journal row is the delivery record: once it has been handed to
-            # a live carrier it must not also be claimed by the legacy poll path.
-            claimed = await journal.claim_pending(device.id, 20)
-            if any(item.id == record.id for item in claimed):
-                refreshed = await journal.get(record.id)
-                if refreshed is not None:
-                    record = refreshed
+        # Hand exactly this record to the live carrier. The carrier owns delivery:
+        # the v3 outbox/replay and the legacy wire both re-read the journal, so the
+        # console must not claim *other* pending rows here (that would hide offline
+        # commands from the legacy poll path). Status becomes ``ok``/``error`` when
+        # the agent reports the result; until then ``pending`` is the honest state.
+        try:
+            await agent_session.send(
+                "command",
+                record.to_envelope_body(deadline_ms=deadline_ms),
+                deadline_ms=deadline_ms,
+            )
+        except AppError as exc:
+            log.warning("live dispatch failed uid=%s command=%s: %s", device.uid, record.id, exc.message)
     return record
 
 

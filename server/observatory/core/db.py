@@ -35,7 +35,7 @@ from .log import log_event
 log = logging.getLogger(__name__)
 
 #: Bump this and append a migration function when the schema changes.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 PRAGMAS = (
     "PRAGMA journal_mode=WAL",
@@ -271,9 +271,25 @@ async def _migration_v2_link_v3(conn: AsyncConnection) -> None:
     )
 
 
+async def _migration_v3_device_token_index(conn: AsyncConnection) -> None:
+    """Unique token index: a re-enroll overwrite makes the previous token unusable.
+
+    The partial predicate keeps legacy rows with an empty ``token_hash`` legal
+    while guaranteeing that two devices can never share a real token.
+    """
+
+    await conn.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_devices_token_hash "
+            "ON devices (token_hash) WHERE token_hash <> ''"
+        )
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline_0_2_10", _migration_v1_baseline),
     Migration(2, "link_v3_0_3_0", _migration_v2_link_v3),
+    Migration(3, "device_token_index", _migration_v3_device_token_index),
 )
 
 

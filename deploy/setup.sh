@@ -166,8 +166,7 @@ OBS_SECRET_KEY=$secret
 OBS_ADMIN_PASSWORD=$admin
 # 0.2.x 受控端兼容用的共享注册码；0.3.0 新安装走一次性安装令牌。
 OBS_ENROLL_CODE=$enroll
-# 一次性安装令牌有效期（分钟，0=禁用）；由服务端消费，见 docs/接口.md。
-OBS_INSTALL_TOKEN_TTL_MINUTES=30
+# 一次性安装令牌 TTL 是控制台设置（install_token_ttl_minutes），不是 env。
 OBS_DATA_DIR=/data
 OBS_CONSOLE_HOST=$CONSOLE_HOST
 OBS_AGENT_HOSTS=$AGENT_HOST,$CONSOLE_HOST
@@ -190,7 +189,7 @@ ensure_env_defaults() {
   # 旧版 .env 没有 compose 层变量：补默认值，但不覆盖已有值。
   local env_file="$APP_DIR/server/.env"
   local pair key value
-  for pair in "OBS_BIND_ADDR=127.0.0.1" "OBS_PORT=8443" "OBS_TRUST_FORWARDED_FOR=true" "OBS_INSTALL_TOKEN_TTL_MINUTES=30"; do
+  for pair in "OBS_BIND_ADDR=127.0.0.1" "OBS_PORT=8443" "OBS_TRUST_FORWARDED_FOR=true"; do
     key="${pair%%=*}"
     value="${pair#*=}"
     if ! grep -q "^${key}=" "$env_file"; then
@@ -348,7 +347,7 @@ summary() {
 控制台    : https://$CONSOLE_HOST
 受控端接入: https://$CONSOLE_HOST  与  https://$AGENT_HOST （互为备份）
 证书      : $APP_DIR/certs/server.crt（实体拷贝，0.3.0 起不再用符号链接）
-安装命令  : 控制台 → 设置 → 安装程序（一次性安装令牌，默认 30 分钟）
+安装命令  : 控制台 → 设置 → 安装程序（一次性安装令牌，默认 24 小时、单次使用）
 版本      : $version
 
 下一步：

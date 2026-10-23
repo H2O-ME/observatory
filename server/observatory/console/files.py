@@ -129,6 +129,21 @@ async def list_files(
     return _list_payload(body, result["data"])
 
 
+def _normalise_op_data(op: str, data: dict[str, Any]) -> dict[str, Any]:
+    """G3: search/stat must use the same C-6 DTO as list/drives.
+
+    The agent still sends ``mtime_ms``; letting that leak through the generic
+    ``/files/op`` response would force the frontend to understand two names for
+    the same device-reported clock.
+    """
+
+    if op == "search" and isinstance(data.get("entries"), list):
+        return {**data, "entries": _entries(data.get("entries"))}
+    if op == "stat" and data:
+        return file_entry_out(data)
+    return data
+
+
 @router.post("/{uid}/files/op")
 async def file_op(
     uid: str,
@@ -143,6 +158,7 @@ async def file_op(
     if op not in ALLOWED_OPS:
         raise AppError.bad_request(f"不允许的文件操作: {op}")
     result = await run_file_op(request, session, device, payload)
+    result["data"] = _normalise_op_data(op, result["data"])
     if op in MUTATING_OPS:
         await audit.record(
             session,
@@ -213,8 +229,10 @@ async def write_raw(
 ) -> dict[str, Any]:
     device = await load_device(session, uid)
     body = await request.body()
-    if not body:
-        raise AppError.bad_request("空数据")
+    if not body and not truncate:
+        # A 0-byte first chunk cannot create anything meaningful. Clearing or
+        # creating an empty file is expressed explicitly with truncate=true.
+        raise AppError.bad_request("空数据；清空或创建空文件请带 truncate=true")
     if len(body) > MAX_CHUNK_BYTES:
         raise AppError.bad_request("分片超过 1MiB")
     effective = await store().effective(session, device.settings or {})

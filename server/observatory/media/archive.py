@@ -44,7 +44,7 @@ from . import storage, transcode
 
 log = logging.getLogger(__name__)
 
-GITHUB_API = "https://api.github.com"
+GITHUB_API = media_settings_mod.GITHUB_API_DEFAULT
 
 # §6bis 的状态取值（直接落库，控制台按此展示）
 STATUS_PENDING = "待上传"
@@ -220,11 +220,14 @@ class ArchiveService:
         session_scope: Callable[[], Any] | None = None,
         client_factory: Callable[[], Any] = _default_client,
         clock: Callable[[], int] = _now_ms,
+        api_base: str | None = None,
     ) -> None:
         self._settings = settings
         self._session_scope = session_scope
         self._client_factory = client_factory
         self._clock = clock
+        #: 显式覆盖 GitHub API 根地址（e2e/自建实例）；空值表示用 settings.archive_api_base。
+        self._api_base_override = str(api_base or "").strip().rstrip("/")
         self._queue: asyncio.Queue[ArchiveJob] = asyncio.Queue(maxsize=256)
         self._worker: asyncio.Task[None] | None = None
         self._stats: dict[str, int] = {
@@ -668,8 +671,13 @@ class ArchiveService:
             "X-GitHub-Api-Version": "2022-11-28",
         }
 
+    def _api_base(self, settings: media_settings_mod.MediaSettings) -> str:
+        """GitHub API 根地址：显式覆盖 > settings.archive_api_base > 默认值。"""
+
+        return self._api_base_override or (settings.archive_api_base or GITHUB_API).rstrip("/")
+
     def _contents_url(self, settings: media_settings_mod.MediaSettings, path: str) -> str:
-        return f"{GITHUB_API}/repos/{settings.archive_repo}/contents/{path}"
+        return f"{self._api_base(settings)}/repos/{settings.archive_repo}/contents/{path}"
 
     async def _upload(
         self, settings: media_settings_mod.MediaSettings, row: FrameArchive, data: bytes
@@ -737,19 +745,20 @@ class ArchiveService:
         headers = self._headers(settings.archive_token)
         repo = settings.archive_repo
         branch = settings.archive_branch
+        api = self._api_base(settings)
         async with self._client_factory() as client:
-            ref = await client.get(f"{GITHUB_API}/repos/{repo}/git/ref/heads/{branch}", headers=headers)
+            ref = await client.get(f"{api}/repos/{repo}/git/ref/heads/{branch}", headers=headers)
             if int(getattr(ref, "status_code", 0)) != 200:
                 raise ValueError(f"读取分支引用失败 HTTP {ref.status_code}")
             commit_sha = str(ref.json()["object"]["sha"])
 
-            commit = await client.get(f"{GITHUB_API}/repos/{repo}/git/commits/{commit_sha}", headers=headers)
+            commit = await client.get(f"{api}/repos/{repo}/git/commits/{commit_sha}", headers=headers)
             if int(getattr(commit, "status_code", 0)) != 200:
                 raise ValueError(f"读取提交失败 HTTP {commit.status_code}")
             tree_sha = str(commit.json()["tree"]["sha"])
 
             tree = await client.get(
-                f"{GITHUB_API}/repos/{repo}/git/trees/{tree_sha}", headers=headers, params={"recursive": "1"}
+                f"{api}/repos/{repo}/git/trees/{tree_sha}", headers=headers, params={"recursive": "1"}
             )
             if int(getattr(tree, "status_code", 0)) != 200:
                 raise ValueError(f"读取树失败 HTTP {tree.status_code}")
@@ -774,7 +783,7 @@ class ArchiveService:
                 for item in picked
             ]
             new_tree = await client.post(
-                f"{GITHUB_API}/repos/{repo}/git/trees",
+                f"{api}/repos/{repo}/git/trees",
                 headers=headers,
                 json={"base_tree": tree_sha, "tree": deletions},
             )
@@ -782,7 +791,7 @@ class ArchiveService:
                 raise ValueError(f"创建删除树失败 HTTP {new_tree.status_code}: {str(new_tree.text)[:200]}")
 
             new_commit = await client.post(
-                f"{GITHUB_API}/repos/{repo}/git/commits",
+                f"{api}/repos/{repo}/git/commits",
                 headers=headers,
                 json={
                     "message": f"purge: {base_path}",
@@ -794,7 +803,7 @@ class ArchiveService:
                 raise ValueError(f"创建删除提交失败 HTTP {new_commit.status_code}")
 
             moved = await client.patch(
-                f"{GITHUB_API}/repos/{repo}/git/refs/heads/{branch}",
+                f"{api}/repos/{repo}/git/refs/heads/{branch}",
                 headers=headers,
                 json={"sha": new_commit.json()["sha"], "force": False},
             )

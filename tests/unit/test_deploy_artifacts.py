@@ -1,0 +1,83 @@
+"""部署产物静态契约（A6/A7 的运维面；真正的 shell 语法检查在 CI 里跑 bash -n/shellcheck）。"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.unit
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEPLOY = REPO_ROOT / "deploy"
+NGINX = DEPLOY / "nginx"
+
+
+def _read(relative: str) -> str:
+    path = DEPLOY / relative
+    assert path.exists(), f"缺少 deploy/{relative}"
+    return path.read_text(encoding="utf-8")
+
+
+def test_all_shell_scripts_use_strict_mode() -> None:
+    scripts = sorted(DEPLOY.glob("*.sh"))
+    assert scripts, "deploy/ 下应至少有一个运维脚本"
+    for script in scripts:
+        text = script.read_text(encoding="utf-8")
+        assert "set -Eeuo pipefail" in text, f"{script.name} 缺少严格模式"
+
+
+def test_nginx_templates_are_dual_domain_and_websocket_ready() -> None:
+    console = _read("nginx/console.conf.template")
+    agent = _read("nginx/agent.conf.template")
+    map_conf = _read("nginx/observatory-map.conf")
+
+    assert "server_name @@CONSOLE_HOST@@" in console
+    assert "server_name @@AGENT_HOST@@" in agent
+    for text in (console, agent):
+        assert "@@CERT_NAME@@" in text
+        assert "ssl_certificate " in text and "ssl_certificate_key " in text
+        assert "proxy_set_header Upgrade $http_upgrade" in text
+        assert "proxy_set_header Connection $connection_upgrade" in text
+        assert "proxy_pass https://127.0.0.1:8443" in text
+
+    # map 只能定义一次，两个 vhost 共用
+    assert "map $http_upgrade $connection_upgrade" in map_conf
+    assert "default upgrade" in map_conf
+
+    # agent 域名代理受控端与公开安装端点；控制台域名代理全部
+    assert "location /api/v1/agent/" in agent
+    assert "location /api/v1/public/" in agent
+    assert "location / {" in console
+
+
+def test_nginx_templates_have_no_literal_production_domains() -> None:
+    """A23：模板只允许占位符，默认域名来自配置模块。"""
+
+    for name in ("nginx/console.conf.template", "nginx/agent.conf.template"):
+        text = _read(name)
+        assert "tianhw.top" not in text, f"{name} 写死了生产域名"
+        assert "123423.xyz" not in text, f"{name} 写死了生产域名"
+
+
+def test_obsolete_static_confs_are_marked_deprecated() -> None:
+    """旧静态站点配置保留为“已废弃”占位，避免被误 include。"""
+
+    for name in ("nginx/control.tianhw.top.conf", "nginx/observatory.123423.xyz.conf"):
+        text = _read(name)
+        assert "已废弃" in text, name
+        assert "console.conf.template" in text, name
+
+
+def test_setup_renders_templates_instead_of_copying_static_confs() -> None:
+    setup = _read("setup.sh")
+    for fragment in (
+        "nginx/console.conf.template",
+        "nginx/agent.conf.template",
+        "nginx/observatory-map.conf",
+    ):
+        assert fragment in setup, fragment
+    assert "render_site" in setup
+    # ACME bootstrap 也必须用实体 vhost + nginx -t 校验
+    assert "nginx -t" in setup
+    assert "observatory-acme.conf" in setup

@@ -178,6 +178,77 @@ jobs:
           files: agent/dist/observatory-agent-*.zip
           generate_release_notes: true
 
+  deploy-static:
+    name: 部署脚本静态检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: 安装体检脚本依赖（check_deployment.py 需要 httpx/websockets）
+        run: python -m pip install --quiet --disable-pip-version-check httpx websockets
+      - name: 体检脚本可编译、可启动（发布前工具）
+        run: |
+          set -euo pipefail
+          python -m py_compile tools/check_deployment.py tools/check_deploy.py tools/set_version.py
+          python tools/check_deployment.py --help >/dev/null
+      - name: Shell 语法（bash -n）
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          scripts=(deploy/*.sh)
+          if [ "${#scripts[@]}" -eq 0 ]; then
+            echo "deploy/ 下没有 shell 脚本" >&2
+            exit 1
+          fi
+          for script in "${scripts[@]}"; do
+            echo "bash -n $script"
+            bash -n "$script"
+          done
+      - name: 安装 shellcheck（不依赖 runner 预装版本）
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends shellcheck
+      - name: shellcheck（error 级阻断）
+        run: shellcheck -S error deploy/*.sh
+      - name: nginx 配置断言（占位符/证书/反代/WS map）
+        run: python tools/check_deploy.py
+
+  nginx-config-test:
+    name: nginx -t（手动）
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 渲染模板并在 nginx 容器里 nginx -t
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          mkdir -p "$work/conf" "$work/certs" "$work/certbot" "$work/logs"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -subj "/CN=control.example.test" \
+            -keyout "$work/certs/privkey.pem" -out "$work/certs/fullchain.pem" 2>/dev/null
+          sed -e 's|@@CONSOLE_HOST@@|control.example.test|g' \
+              -e 's|@@AGENT_HOST@@|agent.example.test|g' \
+              -e 's|/etc/letsencrypt/live/@@CERT_NAME@@|/w/certs|g' \
+              -e 's|/var/www/certbot|/w/certbot|g' \
+              deploy/nginx/console.conf.template > "$work/conf/console.conf"
+          sed -e 's|@@CONSOLE_HOST@@|control.example.test|g' \
+              -e 's|@@AGENT_HOST@@|agent.example.test|g' \
+              -e 's|/etc/letsencrypt/live/@@CERT_NAME@@|/w/certs|g' \
+              -e 's|/var/www/certbot|/w/certbot|g' \
+              deploy/nginx/agent.conf.template > "$work/conf/agent.conf"
+          cp deploy/nginx/observatory-map.conf "$work/conf/"
+          cat > "$work/nginx.conf" <<'EOF'
+          events {}
+          http {
+            access_log off;
+            include /w/conf/*.conf;
+          }
+          EOF
+          docker run --rm -v "$work:/w" nginx:1.27-alpine sh -c 'nginx -t -c /w/nginx.conf'
+
   perf:
     name: N4 性能基线（手动）
     if: github.event_name == 'workflow_dispatch'

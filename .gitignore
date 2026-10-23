@@ -50,3 +50,4 @@ desktop.ini
 # ---- 重构期临时产物（不入库） ----
 tmp_w0/
 .pytest-tmp/
+tmp_w1/

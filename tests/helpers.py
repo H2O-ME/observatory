@@ -76,6 +76,52 @@ def legacy_token(client: object) -> str:
     return token
 
 
+def seed_device(client: object, *, uid: str = "OBS-V3-TEST", token: str = "v3-test-token") -> int:
+    """直接造一行 devices（v3 /agent/link 只认 DB 里的 token_hash，不再接受任意 token）。
+
+    返回 device_id；token_hash 与 console/install.py 使用同一个
+    ``device_token_hash(token, settings.secret_key)``。
+    """
+
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from observatory.core.clock import now_ms  # noqa: PLC0415
+    from observatory.core.crypto import device_token_hash  # noqa: PLC0415
+    from observatory.core.models import Device  # noqa: PLC0415
+
+    app = client.app  # type: ignore[attr-defined]
+    digest = device_token_hash(token, app.state.settings.secret_key)
+
+    async def insert() -> int:
+        async with app.state.db.sessionmaker() as session:
+            existing = (await session.execute(select(Device).where(Device.uid == uid))).scalars().first()
+            if existing is not None:
+                existing.token_hash = digest
+                existing.uninstalled_at_ms = None
+                await session.commit()
+                return int(existing.id)
+            row = Device(
+                uid=uid,
+                name=uid,
+                hostname="test-host",
+                os_name="Windows",
+                os_version="11",
+                arch="AMD64",
+                agent_version="0.3.0",
+                token_hash=digest,
+                enrolled_at_ms=now_ms(),
+                last_seen_ms=now_ms(),
+                settings={},
+                sysinfo={},
+                note="pytest",
+            )
+            session.add(row)
+            await session.commit()
+            return int(row.id)
+
+    return client.portal.call(insert)  # type: ignore[attr-defined]
+
+
 __all__ = [
     "REPO_ROOT",
     "SERVER_DIR",
@@ -87,4 +133,5 @@ __all__ = [
     "legacy_token",
     "prepare_env",
     "running_app",
+    "seed_device",
 ]

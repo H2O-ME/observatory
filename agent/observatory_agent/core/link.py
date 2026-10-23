@@ -83,9 +83,12 @@ CONNECT_TIMEOUT_S: Final[float] = 10.0
 WS_OPEN_TIMEOUT_S: Final[float] = 12.0
 WS_MAX_MESSAGE_BYTES: Final[int] = 16 * 1024 * 1024
 
-#: WS 关闭码（与 0.2.10 服务端约定一致；A17/GONE）。
+#: WS 关闭码（W1 服务端语义）：4401 令牌失效需重注册；4410 设备已卸载（终态，
+#: 兼容旧服务端的 4002）；4429 被限流（可重连退避）。HTTP 对应 401/410/429。
 WS_CLOSE_UNAUTHORIZED: Final[int] = 4401
-WS_CLOSE_GONE: Final[int] = 4002
+WS_CLOSE_GONE: Final[int] = 4410
+WS_CLOSE_GONE_LEGACY: Final[int] = 4002
+WS_CLOSE_RATE_LIMITED: Final[int] = 4429
 
 #: WS 失败后的重连退避序列；最后一项封顶重复使用。
 RECONNECT_DELAYS_S: Final[tuple[float, ...]] = (2, 5, 10, 20, 30, 60, 120)
@@ -280,8 +283,10 @@ def _map_ws_error(exc: BaseException) -> LinkError:
             code = int(getattr(received, "code", 0) or 0)
         if code == WS_CLOSE_UNAUTHORIZED:
             return LinkAuthError("WS 被服务端以 4401 关闭：令牌失效")
-        if code == WS_CLOSE_GONE:
-            return LinkGoneError("WS 被服务端以 4002 关闭：设备已卸载")
+        if code in (WS_CLOSE_GONE, WS_CLOSE_GONE_LEGACY):
+            return LinkGoneError(f"WS 被服务端以 {code} 关闭：设备已卸载")
+        if code == WS_CLOSE_RATE_LIMITED:
+            return LinkRateLimited("WS 被服务端以 4429 关闭：触发限流", retry_after_s=5.0)
         return LinkUnavailable(f"WS 断开 code={code}")
     if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
         return LinkUnavailable("WS 连接超时")
@@ -339,6 +344,7 @@ class Link:
         reconnect_delays_s: tuple[float, ...] | None = None,
         probe_base_s: float = PROBE_BASE_S,
         probe_max_s: float = PROBE_MAX_S,
+        http_poll_interval_s: float = MIN_HTTP_ROUND_S,
     ) -> None:
         self._clock = clock or Clock()
         self._outbox = outbox or Outbox(outbox_limits)
@@ -355,6 +361,8 @@ class Link:
         self._reconnect_delays_s = tuple(reconnect_delays_s or RECONNECT_DELAYS_S)
         self._probe_base_s = float(probe_base_s)
         self._probe_max_s = float(probe_max_s)
+        #: A15 的 ``poll_interval_s``：HTTP 两轮之间的最小间隔（秒）。
+        self._http_poll_interval_s = max(MIN_HTTP_ROUND_S, float(http_poll_interval_s))
         #: 测试注入点：``(url, **kwargs) -> awaitable connection``；默认用 websockets。
         self._ws_connector = ws_connector
 
@@ -383,7 +391,8 @@ class Link:
         self._unknown_types: set[str] = set()
         #: 已处理的最后一条**下行**信封 id。HTTP 批次请求的 ``last_ack_id`` 与
         #: WS 的 hello 都带它，服务端据此推进自己的下行 outbox（规格 §5.6）。
-        self._last_downlink_id = ""
+        #: 初值从 outbox 的持久化游标恢复，重启后不会让服务端重发已处理的下行。
+        self._last_downlink_id = self._outbox.last_downlink_id
         self._terminated = False
 
     # -- 只读状态 --------------------------------------------------------
@@ -751,6 +760,12 @@ class Link:
                 except LinkGoneError as exc:
                     await self._terminate(str(exc))
                     return
+                except LinkRateLimited as exc:
+                    self._last_error = f"ws: {exc}"
+                    delay = min(max(exc.retry_after_s, policy.next_reconnect_delay()), 120.0)
+                    log.warning("WS 被限流（%s），%.0fs 后再试", exc, delay)
+                    await asyncio.sleep(delay)
+                    continue
                 except LinkUnavailable as exc:
                     self._last_error = f"ws: {exc}"
                     log.warning("WS 载体不可用（%s），降级到 HTTP 长轮询", exc)
@@ -947,32 +962,47 @@ class Link:
     async def _run_http_phase(self, policy: CarrierPolicy) -> bool:
         """跑 HTTP 长轮询阶段；返回 ``True`` 表示探测到 WS 可用、应切回。
 
-        单次请求可能被服务端 hold 20s。为了让"命令回执/事件"这类上行不必等满
-        一个 hold，``send()`` 会 set ``_wake``：本轮若被唤醒且请求仍在途，就
-        **主动放弃这次请求**（上行 id 幂等，服务端按 id 去重，下一轮重投安全），
-        立刻带上新消息重发。这样 HTTP 载体的回执延迟是"下一次调度"，而不是
-        最长 20 秒。
+        两条时间线在这里并存：
+        - **上行唤醒**：``send()`` set ``_wake``，放弃在途请求（id 幂等，下一轮重投）
+          立刻带上新消息重发，回执延迟是"下一次调度"而不是最长一个 hold；
+        - **向上探测**：``transport_reprobe_s`` 到点就放弃在途长轮询去探测 WS。
+          服务端的 hold 最长 20s，不能让它把"切回 WS"拖到几十秒之后（W1 e2e 实测
+          过这个延迟，A15 的探测间隔必须是独立定时器）。
         """
 
         self._set_carrier("http", "http 长轮询")
         policy.reset_probe()
         next_probe_at: float | None = None
         loop = asyncio.get_running_loop()
+        interval = max(MIN_HTTP_ROUND_S, self._http_poll_interval_s)
         while not self._closing:
             started = loop.time()
             self._wake.clear()
+            if next_probe_at is None:
+                probe_wait = min(policy.next_probe_delay(), self._probe_max_s)
+                next_probe_at = started + probe_wait
+                log.info("HTTP 载体稳定，%.0fs 后探测 WS", probe_wait)
+            probe_due = max(0.0, next_probe_at - loop.time())
             round_task = asyncio.create_task(self._http_round(), name="link-http-round")
             wake_task = asyncio.create_task(self._wake.wait(), name="link-http-wake")
             try:
                 done, _pending = await asyncio.wait(
-                    {round_task, wake_task}, return_when=asyncio.FIRST_COMPLETED
+                    {round_task, wake_task}, timeout=probe_due, return_when=asyncio.FIRST_COMPLETED
                 )
                 if round_task not in done:
-                    # 有新上行入队：放弃在途请求（可能已在服务端处理，幂等可重投），
-                    # 立刻进入下一轮把新消息发出去。
+                    # 要么有新上行要立刻发，要么到了向上探测时间：都值得放弃在途
+                    # 长轮询请求（幂等）。
                     round_task.cancel()
+                    wake_task.cancel()
                     await asyncio.gather(round_task, wake_task, return_exceptions=True)
-                    self._wake.clear()
+                    if self._wake.is_set():
+                        self._wake.clear()
+                        continue
+                    if await self._probe_ws():
+                        return True
+                    probe_wait = min(policy.next_probe_delay(), self._probe_max_s)
+                    next_probe_at = loop.time() + probe_wait
+                    log.info("WS 仍不可用，%.0fs 后再探测", probe_wait)
                     continue
                 wake_task.cancel()
                 await asyncio.gather(wake_task, return_exceptions=True)
@@ -1005,20 +1035,15 @@ class Link:
                 raise
 
             policy.reset_after_connect()
-            now = loop.time()
-            if next_probe_at is None:
-                probe_wait = min(policy.next_probe_delay(), self._probe_max_s)
-                next_probe_at = now + probe_wait
-                log.info("HTTP 载体稳定，%.0fs 后探测 WS", probe_wait)
-            if now >= next_probe_at:
+            if loop.time() >= next_probe_at:
                 if await self._probe_ws():
                     return True
                 probe_wait = min(policy.next_probe_delay(), self._probe_max_s)
                 next_probe_at = loop.time() + probe_wait
                 log.info("WS 仍不可用，%.0fs 后再探测", probe_wait)
             elapsed = loop.time() - started
-            if elapsed < MIN_HTTP_ROUND_S:
-                await asyncio.sleep(MIN_HTTP_ROUND_S - elapsed)
+            if elapsed < interval:
+                await asyncio.sleep(min(interval - elapsed, max(0.05, next_probe_at - loop.time())))
         return False
 
     async def _http_round(self) -> None:
@@ -1032,7 +1057,8 @@ class Link:
             [entry.to_envelope() for entry in entries], last_ack_id=self._last_downlink_id
         )
         started_ms = self._clock.device_now_ms()
-        response = await self._request("POST", LINK_PATH, json=batch, timeout=HTTP_TIMEOUT_S)
+        timeout = max(HTTP_TIMEOUT_S, self._http_poll_interval_s + 10.0)
+        response = await self._request("POST", LINK_PATH, json=batch, timeout=timeout)
         finished_ms = self._clock.device_now_ms()
         self._raise_for_status(response, msg_ids=sent_ids, what="link")
         try:
@@ -1207,6 +1233,7 @@ class Link:
 
         previous_downlink = self._last_downlink_id
         self._last_downlink_id = envelope.id
+        self._outbox.note_downlink(envelope.id)
 
         if not is_known_type(envelope.type):
             self._unknown_messages += 1
@@ -1464,6 +1491,8 @@ __all__ = [
     "PROBE_MAX_S",
     "RECONNECT_DELAYS_S",
     "WS_CLOSE_GONE",
+    "WS_CLOSE_GONE_LEGACY",
+    "WS_CLOSE_RATE_LIMITED",
     "WS_CLOSE_UNAUTHORIZED",
     "WS_PATH",
     "probe_delay",
