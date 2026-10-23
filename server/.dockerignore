@@ -1,16 +1,7 @@
-*.pyc
-__pycache__/
-.venv/
-venv/
-.localdata/
-data/
-*.db
-*.db-wal
-*.db-shm
-.env
-tests/
-node_modules/
-webui/dist/
-agent/build/dist/
-agent/dist/
-.git/
+# 此位置不生效（Observatory 0.3.0）
+#
+# Docker 只读取“构建上下文根目录”的 .dockerignore。compose 的构建上下文是
+# 仓库根（deploy/docker-compose.yml 的 context: ..），因此忽略规则已经移动到：
+#     <repo>/.dockerignore
+#
+# 保留本文件只是为了提醒后来者不要把规则写回这里。

@@ -4,55 +4,113 @@ import { Expand, Keyboard, MousePointer2, Power, RefreshCw, WifiOff } from "luci
 import { FrameStage } from "@/components/frame-view";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { api, ApiError } from "@/lib/api";
+import { api, isApiError } from "@/lib/api";
+import { serverNow, serverTimeLeft, useServerNow } from "@/store/clock";
 import { controlUnavailableReason, isPollMode } from "@/lib/presence";
 import type { Device } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const NORM = 10000;
+const CONTROL_TTL_S = 600;
+const PING_INTERVAL_MS = 3_000;
+
+type ControlStatus = "idle" | "granting" | "connecting" | "streaming" | "error" | "closed";
+
+interface ControlSession {
+  token: string;
+  /** Server clock: when the grant expires. Never compared to a local clock. */
+  expiresAtMs: number;
+  fps: number;
+  quality: number;
+}
+
+/** Windows virtual-key codes for the keys that are not printable text. */
+const VK_BY_KEY: Record<string, number> = {
+  Backspace: 0x08,
+  Tab: 0x09,
+  Enter: 0x0d,
+  Escape: 0x1b,
+  " ": 0x20,
+  PageUp: 0x21,
+  PageDown: 0x22,
+  End: 0x23,
+  Home: 0x24,
+  ArrowLeft: 0x25,
+  ArrowUp: 0x26,
+  ArrowRight: 0x27,
+  ArrowDown: 0x28,
+  Insert: 0x2d,
+  Delete: 0x2e,
+  Control: 0x11,
+  Alt: 0x12,
+  Shift: 0x10,
+  Meta: 0x5b,
+  CapsLock: 0x14,
+  F1: 0x70,
+  F2: 0x71,
+  F3: 0x72,
+  F4: 0x73,
+  F5: 0x74,
+  F6: 0x75,
+  F7: 0x76,
+  F8: 0x77,
+  F9: 0x78,
+  F10: 0x79,
+  F11: 0x7a,
+  F12: 0x7b,
+};
+
+function vkCodeFor(event: React.KeyboardEvent): number {
+  const mapped = VK_BY_KEY[event.key];
+  if (mapped !== undefined) return mapped;
+  if (event.code.startsWith("Key") && event.code.length === 4) return event.code.charCodeAt(3);
+  if (event.code.startsWith("Digit") && event.code.length === 6) return event.code.charCodeAt(5);
+  return 0;
+}
 
 interface Props {
   device: Device;
 }
 
-interface ControlState {
-  status: "idle" | "granting" | "connecting" | "streaming" | "error" | "closed";
-  message: string;
-  fps: number;
-  quality: number;
-  expiresAt: number;
-}
-
-function mapButton(button: number): number {
-  if (button === 2) return 3; // middle
-  if (button === 1) return 2; // right
-  return 1;
-}
-
+/**
+ * Real-time control.
+ *
+ * Time handling is the point of this rewrite (A12):
+ *  - The grant's `expires_at_ms` is a *server* timestamp; the countdown and the
+ *    expiry watchdog compare it with `serverNow()`, never with `Date.now()`. If
+ *    the clock is not calibrated yet the view says so instead of guessing.
+ *  - `performance.now()` appears only for the input throttle and the ping
+ *    round-trip: it is a monotonic stopwatch, not a wall clock.
+ *
+ * Session hygiene:
+ *  - Stopping revokes the grant on the server; closing the tab does too.
+ *  - If the device loses its live carrier mid-session, the grant is revoked and
+ *    the socket closed, so no orphan control stream keeps running for its TTL.
+ *  - `onerror` always closes the socket, which also prevents a second socket
+ *    from being opened on top of a half-dead one.
+ */
 export function LiveView({ device }: Props) {
-  const [state, setState] = useState<ControlState>({
-    status: "idle",
-    message: "",
-    fps: 8,
-    quality: 55,
-    expiresAt: 0,
-  });
+  const [status, setStatus] = useState<ControlStatus>("idle");
+  const [message, setMessage] = useState("");
+  const [session, setSession] = useState<ControlSession | null>(null);
   const [frameUrl, setFrameUrl] = useState("");
   const [natural, setNatural] = useState({ width: 0, height: 0 });
-  const [frames, setFrames] = useState(0);
-  const [latency, setLatency] = useState(0);
+  const [fps, setFps] = useState(0);
+  const [rttMs, setRttMs] = useState<number | null>(null);
   const [textValue, setTextValue] = useState("");
 
   const socketRef = useRef<WebSocket | null>(null);
+  const sessionRef = useRef<ControlSession | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const lastUrlRef = useRef("");
   const lastMoveRef = useRef(0);
   const frameCountRef = useRef(0);
+  const pingAtRef = useRef(0);
 
-  // Poll-only devices (and capture-blocked ones) cannot carry pointer/keyboard
-  // input. Explain that up front and leave the entry point disabled instead of
-  // letting the user click into a silent failure.
-  const controlIssue = controlUnavailableReason(device.presence);
+  const uid = device.uid;
+  const issue = controlUnavailableReason(device.presence);
+  // Subscribes to the single 1 Hz ticker so the countdown ages while visible.
+  const now = useServerNow();
 
   const send = useCallback((payload: Record<string, unknown>) => {
     const socket = socketRef.current;
@@ -61,60 +119,114 @@ export function LiveView({ device }: Props) {
     }
   }, []);
 
-  const stop = useCallback(() => {
+  const closeSocket = useCallback(() => {
     const socket = socketRef.current;
     socketRef.current = null;
     if (socket && socket.readyState <= WebSocket.OPEN) socket.close();
-    if (lastUrlRef.current) {
-      URL.revokeObjectURL(lastUrlRef.current);
-      lastUrlRef.current = "";
-    }
-    setFrameUrl("");
-    setState((previous) => ({ ...previous, status: "idle", message: "" }));
   }, []);
 
-  useEffect(() => () => stop(), [stop]);
+  const stop = useCallback(
+    (nextMessage = "") => {
+      const active = sessionRef.current;
+      sessionRef.current = null;
+      setSession(null);
+      closeSocket();
+      if (active) {
+        // Best-effort cleanup; the server also expires the grant on its own.
+        void api.revokeControl(uid, active.token).catch(() => undefined);
+      }
+      if (lastUrlRef.current) {
+        URL.revokeObjectURL(lastUrlRef.current);
+        lastUrlRef.current = "";
+      }
+      setFrameUrl("");
+      setFps(0);
+      setStatus(nextMessage ? "closed" : "idle");
+      setMessage(nextMessage);
+    },
+    [closeSocket, uid],
+  );
+
+  useEffect(() => () => stop(""), [stop]);
+
+  // A device that falls back to polling (or goes offline) cannot carry input:
+  // revoke the grant instead of leaving a control stream running unseen.
+  useEffect(() => {
+    if (!session) return;
+    if (issue) stop(issue);
+  }, [issue, session, stop]);
+
+  // Frame-rate counter and expiry watchdog, both anchored on the server clock.
+  useEffect(() => {
+    if (!session) return;
+    const timer = window.setInterval(() => {
+      setFps(frameCountRef.current);
+      frameCountRef.current = 0;
+      const current = serverNow();
+      if (current !== null && current >= session.expiresAtMs) stop("控制会话已到期");
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [session, stop]);
+
+  // Round-trip measurement: `performance.now()` is the monotonic stopwatch.
+  useEffect(() => {
+    if (status !== "streaming") return;
+    const timer = window.setInterval(() => {
+      const socket = socketRef.current;
+      if (socket?.readyState === WebSocket.OPEN) {
+        pingAtRef.current = performance.now();
+        socket.send(JSON.stringify({ type: "ping" }));
+      }
+    }, PING_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [status]);
 
   const start = async () => {
-    setState({ status: "granting", message: "正在申请控制会话…", fps: 8, quality: 55, expiresAt: 0 });
+    if (issue) return;
+    stop("");
+    setStatus("granting");
+    setMessage("正在申请控制会话…");
     try {
-      const grant = await api.controlGrant(device.uid, 600);
-      const scheme = location.protocol === "https:" ? "wss" : "ws";
-      const url = `${scheme}://${location.host}${grant.ws_path}?token=${encodeURIComponent(grant.token)}`;
-      setState({
-        status: "connecting",
-        message: "正在建立实时通道…",
+      const grant = await api.grantControl(uid, CONTROL_TTL_S);
+      const next: ControlSession = {
+        token: grant.token,
+        expiresAtMs: grant.expires_at_ms,
         fps: grant.fps,
         quality: grant.quality,
-        expiresAt: grant.expires_at_ms,
-      });
+      };
+      sessionRef.current = next;
+      setSession(next);
+      setStatus("connecting");
+      setMessage("正在建立实时通道…");
 
-      const socket = new WebSocket(url);
+      const scheme = location.protocol === "https:" ? "wss" : "ws";
+      const socket = new WebSocket(
+        `${scheme}://${location.host}${grant.ws_path}?token=${encodeURIComponent(grant.token)}`,
+      );
       socket.binaryType = "blob";
       socketRef.current = socket;
 
       socket.onmessage = (event) => {
         if (typeof event.data === "string") {
           try {
-            const message = JSON.parse(event.data) as { type?: string };
-            if (message.type === "ready") {
-              setState((previous) => ({
-                ...previous,
-                status: "streaming",
-                message: "",
-                expiresAt: grant.expires_at_ms,
-              }));
+            const parsed = JSON.parse(event.data) as { type?: string };
+            if (parsed.type === "ready") {
+              setStatus("streaming");
+              setMessage("");
+            } else if (parsed.type === "pong" && pingAtRef.current > 0) {
+              setRttMs(performance.now() - pingAtRef.current);
+              pingAtRef.current = 0;
             }
           } catch {
-            /* ignore */
+            /* one malformed control frame must not end the session */
           }
           return;
         }
         const blob = event.data as Blob;
-        const url = URL.createObjectURL(blob);
+        const nextUrl = URL.createObjectURL(blob);
         const previous = lastUrlRef.current;
-        setFrameUrl(url);
-        lastUrlRef.current = url;
+        lastUrlRef.current = nextUrl;
+        setFrameUrl(nextUrl);
         if (previous) window.setTimeout(() => URL.revokeObjectURL(previous), 1500);
         frameCountRef.current += 1;
       };
@@ -122,40 +234,31 @@ export function LiveView({ device }: Props) {
       socket.onclose = (event) => {
         if (socketRef.current !== socket) return;
         socketRef.current = null;
-        setState((previous) => ({
-          ...previous,
-          status: event.code === 4409 ? "error" : "closed",
-          message:
-            event.code === 4409
-              ? "受控端当前没有 WebSocket 通道，实时控制不可用（会显示为“仅轮询”）。"
-              : "控制会话已结束",
-        }));
+        sessionRef.current = null;
+        setSession(null);
+        setFps(0);
+        setStatus(event.code === 4409 ? "error" : "closed");
+        setMessage(
+          event.code === 4409
+            ? "受控端当前没有实时通道，实时控制不可用（会显示为“仅轮询”）。"
+            : "控制会话已结束",
+        );
       };
 
       socket.onerror = () => {
-        setState((previous) => ({ ...previous, status: "error", message: "控制通道发生错误" }));
+        // Always close: a half-open socket would otherwise linger and a second
+        // "重新连接" would stack another socket on top of it.
+        socket.close();
+        setStatus((current) => (current === "streaming" ? current : "error"));
+        setMessage((current) => current || "控制通道发生错误");
       };
     } catch (failure) {
-      setState({
-        status: "error",
-        message: failure instanceof ApiError ? failure.detail : "无法开始控制会话",
-        fps: 8,
-        quality: 55,
-        expiresAt: 0,
-      });
+      sessionRef.current = null;
+      setSession(null);
+      setStatus("error");
+      setMessage(isApiError(failure) ? failure.message : "无法开始控制会话");
     }
   };
-
-  // Frame rate + expiry watchdog.
-  useEffect(() => {
-    if (state.status !== "streaming") return;
-    const timer = window.setInterval(() => {
-      setFrames(frameCountRef.current);
-      frameCountRef.current = 0;
-      if (state.expiresAt && Date.now() > state.expiresAt) stop();
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [state.status, state.expiresAt, stop]);
 
   const normalized = (clientX: number, clientY: number) => {
     const stage = stageRef.current;
@@ -181,9 +284,10 @@ export function LiveView({ device }: Props) {
   };
 
   const onPointerMove = (event: React.PointerEvent) => {
-    const now = performance.now();
-    if (now - lastMoveRef.current < 33) return;
-    lastMoveRef.current = now;
+    // 30 Hz input throttle: monotonic stopwatch, unrelated to the server clock.
+    const stamp = performance.now();
+    if (stamp - lastMoveRef.current < 33) return;
+    lastMoveRef.current = stamp;
     const { x, y } = normalized(event.clientX, event.clientY);
     send({ type: "input", ev: { kind: "mouse", action: "move", x, y, norm: true } });
   };
@@ -192,13 +296,15 @@ export function LiveView({ device }: Props) {
     event.preventDefault();
     (event.target as HTMLElement).setPointerCapture?.(event.pointerId);
     const { x, y } = normalized(event.clientX, event.clientY);
+    const button = event.button === 2 ? 3 : event.button === 1 ? 2 : 1;
     send({ type: "input", ev: { kind: "mouse", action: "move", x, y, norm: true } });
-    send({ type: "input", ev: { kind: "mouse", action: "down", button: mapButton(event.button), x, y, norm: true } });
+    send({ type: "input", ev: { kind: "mouse", action: "down", button, x, y, norm: true } });
   };
 
   const onPointerUp = (event: React.PointerEvent) => {
     const { x, y } = normalized(event.clientX, event.clientY);
-    send({ type: "input", ev: { kind: "mouse", action: "up", button: mapButton(event.button), x, y, norm: true } });
+    const button = event.button === 2 ? 3 : event.button === 1 ? 2 : 1;
+    send({ type: "input", ev: { kind: "mouse", action: "up", button, x, y, norm: true } });
   };
 
   const onWheel = (event: React.WheelEvent) => {
@@ -207,25 +313,25 @@ export function LiveView({ device }: Props) {
   };
 
   const onKeyDown = (event: React.KeyboardEvent) => {
+    if (!sessionRef.current) return;
+    // Ctrl+Alt+Backspace is the console's secure-attention sequence.
     if (event.ctrlKey && event.altKey && event.key === "Backspace") {
       event.preventDefault();
-      send({ type: "input", ev: { kind: "key", code: 0x2E, down: true } });
-      send({ type: "input", ev: { kind: "key", code: 0x2E, down: false } });
+      send({ type: "input", ev: { kind: "key", code: 0x2e, down: true } });
+      send({ type: "input", ev: { kind: "key", code: 0x2e, down: false } });
       return;
     }
-    if (event.key.length === 1) {
-      // Printable characters are sent as text so the remote layout decides the key.
+    // Printable characters travel as text so the remote layout decides the key.
+    if (event.key.length === 1 && !event.ctrlKey && !event.altKey && !event.metaKey) {
+      event.preventDefault();
       send({ type: "input", ev: { kind: "text", text: event.key } });
-      event.preventDefault();
       return;
     }
-    const code = event.keyCode || 0;
-    if (code) {
-      send({ type: "input", ev: { kind: "key", code, down: true } });
-      send({ type: "input", ev: { kind: "key", code, down: false } });
-      event.preventDefault();
-    }
-    setLatency(performance.now() - event.timeStamp);
+    const code = vkCodeFor(event);
+    if (!code) return;
+    event.preventDefault();
+    send({ type: "input", ev: { kind: "key", code, down: true } });
+    send({ type: "input", ev: { kind: "key", code, down: false } });
   };
 
   const sendText = (value: string) => {
@@ -238,7 +344,7 @@ export function LiveView({ device }: Props) {
     void element?.requestFullscreen?.();
   };
 
-  if (controlIssue) {
+  if (issue) {
     const pollMode = isPollMode(device.presence);
     return (
       <div className="space-y-2 rounded-panel border border-warn/30 bg-warn/10 p-3">
@@ -246,18 +352,18 @@ export function LiveView({ device }: Props) {
           <WifiOff className="size-3.5" />
           实时控制不可用
         </p>
-        <p className="text-[0.72rem] leading-relaxed text-warn/90">{controlIssue}</p>
+        <p className="text-[0.72rem] leading-relaxed text-warn/90">{issue}</p>
         <p className="text-[0.68rem] leading-relaxed text-soft">
           {pollMode
             ? "轮询模式下仍然可以截图、管理文件、下发命令、查看历史画面；受控端会在网络允许时自动重新升级到 WebSocket。"
             : "截图、文件管理、命令下发与历史画面仍可正常使用。"}
         </p>
         <div className="flex flex-wrap items-center gap-2 pt-0.5">
-          <Button size="sm" disabled title={controlIssue}>
+          <Button size="sm" disabled title={issue}>
             <MousePointer2 className="size-3.5" />
             开始实时控制
           </Button>
-          <Button size="sm" variant="outline" disabled title={controlIssue}>
+          <Button size="sm" variant="outline" disabled title={issue}>
             <Expand className="size-3.5" />
             全屏
           </Button>
@@ -267,21 +373,29 @@ export function LiveView({ device }: Props) {
     );
   }
 
+  const secondsLeft =
+    session && now !== null ? Math.max(0, Math.round((serverTimeLeft(session.expiresAtMs) ?? 0) / 1000)) : null;
+
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center gap-2">
-        {state.status === "streaming" || state.status === "connecting" ? (
-          <Button size="sm" variant="destructive" onClick={stop}>
+        {session ? (
+          <Button size="sm" variant="destructive" onClick={() => stop("已结束控制会话")}>
             <Power className="size-3.5" />
             结束控制
           </Button>
         ) : (
-          <Button size="sm" onClick={() => void start()}>
+          <Button size="sm" onClick={() => void start()} disabled={status === "granting" || status === "connecting"}>
             <MousePointer2 className="size-3.5" />
             开始实时控制
           </Button>
         )}
-        <Button size="sm" variant="outline" onClick={() => void start()} disabled={state.status === "streaming"}>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => void start()}
+          disabled={status === "granting" || status === "connecting"}
+        >
           <RefreshCw className="size-3.5" />
           重新连接
         </Button>
@@ -292,25 +406,26 @@ export function LiveView({ device }: Props) {
         <span
           className={cn(
             "ml-auto text-[0.66rem]",
-            state.status === "streaming" ? "text-ok" : state.status === "error" ? "text-danger" : "text-faint",
+            status === "streaming" ? "text-ok" : status === "error" ? "text-danger" : "text-faint",
           )}
         >
-          {state.status === "streaming"
-            ? `${frames} fps · 质量 ${state.quality} · 目标 ${state.fps} fps`
-            : state.message || "未开始"}
+          {status === "streaming"
+            ? `${fps} fps · 质量 ${session?.quality ?? "—"} · 目标 ${session?.fps ?? "—"} fps`
+            : message || "未开始"}
         </span>
       </div>
 
       <div
         ref={stageRef}
         tabIndex={0}
-        className="relative outline-none"
+        className="relative rounded-lg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
         onPointerMove={onPointerMove}
         onPointerDown={onPointerDown}
         onPointerUp={onPointerUp}
         onWheel={onWheel}
         onKeyDown={onKeyDown}
         onContextMenu={(event) => event.preventDefault()}
+        aria-label="实时画面与输入区域"
       >
         <FrameStage className="aspect-video w-full cursor-crosshair select-none touch-none">
           {frameUrl ? (
@@ -328,7 +443,7 @@ export function LiveView({ device }: Props) {
             <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-soft">
               <MousePointer2 className="size-6 text-faint" />
               <p className="text-[0.72rem]">
-                {state.status === "idle" ? "点击“开始实时控制”建立会话" : state.message || "等待画面…"}
+                {status === "idle" ? "点击“开始实时控制”建立会话" : message || "等待画面…"}
               </p>
             </div>
           )}
@@ -340,13 +455,14 @@ export function LiveView({ device }: Props) {
         <Input
           placeholder="在此输入文字并按回车，直接发送到受控端"
           className="h-9 text-xs"
+          aria-label="发送文字到受控端"
           value={textValue}
           onChange={(event) => setTextValue(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter") {
+              event.preventDefault();
               sendText(textValue);
               setTextValue("");
-              event.preventDefault();
             }
           }}
         />
@@ -363,8 +479,8 @@ export function LiveView({ device }: Props) {
       </div>
 
       <p className="text-[0.66rem] leading-relaxed text-faint">
-        画面与输入都经过服务器中转，全程审计。会话 {Math.round((state.expiresAt ? Math.max(0, state.expiresAt - Date.now()) : 0) / 1000)} 秒后自动结束。
-        {latency > 0 ? ` 键盘往返约 ${latency.toFixed(0)}ms。` : ""}
+        画面与输入都经过服务器中转，全程审计。会话剩余 {secondsLeft === null ? "—" : secondsLeft} 秒（服务端时钟）。
+        {rttMs !== null ? ` 通道往返约 ${rttMs.toFixed(0)}ms。` : ""}
       </p>
     </div>
   );

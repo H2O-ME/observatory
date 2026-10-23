@@ -30,12 +30,16 @@
   }
 
   /* Coarse pointers (phones, watches): 44px minimum hit area and 16px inputs so
-     the browser never zooms on focus. */
+     the browser never zooms on focus.
+     `!important` is deliberate: per-component Tailwind utilities (`text-xs`,
+     `text-[0.7rem]`) live in the utilities layer and would otherwise beat this
+     base rule, re-enabling iOS focus zoom — which is exactly what happened in
+     0.2.x where the rule silently did nothing on the file and settings inputs. */
   @media (pointer: coarse) {
     input,
     select,
     textarea {
-      font-size: 16px;
+      font-size: 16px !important;
     }
 
     button,

@@ -1,6 +1,22 @@
+/**
+ * Authentication state.
+ *
+ * Three rules from the 0.3.0 spec shape this store:
+ *  - Every request goes through the single client (`lib/api.ts`), so the
+ *    envelope is unwrapped and the server clock is calibrated there.
+ *  - A 401 anywhere ends the session once: the api client notifies this module,
+ *    which clears the token, the query cache and the live store.
+ *  - Logging out clears the React Query cache. A cache that survives a logout
+ *    leaks the previous operator's devices and audit entries into the next
+ *    session.
+ */
+
 import { create } from "zustand";
 
-import { api, ApiError, readToken, writeToken } from "@/lib/api";
+import { api, isApiError, setUnauthorizedHandler, writeToken } from "@/lib/api";
+import { queryClient } from "@/lib/query-client";
+import { useLive } from "@/store/live";
+import type { SessionInfo } from "@/lib/types";
 
 type Status = "boot" | "anonymous" | "authed" | "error";
 
@@ -17,6 +33,22 @@ interface AuthState {
   refresh: () => Promise<void>;
 }
 
+function sessionFields(session: SessionInfo) {
+  return {
+    version: session.version,
+    totpEnabled: session.totp_enabled,
+    consoleHost: session.console_host,
+    baseUrls: session.base_urls,
+  };
+}
+
+/** Drop everything that belongs to the current session. */
+function clearSession(): void {
+  writeToken("");
+  queryClient.clear();
+  useLive.getState().reset();
+}
+
 export const useAuth = create<AuthState>((set, get) => ({
   status: "boot",
   version: "",
@@ -25,28 +57,12 @@ export const useAuth = create<AuthState>((set, get) => ({
   baseUrls: [],
   error: "",
 
+  /**
+   * The console asks the server for a session even when no token is stored: the
+   * login page needs the server version, the console host and whether TOTP is
+   * enabled.
+   */
   async bootstrap() {
-    if (!readToken()) {
-      // Still ask the server for its version so the login page can show it.
-      try {
-        const session = await api.session();
-        set({
-          status: "anonymous",
-          version: session.version,
-          totpEnabled: session.totp_enabled,
-          consoleHost: session.console_host,
-          baseUrls: session.base_urls,
-          error: "",
-        });
-      } catch {
-        set({ status: "anonymous", error: "" });
-      }
-      return;
-    }
-    // Must go through `get()`: `bootstrap` is normally destructured out of the
-    // store (`const { bootstrap } = useAuth()`), so `this` is undefined and the
-    // call threw a TypeError before any request was made. That is what left the
-    // console on "正在连接 Observatory…" with an empty network panel.
     await get().refresh();
   },
 
@@ -55,16 +71,15 @@ export const useAuth = create<AuthState>((set, get) => ({
       const session = await api.session();
       set({
         status: session.authenticated ? "authed" : "anonymous",
-        version: session.version,
-        totpEnabled: session.totp_enabled,
-        consoleHost: session.console_host,
-        baseUrls: session.base_urls,
+        ...sessionFields(session),
         error: "",
       });
       if (!session.authenticated) writeToken("");
     } catch (error) {
-      const detail = error instanceof ApiError ? error.detail : "无法连接服务器";
-      set({ status: "error", error: detail });
+      set({
+        status: "error",
+        error: isApiError(error) ? error.message : "无法连接服务器",
+      });
     }
   },
 
@@ -72,8 +87,6 @@ export const useAuth = create<AuthState>((set, get) => ({
     const result = await api.login(password, totp);
     writeToken(result.token);
     set({ status: "authed", version: result.version, error: "" });
-    // Same reason as `bootstrap`: `login` is destructured off the store, so `this`
-    // is undefined here too.
     await get().refresh();
   },
 
@@ -81,9 +94,18 @@ export const useAuth = create<AuthState>((set, get) => ({
     try {
       await api.logout();
     } catch {
-      /* logging out locally is enough */
+      /* the local session is cleared below regardless of the server's answer */
     }
-    writeToken("");
-    set({ status: "anonymous" });
+    clearSession();
+    set({ status: "anonymous", error: "" });
   },
 }));
+
+// One 401 handler for the whole application. It must not import a React hook, so
+// it reaches the store through `getState`/`setState`.
+setUnauthorizedHandler(() => {
+  const current = useAuth.getState();
+  if (current.status === "anonymous") return;
+  clearSession();
+  useAuth.setState({ status: "anonymous", error: "" });
+});

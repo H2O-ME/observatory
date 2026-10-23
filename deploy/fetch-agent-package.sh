@@ -8,7 +8,7 @@
 # 单提交分支，服务器 `git fetch` 即可。全程零新增凭据，也不需要在客户端上传 19MB
 # 的二进制。
 #
-# 分支由 .github/workflows/build.yml 的 `agent` job 维护，内容固定为：
+# 分支由 .github/workflows/build.yml 的 `agent-windows` job 维护，内容固定为：
 #   observatory-agent-<VERSION>.zip
 #   VERSION
 #   SHA256SUMS
@@ -96,5 +96,5 @@ else
   warn "登记 ${NAME} 失败（可能已存在同版本）"
 fi
 
-log "完成。受控端 <= ${VERSION} 且 >= 0.2.5 的在线设备会在下次心跳自动更新。"
+log "完成。低于 ${VERSION} 的在线设备会在下次心跳拿到更新（受控端按版本比较自行更新）。"
 log "查看：控制台 -> 更新"

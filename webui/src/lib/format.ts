@@ -1,9 +1,17 @@
-/** Formatting helpers. All timestamps are epoch milliseconds from the server. */
+/**
+ * Formatting helpers.
+ *
+ * Every timestamp passed in is epoch milliseconds produced by the server clock
+ * (`server_time_ms`) or by the device (`device_time_ms`). Nothing here reads the
+ * local clock: the caller decides *which* server value to format.
+ */
 
 const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB", "PB"];
 
+/** Byte size; `null`/`undefined` means "the server did not report it" → `—`. */
 export function formatBytes(value: number | null | undefined, digits = 1): string {
-  const bytes = Number(value ?? 0);
+  if (value === null || value === undefined) return "—";
+  const bytes = Number(value);
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
   let index = 0;
   let size = bytes;
@@ -15,7 +23,8 @@ export function formatBytes(value: number | null | undefined, digits = 1): strin
 }
 
 export function formatDuration(seconds: number | null | undefined): string {
-  const total = Math.max(0, Math.floor(Number(seconds ?? 0)));
+  if (seconds === null || seconds === undefined) return "—";
+  const total = Math.max(0, Math.floor(Number(seconds)));
   const days = Math.floor(total / 86400);
   const hours = Math.floor((total % 86400) / 3600);
   const minutes = Math.floor((total % 3600) / 60);
@@ -29,6 +38,7 @@ function pad(value: number): string {
   return value < 10 ? `0${value}` : String(value);
 }
 
+/** Absolute timestamp → local wall-clock string (timezone display only). */
 export function formatTime(ms: number): string {
   if (!ms) return "—";
   const date = new Date(ms);
@@ -52,9 +62,9 @@ export function formatDateTime(ms: number): string {
   return `${formatDate(ms)} ${formatTime(ms)}`;
 }
 
-/** "刚刚 / 12 秒前 / 3 分钟前" — computed against the *server* clock. */
+/** "刚刚 / 12 秒前 / 3 分钟前" for an age in ms that the server computed. */
 export function formatAge(ageMs: number | null | undefined): string {
-  if (ageMs === null || ageMs === undefined) return "未知";
+  if (ageMs === null || ageMs === undefined || !Number.isFinite(ageMs)) return "—";
   const seconds = Math.max(0, Math.round(ageMs / 1000));
   if (seconds < 3) return "刚刚";
   if (seconds < 60) return `${seconds} 秒前`;
@@ -65,8 +75,21 @@ export function formatAge(ageMs: number | null | undefined): string {
   return `${Math.floor(hours / 24)} 天前`;
 }
 
+/**
+ * A time reported by a device or a server event. `device_time_ms` is the 0.3.0
+ * name, `ts_ms` is the 0.2.x alias still returned while media endpoints migrate
+ * (spec §2.2 allows added fields, not renamed ones).
+ */
+export function frameTimeMs(value: { device_time_ms?: number; ts_ms?: number } | null | undefined): number {
+  if (!value) return 0;
+  if (typeof value.device_time_ms === "number") return value.device_time_ms;
+  if (typeof value.ts_ms === "number") return value.ts_ms;
+  return 0;
+}
+
 export function formatPercent(value: number | null | undefined, digits = 0): string {
-  const number = Number(value ?? 0);
+  if (value === null || value === undefined) return "—";
+  const number = Number(value);
   if (!Number.isFinite(number)) return "—";
   return `${number.toFixed(digits)}%`;
 }
@@ -101,6 +124,6 @@ export function initials(value: string): string {
 }
 
 export function prettyNumber(value: number | null | undefined): string {
-  const number = Number(value ?? 0);
-  return number.toLocaleString("zh-CN");
+  if (value === null || value === undefined) return "—";
+  return Number(value).toLocaleString("zh-CN");
 }

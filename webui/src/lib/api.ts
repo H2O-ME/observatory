@@ -1,44 +1,138 @@
 /**
- * Typed API client.
+ * The console's single API client (spec §4.3, §5.4, §5.5).
  *
- * Two rules:
- *  - Every call surfaces the server's message instead of a generic failure, so the
- *    console can say "设备当前不在线，无法下发卸载指令" rather than "请求失败".
- *  - Liveness is never inferred here; only the server's `presence` payload is used.
+ * Contract:
+ *  - Every console response is an `Envelope`: `{ data, server_time_ms, deadline_ms }`.
+ *    The envelope is unwrapped here and **every** `server_time_ms` calibrates the
+ *    server clock (`syncClock`), so no page has to think about time sync (A12).
+ *  - Timeouts are derived from the server's `deadline_ms`: the client waits
+ *    `deadline + 5s` (§5.4). There is no fixed 20 s budget anywhere. When the
+ *    server has not told us a budget yet, the default is 30 s — exactly the
+ *    largest legal server budget (25 s) plus the 5 s grace, so a slow document
+ *    endpoint can never be killed by a client that guessed smaller (A8).
+ *  - Failures are one type: `ApiError { status, code, message, retryable }`
+ *    (§5.5). React Query retries based on `retryable` alone.
+ *  - 401 is handled once for the whole application: the handler registered by
+ *    the auth store clears the token and the query cache.
+ *
+ * Uploads are a separate client (`uploadPackage`): a package is not a command,
+ * so it gets a long budget, real progress and cancellation instead of a command
+ * deadline (A8).
  */
 
+import { syncClock } from "@/lib/clock";
 import type {
+  ApiErrorBody,
+  ApiErrorCode,
   AuditList,
   Command,
+  CommandList,
   ControlGrant,
   DeviceEnvelope,
   DeviceList,
+  DevicePatch,
+  Envelope,
+  FileChunk,
   FileList,
   FileOpRequest,
   FileOpResult,
-  Frame,
+  LatestFrame,
   LiveEvent,
+  LoginResult,
+  OkResult,
   Package,
   SessionInfo,
   SettingsPayload,
   SystemStatus,
   Timeline,
+  TotpSetup,
+  UninstallAccepted,
   UpdateStatus,
-} from "./types";
+} from "@/lib/types";
 
 const TOKEN_KEY = "observatory.token";
+const API_ROOT = "/api/v1";
+
+/**
+ * Largest server budget (spec §5.4: `min(命令类型上限, 25s)`) plus the client
+ * grace. Used only until the server has sent us its own `deadline_ms`.
+ */
+const DEFAULT_TIMEOUT_MS = 30_000;
+/** Client grace on top of the server deadline (spec §5.4). */
+const CLIENT_GRACE_MS = 5_000;
+/** A package upload is not a command and has no command deadline. */
+const UPLOAD_TIMEOUT_MS = 15 * 60_000;
+/** Below this a "deadline" carries no information and is ignored. */
+const MIN_SANE_DEADLINE_MS = 100;
+
+// --------------------------------------------------------------------- errors ---
 
 export class ApiError extends Error {
-  status: number;
-  detail: string;
+  readonly status: number;
+  readonly code: ApiErrorCode;
+  readonly retryable: boolean;
 
-  constructor(status: number, detail: string) {
-    super(detail);
+  constructor(status: number, code: ApiErrorCode, message: string, retryable: boolean) {
+    super(message);
     this.name = "ApiError";
     this.status = status;
-    this.detail = detail;
+    this.code = code;
+    this.retryable = retryable;
   }
 }
+
+export function isApiError(error: unknown): error is ApiError {
+  return error instanceof ApiError;
+}
+
+function isApiErrorCode(value: unknown): value is ApiErrorCode {
+  return (
+    value === "AUTH" ||
+    value === "GONE" ||
+    value === "BAD_REQUEST" ||
+    value === "UNSUPPORTED" ||
+    value === "TIMEOUT" ||
+    value === "RATE" ||
+    value === "INTERNAL"
+  );
+}
+
+function codeFromStatus(status: number): ApiErrorCode {
+  if (status === 401 || status === 403) return "AUTH";
+  if (status === 410) return "GONE";
+  if (status === 422) return "BAD_REQUEST";
+  if (status === 429) return "RATE";
+  if (status === 504) return "TIMEOUT";
+  return "INTERNAL";
+}
+
+function validationMessage(detail: unknown): string | null {
+  if (!Array.isArray(detail)) return null;
+  const first = detail[0] as { msg?: unknown } | undefined;
+  return first && typeof first.msg === "string" ? first.msg : null;
+}
+
+function errorMessage(payload: unknown, fallback: string): string {
+  if (!payload || typeof payload !== "object") {
+    return typeof payload === "string" && payload.trim() ? payload.trim().slice(0, 240) : fallback;
+  }
+  const record = payload as ApiErrorBody & { detail?: unknown };
+  if (typeof record.message === "string" && record.message.trim()) return record.message;
+  if (typeof record.detail === "string" && record.detail.trim()) return record.detail;
+  return validationMessage(record.detail) ?? fallback;
+}
+
+function toApiError(status: number, payload: unknown): ApiError {
+  const record = payload && typeof payload === "object" ? (payload as ApiErrorBody) : null;
+  const code = isApiErrorCode(record?.code) ? record.code : codeFromStatus(status);
+  const retryable =
+    typeof record?.retryable === "boolean"
+      ? record.retryable
+      : status >= 500 || status === 429 || status === 504;
+  return new ApiError(status, code, errorMessage(payload, `请求失败（HTTP ${status}）`), retryable);
+}
+
+// ---------------------------------------------------------------------- token ---
 
 export function readToken(): string {
   try {
@@ -53,317 +147,586 @@ export function writeToken(token: string): void {
     if (token) localStorage.setItem(TOKEN_KEY, token);
     else localStorage.removeItem(TOKEN_KEY);
   } catch {
-    /* storage disabled: session stays in memory only */
+    /* storage disabled: the session then lives in the HttpOnly cookie only */
   }
 }
 
-function headers(extra?: Record<string, string>): Record<string, string> {
+// ------------------------------------------------------------------ 401 handling --
+
+let unauthorizedHandler: (() => void) | null = null;
+
+/** Registered once by `store/auth.ts`; api.ts must not import the store. */
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  unauthorizedHandler = handler;
+}
+
+function notifyUnauthorized(): void {
+  unauthorizedHandler?.();
+}
+
+// -------------------------------------------------------------- deadline budget ---
+
+const deadlineHints = new Map<string, number>();
+
+function rememberDeadline(opKey: string | undefined, deadlineMs: number | null | undefined): void {
+  if (!opKey || typeof deadlineMs !== "number" || !Number.isFinite(deadlineMs)) return;
+  if (deadlineMs < MIN_SANE_DEADLINE_MS) return;
+  deadlineHints.set(opKey, deadlineMs);
+}
+
+/** Client timeout for an operation: server budget + grace, else the default. */
+export function timeoutFor(opKey: string | undefined): number {
+  if (!opKey) return DEFAULT_TIMEOUT_MS;
+  const deadline = deadlineHints.get(opKey);
+  return deadline === undefined ? DEFAULT_TIMEOUT_MS : deadline + CLIENT_GRACE_MS;
+}
+
+// -------------------------------------------------------------------- request ---
+
+interface RequestOptions {
+  method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
+  json?: unknown;
+  body?: BodyInit | null;
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+  opKey?: string;
+  timeoutMs?: number;
+}
+
+function requestHeaders(extra?: Record<string, string>): Record<string, string> {
   const token = readToken();
   const base: Record<string, string> = { Accept: "application/json" };
   if (token) base.Authorization = `Bearer ${token}`;
-  if (extra) Object.assign(base, extra);
-  return base;
+  return extra ? { ...base, ...extra } : base;
 }
 
-function errorDetail(payload: unknown, fallback: string): string {
+function timeoutError(timeoutMs: number): ApiError {
+  const budget = Math.max(0, Math.round((timeoutMs - CLIENT_GRACE_MS) / 1000));
+  return new ApiError(
+    0,
+    "TIMEOUT",
+    `等待服务端响应超时（服务端预算 ${budget}s + ${CLIENT_GRACE_MS / 1000}s 宽限）`,
+    true,
+  );
+}
+
+function networkError(error: unknown): ApiError {
+  const message = error instanceof Error ? error.message : "网络请求失败";
+  return new ApiError(0, "INTERNAL", message, true);
+}
+
+/**
+ * Unwrap the 0.3.0 envelope and calibrate the clock from it (A12).
+ *
+ * While the server endpoints migrate, a DTO may still arrive unwrapped; its
+ * top-level `server_time_ms` is then used for calibration and as its `deadline`
+ * hint is absent. This tolerance disappears once every endpoint is enveloped.
+ */
+function unwrap<T>(payload: unknown, opKey: string | undefined): T {
   if (payload && typeof payload === "object") {
     const record = payload as Record<string, unknown>;
-    const detail = record.detail;
-    if (typeof detail === "string") return detail;
-    if (Array.isArray(detail)) {
-      const first = detail[0] as Record<string, unknown> | undefined;
-      if (first && typeof first.msg === "string") return first.msg;
+    if (typeof record.server_time_ms === "number") syncClock(record.server_time_ms);
+    if ("data" in record) {
+      const envelope = payload as Envelope<T>;
+      rememberDeadline(opKey, envelope.deadline_ms);
+      return envelope.data;
     }
-  }
-  return fallback;
-}
-
-//: Every console request gets a deadline. Without one a stalled connection (a
-//: sleeping laptop, a captive portal that never answers, a dropped TLS handshake)
-//: leaves the promise pending forever, and `bootstrap()` never leaves the "正在
-//: 连接 Observatory…" screen even though the network looks fine.
-const REQUEST_TIMEOUT_MS = 20_000;
-
-async function request<T>(
-  path: string,
-  init?: RequestInit & { timeoutMs?: number },
-): Promise<T> {
-  const timeoutMs = (init as { timeoutMs?: number } | undefined)?.timeoutMs ?? REQUEST_TIMEOUT_MS;
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
-  // Honour a caller-provided signal in addition to our deadline.
-  const external = init?.signal;
-  if (external) {
-    if (external.aborted) controller.abort();
-    else external.addEventListener("abort", () => controller.abort(), { once: true });
-  }
-
-  let response: Response;
-  try {
-    response = await fetch(path, {
-      ...init,
-      headers: headers(init?.headers as Record<string, string> | undefined),
-      cache: "no-store",
-      signal: controller.signal,
-    });
-  } catch (error) {
-    if (controller.signal.aborted && !external?.aborted) {
-      throw new ApiError(0, `请求超时（${Math.round(timeoutMs / 1000)} 秒无响应）`);
-    }
-    throw new ApiError(0, error instanceof Error ? error.message : "网络请求失败");
-  } finally {
-    window.clearTimeout(timer);
-  }
-  if (response.status === 204) return undefined as T;
-  const isJson = (response.headers.get("content-type") ?? "").includes("application/json");
-  const payload = isJson ? await response.json() : await response.text();
-  if (!response.ok) {
-    throw new ApiError(response.status, errorDetail(payload, `请求失败 (${response.status})`));
   }
   return payload as T;
 }
 
-function post<T>(path: string, body: unknown): Promise<T> {
-  return request<T>(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+async function parseBody(response: Response): Promise<unknown> {
+  if (response.status === 204) return undefined;
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    return response.json().catch(() => null);
+  }
+  return response.text().catch(() => "");
+}
+
+async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const timeoutMs = options.timeoutMs ?? timeoutFor(options.opKey);
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  const external = options.signal;
+  const onExternalAbort = () => controller.abort();
+  if (external) {
+    if (external.aborted) controller.abort();
+    else external.addEventListener("abort", onExternalAbort, { once: true });
+  }
+
+  const json = options.json;
+  const headers = requestHeaders(
+    json === undefined ? options.headers : { "Content-Type": "application/json", ...options.headers },
+  );
+
+  try {
+    const response = await fetch(path, {
+      method: options.method ?? "GET",
+      headers,
+      body: json === undefined ? options.body : JSON.stringify(json),
+      cache: "no-store",
+      credentials: "same-origin",
+      signal: controller.signal,
+    });
+    const payload = await parseBody(response);
+    if (!response.ok) {
+      if (response.status === 401) notifyUnauthorized();
+      throw toApiError(response.status, payload);
+    }
+    return unwrap<T>(payload, options.opKey);
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    if (controller.signal.aborted) {
+      if (external?.aborted) throw new ApiError(0, "INTERNAL", "请求已取消", false);
+      throw timeoutError(timeoutMs);
+    }
+    throw networkError(error);
+  } finally {
+    window.clearTimeout(timer);
+    external?.removeEventListener("abort", onExternalAbort);
+  }
+}
+
+// --------------------------------------------------------------- binary client ---
+
+interface BinaryResponse {
+  blob: Blob;
+  headers: Headers;
+}
+
+/**
+ * Binary download (file chunks, frames). It uses the same deadline budget as
+ * every other call — the 0.2.x client bypassed the timeout entirely here, which
+ * let a stalled chunk hang the UI forever.
+ */
+async function requestBinary(
+  path: string,
+  options: { opKey: string; signal?: AbortSignal; timeoutMs?: number },
+): Promise<BinaryResponse> {
+  const timeoutMs = options.timeoutMs ?? timeoutFor(options.opKey);
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  const external = options.signal;
+  const onExternalAbort = () => controller.abort();
+  if (external) {
+    if (external.aborted) controller.abort();
+    else external.addEventListener("abort", onExternalAbort, { once: true });
+  }
+
+  try {
+    const response = await fetch(path, {
+      headers: requestHeaders(),
+      cache: "no-store",
+      credentials: "same-origin",
+      signal: controller.signal,
+    });
+    const serverTime = Number(response.headers.get("X-Server-Time") ?? "");
+    if (Number.isFinite(serverTime) && serverTime > 0) syncClock(serverTime);
+    const deadlineHeader = Number(response.headers.get("X-Deadline-Ms") ?? "");
+    rememberDeadline(options.opKey, Number.isFinite(deadlineHeader) ? deadlineHeader : null);
+    if (!response.ok) {
+      const payload = await parseBody(response);
+      if (response.status === 401) notifyUnauthorized();
+      throw toApiError(response.status, payload);
+    }
+    return { blob: await response.blob(), headers: response.headers };
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    if (controller.signal.aborted) {
+      if (external?.aborted) throw new ApiError(0, "INTERNAL", "请求已取消", false);
+      throw timeoutError(timeoutMs);
+    }
+    throw networkError(error);
+  } finally {
+    window.clearTimeout(timer);
+    external?.removeEventListener("abort", onExternalAbort);
+  }
+}
+
+// -------------------------------------------------------------------- uploads ---
+
+interface UploadOptions {
+  onProgress?: (loaded: number, total: number) => void;
+  signal?: AbortSignal;
+}
+
+/**
+ * Package upload client: long budget, real progress, cancellable.
+ *
+ * `XMLHttpRequest` (not `fetch`) because upload progress is still not available
+ * on `fetch` in the browsers this console supports (Chromium 81 on the watch).
+ */
+function upload<T>(path: string, form: FormData, options: UploadOptions): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const token = readToken();
+    xhr.open("POST", path, true);
+    xhr.timeout = Math.max(UPLOAD_TIMEOUT_MS, timeoutFor("updates.upload"));
+    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    xhr.setRequestHeader("Accept", "application/json");
+
+    const onAbort = () => xhr.abort();
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+
+    xhr.upload.onprogress = (event) => {
+      if (options.onProgress && event.lengthComputable) options.onProgress(event.loaded, event.total);
+    };
+    xhr.onerror = () => {
+      options.signal?.removeEventListener("abort", onAbort);
+      reject(new ApiError(0, "INTERNAL", "上传过程中网络中断", true));
+    };
+    xhr.ontimeout = () => {
+      options.signal?.removeEventListener("abort", onAbort);
+      reject(timeoutError(xhr.timeout));
+    };
+    xhr.onabort = () => {
+      options.signal?.removeEventListener("abort", onAbort);
+      reject(new ApiError(0, "INTERNAL", "上传已取消", false));
+    };
+    xhr.onload = () => {
+      options.signal?.removeEventListener("abort", onAbort);
+      let payload: unknown = null;
+      try {
+        payload = JSON.parse(xhr.responseText);
+      } catch {
+        payload = xhr.responseText;
+      }
+      if (xhr.status === 401) notifyUnauthorized();
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(toApiError(xhr.status, payload));
+        return;
+      }
+      try {
+        resolve(unwrap<T>(payload, "updates.upload"));
+      } catch (error) {
+        reject(error instanceof ApiError ? error : networkError(error));
+      }
+    };
+    xhr.send(form);
   });
 }
 
-function patch<T>(path: string, body: unknown): Promise<T> {
-  return request<T>(path, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+// ----------------------------------------------------------------- api client ---
+
+function query(params: Record<string, string | number | undefined | null>): string {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === "") continue;
+    search.set(key, String(value));
+  }
+  const text = search.toString();
+  return text ? `?${text}` : "";
 }
+
+const devicePath = (uid: string) => `${API_ROOT}/devices/${encodeURIComponent(uid)}`;
+
+const rawFileUrl = (uid: string, path: string, offset: number, length: number) =>
+  `${devicePath(uid)}/files/raw${query({ path, offset, length })}`;
 
 export const api = {
   // ---- auth ----------------------------------------------------------
   login(password: string, totp?: string) {
-    return post<{ token: string; expires_at_ms: number; version: string }>("/api/v1/auth/login", {
-      password,
-      totp: totp || null,
+    return request<LoginResult>(`${API_ROOT}/auth/login`, {
+      method: "POST",
+      json: { password, totp: totp || null },
+      opKey: "auth.login",
     });
   },
   logout() {
-    return post<{ ok: boolean }>("/api/v1/auth/logout", {});
+    return request<OkResult>(`${API_ROOT}/auth/logout`, { method: "POST", json: {}, opKey: "auth.logout" });
   },
   session() {
-    return request<SessionInfo>("/api/v1/auth/session");
+    return request<SessionInfo>(`${API_ROOT}/auth/session`, { opKey: "auth.session" });
   },
   totpSetup() {
-    return post<{ secret: string; uri: string }>("/api/v1/auth/totp/setup", {});
+    return request<TotpSetup>(`${API_ROOT}/auth/totp/setup`, { method: "POST", json: {}, opKey: "auth.totpSetup" });
   },
   totpEnable(secret: string, code: string) {
-    return post<{ ok: boolean; message: string }>("/api/v1/auth/totp/enable", { secret, code });
+    return request<OkResult>(`${API_ROOT}/auth/totp/enable`, {
+      method: "POST",
+      json: { secret, code },
+      opKey: "auth.totpEnable",
+    });
   },
   totpDisable(code: string) {
-    // The server verifies this code; it is not decorative.
-    return post<{ ok: boolean; message: string }>("/api/v1/auth/totp/disable", { code });
+    return request<OkResult>(`${API_ROOT}/auth/totp/disable`, {
+      method: "POST",
+      json: { code },
+      opKey: "auth.totpDisable",
+    });
   },
   changePassword(currentPassword: string, newPassword: string) {
-    return post<{ ok: boolean; message: string }>("/api/v1/auth/password", {
-      current_password: currentPassword,
-      new_password: newPassword,
+    return request<OkResult>(`${API_ROOT}/auth/password`, {
+      method: "POST",
+      json: { current_password: currentPassword, new_password: newPassword },
+      opKey: "auth.password",
     });
   },
 
   // ---- devices -------------------------------------------------------
-  devices() {
-    return request<DeviceList>("/api/v1/devices");
+  listDevices() {
+    return request<DeviceList>(`${API_ROOT}/devices`, { opKey: "devices.list" });
   },
-  device(uid: string) {
-    return request<DeviceEnvelope>(`/api/v1/devices/${encodeURIComponent(uid)}`);
+  getDevice(uid: string) {
+    return request<DeviceEnvelope>(devicePath(uid), { opKey: "devices.get" });
   },
-  patchDevice(uid: string, body: { name?: string; note?: string; settings?: Record<string, unknown> }) {
-    return patch<DeviceEnvelope>(`/api/v1/devices/${encodeURIComponent(uid)}`, body);
-  },
-  deleteDevice(uid: string) {
-    return request<{ ok: boolean; message: string }>(`/api/v1/devices/${encodeURIComponent(uid)}`, {
-      method: "DELETE",
+  patchDevice(uid: string, patch: DevicePatch) {
+    return request<DeviceEnvelope>(devicePath(uid), {
+      method: "PATCH",
+      json: patch,
+      opKey: "devices.patch",
     });
   },
-  uninstall(uid: string) {
-    // `confirm` is required by the server; the old console omitted the body and
-    // every remote uninstall failed with 422.
-    return post<{ command_id: string; status: string; message: string }>(
-      `/api/v1/devices/${encodeURIComponent(uid)}/uninstall`,
-      { confirm: true },
-    );
+  deleteDevice(uid: string) {
+    return request<OkResult>(devicePath(uid), { method: "DELETE", opKey: "devices.delete" });
+  },
+  uninstallDevice(uid: string) {
+    // `confirm` is part of the server contract (A1 / §2.3); omitting it was a 422.
+    return request<UninstallAccepted>(`${devicePath(uid)}/uninstall`, {
+      method: "POST",
+      json: { confirm: true },
+      opKey: "devices.uninstall",
+    });
   },
   createCommand(uid: string, type: string, payload: Record<string, unknown> = {}, confirm = false) {
-    return post<Command>(`/api/v1/devices/${encodeURIComponent(uid)}/commands`, { type, payload, confirm });
+    return request<Command>(`${devicePath(uid)}/commands`, {
+      method: "POST",
+      json: { type, payload, confirm },
+      opKey: "devices.commands.create",
+    });
   },
-  commands(uid: string, limit = 50) {
-    return request<{ commands: Command[]; server_time_ms: number }>(
-      `/api/v1/devices/${encodeURIComponent(uid)}/commands?limit=${limit}`,
-    );
+  listCommands(uid: string, limit = 50) {
+    return request<CommandList>(`${devicePath(uid)}/commands${query({ limit })}`, {
+      opKey: "devices.commands.list",
+    });
   },
 
   // ---- frames --------------------------------------------------------
-  latestFrame(uid: string) {
-    return request<{ frame: Frame | null; server_time_ms: number }>(
-      `/api/v1/devices/${encodeURIComponent(uid)}/frames/latest`,
-    );
-  },
+  /**
+   * Immutable frame URL. No cache-busting nonce: the media endpoints answer
+   * `immutable` with a long TTL, so the browser cache does the work. `<img>`
+   * authenticates with the HttpOnly session cookie (README 0.3.0 §2.2).
+   */
   frameUrl(uid: string, frameId: number, variant: "thumb" | "full") {
-    // No cache-busting nonce: frames are immutable and served with a long TTL.
-    return `/api/v1/devices/${encodeURIComponent(uid)}/frames/${frameId}?variant=${variant}`;
+    return `${devicePath(uid)}/frames/${frameId}${query({ variant })}`;
+  },
+  latestFrame(uid: string) {
+    return request<LatestFrame>(`${devicePath(uid)}/frames/latest`, { opKey: "frames.latest" });
   },
   timeline(uid: string, fromMs: number, toMs: number, bucketMs?: number) {
-    const params = new URLSearchParams({ from_ms: String(fromMs), to_ms: String(toMs) });
-    if (bucketMs) params.set("bucket_ms", String(bucketMs));
-    return request<Timeline>(`/api/v1/devices/${encodeURIComponent(uid)}/timeline?${params.toString()}`);
+    return request<Timeline>(
+      `${devicePath(uid)}/timeline${query({ from_ms: fromMs, to_ms: toMs, bucket_ms: bucketMs })}`,
+      { opKey: "frames.timeline" },
+    );
   },
   purgeFrames(uid: string) {
-    return request<{ ok: boolean; message: string }>(`/api/v1/devices/${encodeURIComponent(uid)}/frames`, {
-      method: "DELETE",
-    });
+    return request<OkResult>(`${devicePath(uid)}/frames`, { method: "DELETE", opKey: "frames.purge" });
   },
 
   // ---- files ---------------------------------------------------------
-  files(uid: string, path: string) {
-    const params = path ? `?path=${encodeURIComponent(path)}` : "";
-    return request<FileList>(`/api/v1/devices/${encodeURIComponent(uid)}/files${params}`);
+  listFiles(uid: string, path: string) {
+    return request<FileList>(`${devicePath(uid)}/files${query({ path })}`, { opKey: "files.list" });
   },
   fileOp(uid: string, body: FileOpRequest) {
-    return post<FileOpResult>(`/api/v1/devices/${encodeURIComponent(uid)}/files/op`, body);
+    return request<FileOpResult>(`${devicePath(uid)}/files/op`, {
+      method: "POST",
+      json: body,
+      opKey: "files.op",
+    });
   },
   rawUrl(uid: string, path: string, offset: number, length: number) {
-    const params = new URLSearchParams({ path, offset: String(offset), length: String(length) });
-    return `/api/v1/devices/${encodeURIComponent(uid)}/files/raw?${params.toString()}`;
+    return rawFileUrl(uid, path, offset, length);
   },
-  async readChunk(uid: string, path: string, offset: number, length: number) {
-    const response = await fetch(this.rawUrl(uid, path, offset, length), {
-      headers: headers(),
-      cache: "no-store",
+  async readChunk(uid: string, path: string, offset: number, length: number, signal?: AbortSignal) {
+    const { blob, headers } = await requestBinary(rawFileUrl(uid, path, offset, length), {
+      opKey: "files.readChunk",
+      signal,
     });
-    if (!response.ok) {
-      throw new ApiError(response.status, errorDetail(await response.json().catch(() => null), "读取失败"));
-    }
-    const blob = await response.blob();
-    return {
+    const chunk: FileChunk = {
       blob,
-      size: Number(response.headers.get("X-File-Size") ?? 0),
-      offset: Number(response.headers.get("X-Chunk-Offset") ?? offset),
-      eof: response.headers.get("X-Eof") === "1",
+      size: Number(headers.get("X-File-Size") ?? 0),
+      offset: Number(headers.get("X-Chunk-Offset") ?? offset),
+      eof: headers.get("X-Eof") === "1",
     };
+    return chunk;
   },
-  async writeChunk(uid: string, path: string, offset: number, chunk: Blob, truncate: boolean) {
-    const params = new URLSearchParams({
-      path,
-      offset: String(offset),
-      truncate: truncate ? "true" : "false",
-    });
-    return request<FileOpResult>(`/api/v1/devices/${encodeURIComponent(uid)}/files/raw?${params.toString()}`, {
+  writeChunk(uid: string, path: string, offset: number, chunk: Blob, truncate: boolean, signal?: AbortSignal) {
+    return request<FileOpResult>(`${devicePath(uid)}/files/raw${query({ path, offset, truncate: truncate ? "true" : "false" })}`, {
       method: "PUT",
       headers: { "Content-Type": "application/octet-stream" },
       body: chunk,
+      signal,
+      opKey: "files.writeChunk",
     });
   },
 
   // ---- control -------------------------------------------------------
-  controlGrant(uid: string, ttlS = 300) {
-    return post<ControlGrant>(`/api/v1/devices/${encodeURIComponent(uid)}/control`, {
-      confirm: true,
-      ttl_s: ttlS,
+  grantControl(uid: string, ttlS = 300) {
+    return request<ControlGrant>(`${devicePath(uid)}/control`, {
+      method: "POST",
+      json: { confirm: true, ttl_s: ttlS },
+      opKey: "control.grant",
     });
   },
-  controlRevoke(uid: string, token: string) {
-    return request<{ ok: boolean }>(
-      `/api/v1/devices/${encodeURIComponent(uid)}/control/${encodeURIComponent(token)}`,
-      { method: "DELETE" },
-    );
+  revokeControl(uid: string, token: string) {
+    return request<OkResult>(`${devicePath(uid)}/control/${encodeURIComponent(token)}`, {
+      method: "DELETE",
+      opKey: "control.revoke",
+    });
   },
 
   // ---- settings / audit / system -------------------------------------
-  settings() {
-    return request<SettingsPayload>("/api/v1/settings");
+  getSettings() {
+    return request<SettingsPayload>(`${API_ROOT}/settings`, { opKey: "settings.get" });
   },
   patchSettings(values: Record<string, unknown>) {
-    return patch<SettingsPayload>("/api/v1/settings", { values });
+    return request<SettingsPayload>(`${API_ROOT}/settings`, {
+      method: "PATCH",
+      json: { values },
+      opKey: "settings.patch",
+    });
   },
-  audit(params: { limit?: number; offset?: number; action?: string; device_uid?: string } = {}) {
-    const search = new URLSearchParams();
-    if (params.limit) search.set("limit", String(params.limit));
-    if (params.offset) search.set("offset", String(params.offset));
-    if (params.action) search.set("action", params.action);
-    if (params.device_uid) search.set("device_uid", params.device_uid);
-    return request<AuditList>(`/api/v1/audit?${search.toString()}`);
+  listAudit(params: { limit?: number; offset?: number; action?: string; deviceUid?: string } = {}) {
+    return request<AuditList>(
+      `${API_ROOT}/audit${query({
+        limit: params.limit,
+        offset: params.offset,
+        action: params.action,
+        device_uid: params.deviceUid,
+      })}`,
+      { opKey: "audit.list" },
+    );
   },
-  system() {
-    return request<SystemStatus>("/api/v1/system");
+  getSystem() {
+    return request<SystemStatus>(`${API_ROOT}/system`, { opKey: "system.get" });
   },
 
   // ---- updates -------------------------------------------------------
-  updates() {
-    return request<UpdateStatus>("/api/v1/updates");
+  getUpdates() {
+    return request<UpdateStatus>(`${API_ROOT}/updates`, { opKey: "updates.status" });
   },
-  uploadPackage(file: File, notes: string) {
+  uploadPackage(file: File, notes: string, options: UploadOptions = {}) {
     const form = new FormData();
     form.append("file", file);
     form.append("notes", notes);
-    return request<Package>("/api/v1/updates/agent", { method: "POST", body: form });
+    return upload<Package>(`${API_ROOT}/updates/agent`, form, options);
   },
   deletePackage(version: string) {
-    return request<{ ok: boolean; message: string }>(
-      `/api/v1/updates/agent/${encodeURIComponent(version)}`,
-      { method: "DELETE" },
-    );
+    return request<OkResult>(`${API_ROOT}/updates/agent/${encodeURIComponent(version)}`, {
+      method: "DELETE",
+      opKey: "updates.delete",
+    });
   },
 };
 
+// ------------------------------------------------------------- console socket ---
+
 export interface SocketEvent {
   type: string;
+  /** Server clock; used to calibrate the console clock. */
   ts_ms?: number;
   device_uid?: string;
   data?: Record<string, unknown>;
+  /** WebSocket close code, present on synthetic `socket_closed` events. */
+  code?: number;
 }
 
-/** Open the console event socket. Returns a disposer. */
-export function openEventSocket(onEvent: (event: SocketEvent) => void): () => void {
-  const token = readToken();
-  if (!token) return () => undefined;
+export interface EventSocketHandle {
+  close(): void;
+  /** Server heartbeat → local connection watchdog. */
+  setWatchdogMs(ms: number): void;
+}
+
+const CLOSE_UNAUTHORIZED = 4401;
+const RECONNECT_MAX_MS = 15_000;
+
+/**
+ * Console event socket.
+ *
+ * Authenticates with the HttpOnly session cookie, so the bearer token never
+ * appears in a URL that ends up in access logs. A close with 4401 is reported as
+ * an auth failure instead of being retried forever.
+ */
+export function openEventSocket(options: {
+  onEvent: (event: SocketEvent) => void;
+  onAuthFailure?: () => void;
+}): EventSocketHandle {
   const scheme = location.protocol === "https:" ? "wss" : "ws";
-  const url = `${scheme}://${location.host}/api/v1/ws?token=${encodeURIComponent(token)}`;
+  const url = `${scheme}://${location.host}${API_ROOT}/ws`;
+
   let socket: WebSocket | null = null;
   let closed = false;
   let retry = 0;
   let timer: number | undefined;
+  let watchdogTimer: number | undefined;
+  let watchdogMs = 75_000;
+  let lastMessageAt = 0;
+
+  const clearWatchdog = () => {
+    if (watchdogTimer !== undefined) {
+      window.clearInterval(watchdogTimer);
+      watchdogTimer = undefined;
+    }
+  };
 
   const connect = () => {
     if (closed) return;
     socket = new WebSocket(url);
+    lastMessageAt = performance.now();
+
     socket.onopen = () => {
       retry = 0;
-      onEvent({ type: "socket_open", data: {} });
+      options.onEvent({ type: "socket_open", data: {} });
     };
     socket.onmessage = (message) => {
+      lastMessageAt = performance.now();
       try {
         const parsed = JSON.parse(String(message.data)) as LiveEvent;
-        if (parsed && typeof parsed.type === "string") onEvent(parsed);
+        if (parsed && typeof parsed.type === "string") {
+          options.onEvent(parsed as SocketEvent);
+        }
       } catch {
-        /* ignore malformed frames */
+        /* ignore malformed frames: one bad event must not kill the console */
       }
     };
-    socket.onclose = () => {
-      onEvent({ type: "socket_closed", data: {} });
+    socket.onclose = (event) => {
+      if (socket === null) return;
+      socket = null;
+      clearWatchdog();
+      options.onEvent({ type: "socket_closed", code: event.code, data: {} });
+      if (event.code === CLOSE_UNAUTHORIZED) options.onAuthFailure?.();
       if (closed) return;
-      const delay = Math.min(15000, 1000 * 2 ** retry);
+      const delay = Math.min(RECONNECT_MAX_MS, 1000 * 2 ** retry);
       retry += 1;
       timer = window.setTimeout(connect, delay);
     };
     socket.onerror = () => {
+      // An error is always followed by `onclose`; closing here guarantees it.
       socket?.close();
     };
+
+    // Connection watchdog: `performance.now()` is monotonic and is used only to
+    // detect a silently dead socket, never to judge device freshness (spec C5).
+    clearWatchdog();
+    watchdogTimer = window.setInterval(() => {
+      if (closed || !socket) return;
+      if (performance.now() - lastMessageAt > watchdogMs) socket.close();
+    }, 5_000);
   };
 
   connect();
-  return () => {
-    closed = true;
-    if (timer) window.clearTimeout(timer);
-    socket?.close();
+
+  return {
+    close() {
+      closed = true;
+      clearWatchdog();
+      if (timer !== undefined) window.clearTimeout(timer);
+      socket?.close();
+      socket = null;
+    },
+    setWatchdogMs(ms: number) {
+      if (Number.isFinite(ms) && ms >= 20_000) watchdogMs = ms;
+    },
   };
 }

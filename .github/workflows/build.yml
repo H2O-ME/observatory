@@ -1,12 +1,15 @@
 name: build
 
-# 受控端是 PyInstaller 打出的 Windows 可执行文件。PyInstaller 不做交叉编译，
-# 所以这个 job 必须在真正的 Windows runner 上跑：Linux 上的 Python 只会产出
-# Linux 二进制，在部署服务器上装 Wine 去跑 Windows 版 Python 既慢又脆。
+# A20（spec §3.1）CI 门禁：任何改动必须同时通过
+#   1) 版本一致性（VERSION ↔ 副本 ↔ tag）
+#   2) 服务端自检（装配/载体/编译）
+#   3) 协议兼容（v3 双向 + legacy 0.2.10 回放，N2 的判据）
+#   4) 验收 A1..A24（W0 起以 skip 占位，W1+ 逐步转绿；N1 靠此 job 汇总）
+#   5) WebUI 类型检查 + 生产构建
+#   6) Windows runner 上的受控端逻辑测试 + PyInstaller 产物
 #
-# 产物交付：构建完成后把 zip 提交到一个每次覆盖的 `agent-dist` 分支。部署
-# 服务器已有该仓库的 git 访问权限，直接 `git fetch origin agent-dist` 取包，
-# 因此不需要 PAT，也不需要往服务器上传 19MB 二进制。
+# 依赖安装统一用 requirements-dev.txt（含 server/requirements.txt + pytest 全家桶）。
+
 on:
   push:
     branches: [main]
@@ -21,6 +24,12 @@ concurrency:
 
 permissions:
   contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  OBS_SECRET_KEY: ci-secret-key-0123456789abcdef0123456789abcdef
+  OBS_ADMIN_PASSWORD: ci-password-123
+  OBS_ENROLL_CODE: ci-enroll
 
 jobs:
   version:
@@ -41,27 +50,50 @@ jobs:
             echo "tag v$tag 与 VERSION $version 不一致" >&2
             exit 1
           fi
+      - name: 编译检查
+        run: python -m compileall -q server/observatory agent/observatory_agent
 
   server:
-    name: 服务端
+    name: 服务端自检
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - name: 安装依赖
-        run: pip install -r server/requirements.txt
-      - name: 编译检查
-        run: python -m compileall -q server/observatory agent/observatory_agent
-      - name: 单元测试
-        env:
-          OBS_DATA_DIR: ${{ runner.temp }}/obs-data
-          OBS_SECRET_KEY: ci-secret-key-0123456789abcdef0123456789abcdef
-          OBS_ADMIN_PASSWORD: ci-password-123
-          OBS_ENROLL_CODE: ci-enroll
-        run: |
-          cd server
-          python ../tools/test_server.py
+      - name: 安装测试依赖
+        run: pip install -r requirements-dev.txt
+      - name: 单元 + 集成测试
+        run: python -m pytest tests/unit tests/integration -q -m "not windows_only and not perf"
+      - name: 旧对外入口冒烟（tools/test_server.py → pytest --collect-only）
+        run: python tools/test_server.py --collect-only -q
+
+  contract:
+    name: 协议兼容
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: 安装测试依赖
+        run: pip install -r requirements-dev.txt
+      - name: v3 契约 + legacy 0.2.10 回放
+        run: python -m pytest tests/contract -q -m "not windows_only"
+      - name: 旧受控端入口冒烟（tools/test_agent.py → collect-only）
+        run: python tools/test_agent.py --collect-only -q
+
+  acceptance:
+    name: 验收 A1-A24
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: 安装测试依赖
+        run: pip install -r requirements-dev.txt
+      - name: Definition of Done
+        run: python -m pytest tests/acceptance -q -m "not windows_only"
+      - name: 真机端到端入口冒烟（tools/test_e2e_live.py → collect-only）
+        run: python tools/test_e2e_live.py --collect-only -q
 
   webui:
     name: 控制台
@@ -72,10 +104,12 @@ jobs:
         with: { node-version: "20", cache: npm, cache-dependency-path: webui/package-lock.json }
       - name: 安装依赖
         run: cd webui && (npm ci --no-audit --no-fund || npm install --no-audit --no-fund)
-      - name: 类型检查与构建
+      - name: 类型检查
+        run: cd webui && npm run typecheck
+      - name: 生产构建
         run: cd webui && npm run build
 
-  agent:
+  agent-windows:
     name: 受控端（Windows）
     runs-on: windows-latest
     needs: [version]
@@ -87,6 +121,13 @@ jobs:
         with:
           python-version: "3.12"
           architecture: x64
+      - name: 安装测试依赖
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -r requirements-dev.txt
+          python -m pip install --quiet -r agent/requirements.txt
+      - name: 受控端逻辑测试（含 windows_only 用例）
+        run: python -m pytest tests/unit tests/contract -q -m "not perf"
       - name: 构建
         shell: pwsh
         run: pwsh -File agent/build/build.ps1
@@ -136,3 +177,18 @@ jobs:
         with:
           files: agent/dist/observatory-agent-*.zip
           generate_release_notes: true
+
+  perf:
+    name: N4 性能基线（手动）
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: 安装测试依赖
+        run: pip install -r requirements-dev.txt
+      - name: 基线表（Linux 无屏幕，采集部分会标 unavailable）
+        run: python tools/bench.py all --json
+      - name: N4 回归（W3 起生效）
+        run: python -m pytest tests/perf -q -m perf

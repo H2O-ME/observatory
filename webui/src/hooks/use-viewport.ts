@@ -39,19 +39,3 @@ export function useViewport(): Viewport {
 
   return viewport;
 }
-
-export function useMediaQuery(query: string): boolean {
-  const [matches, setMatches] = useState(() =>
-    typeof window === "undefined" ? false : window.matchMedia(query).matches,
-  );
-
-  useEffect(() => {
-    const list = window.matchMedia(query);
-    const handler = () => setMatches(list.matches);
-    handler();
-    list.addEventListener("change", handler);
-    return () => list.removeEventListener("change", handler);
-  }, [query]);
-
-  return matches;
-}

@@ -1,0 +1,5 @@
+# 开发/测试依赖（不进入生产镜像）
+-r server/requirements.txt
+pytest>=8,<10
+pytest-asyncio>=0.24
+pytest-timeout>=2.3

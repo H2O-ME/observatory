@@ -18,10 +18,14 @@ interface Props {
 /**
  * A captured frame.
  *
- * Uses the browser's own image pipeline (and therefore its HTTP cache) instead of
- * fetching blobs in JS. Frame URLs are immutable, so a thumbnail is downloaded once
- * and reused while scrubbing — the previous implementation appended a timestamp to
- * every URL and re-downloaded everything on every interaction.
+ * Uses the browser's image pipeline (and therefore its HTTP cache) instead of
+ * fetching blobs in JS: frame URLs are immutable and served `immutable`, so a
+ * thumbnail is downloaded once. Authentication rides on the HttpOnly session
+ * cookie, which `<img>` sends on its own.
+ *
+ * The failure text is deliberately neutral: an `<img>` error cannot distinguish
+ * "retention removed the file" from "the session expired", and claiming "画面已清理"
+ * for a 401 was misleading operator advice in 0.2.x.
  */
 export function FrameView({ uid, frameId, variant = "thumb", alt = "画面", className, onClick, eager }: Props) {
   const [failed, setFailed] = useState(false);
@@ -53,7 +57,7 @@ export function FrameView({ uid, frameId, variant = "thumb", alt = "画面", cla
         )}
       >
         <ImageOff className="size-5" />
-        <span className="text-[0.7rem]">画面已清理</span>
+        <span className="text-[0.7rem]">画面不可用</span>
       </div>
     );
   }

@@ -1,9 +1,14 @@
-# Observatory 生产部署
+# Observatory 0.3.0 生产部署
 #
-#   cp server/.env.example server/.env   # 填好密钥
-#   docker compose --env-file server/.env up -d --build
+#   cp server/.env.example server/.env   # 填好密钥（生产不要用 .env.dev）
+#   docker compose -f deploy/docker-compose.yml --env-file server/.env up -d --build
 #
-# 数据卷里放数据库、画面、安装包和构建好的控制台；只有 TLS 端口对外开放。
+# 0.3.0 安全默认值（A11/A24）：
+#   * 8443 默认只绑 127.0.0.1，由本机 nginx 反代；只有 CDN/上游代理直连时才设
+#     OBS_BIND_ADDR=0.0.0.0（并配合防火墙）。
+#   * 容器以非 root（OBS_UID，默认 10001）运行、只读根文件系统、/data 可写、
+#     丢弃全部 capabilities、限制内存/CPU/PID。
+#   * 数据卷、数据库与画面都落在 observatory-data；证书只读挂载 ../certs。
 
 name: observatory
 
@@ -12,6 +17,9 @@ services:
     build:
       context: ..
       dockerfile: server/Dockerfile
+      args:
+        BUILD_VERSION: ${OBS_IMAGE_TAG:-dev}
+        OBS_UID: ${OBS_UID:-10001}
     image: observatory/api:${OBS_IMAGE_TAG:-latest}
     container_name: observatory-api
     restart: unless-stopped
@@ -20,18 +28,29 @@ services:
     environment:
       OBS_DATA_DIR: /data
     ports:
-      # 默认绑定所有网卡：这类部署的公网入口通常由 CDN / 上游代理直连 8443。
-      # 如果在同一台机器上用 nginx 终止 TLS，把 OBS_BIND_ADDR 设为 127.0.0.1。
-      - "${OBS_BIND_ADDR:-0.0.0.0}:${OBS_PORT:-8443}:8443"
+      # A11：默认只监听回环，nginx 反代；直连部署需显式设置 OBS_BIND_ADDR=0.0.0.0。
+      - "${OBS_BIND_ADDR:-127.0.0.1}:${OBS_PORT:-8443}:8443"
     volumes:
       - observatory-data:/data
       - ../certs:/certs:ro
+    user: "${OBS_UID:-10001}:${OBS_UID:-10001}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: ${OBS_MEM_LIMIT:-1g}
+    cpus: ${OBS_CPUS:-2.0}
+    pids_limit: ${OBS_PIDS_LIMIT:-256}
+    stop_grace_period: 20s
     healthcheck:
       test: ["CMD", "python", "-c", "import ssl,urllib.request;ctx=ssl._create_unverified_context();print(urllib.request.urlopen('https://127.0.0.1:8443/api/v1/health',context=ctx,timeout=5).status)"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 20s
+      start_period: 30s
     logging:
       driver: json-file
       options:
