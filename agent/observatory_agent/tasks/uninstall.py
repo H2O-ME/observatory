@@ -440,7 +440,7 @@ async def perform_remote_uninstall(
             confirm_file=status_path,
             spawn=spawn,
         )
-        document = await asyncio.to_thread(
+        await asyncio.to_thread(
             await_confirmation,
             ticket,
             timeout_s=confirmation_timeout_s,
@@ -503,7 +503,7 @@ def run_purge_helper(
     for name, step in steps:
         try:
             result = step()
-        except Exception as exc:  # noqa: BLE001 - 单步失败不阻断后续清理，但必须记录并反映到返回码
+        except Exception:  # noqa: BLE001 - 单步失败不阻断后续清理，但必须记录并反映到返回码
             log.exception("uninstall step failed: %s", name)
             status = RC_REMOVE_FAILED if "remove" in name else RC_SERVICE_FAILED
             continue

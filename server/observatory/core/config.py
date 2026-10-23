@@ -91,6 +91,8 @@ class Settings(BaseSettings):
     enroll_rate_window_s: int = Field(default=300, ge=10)
     link_rate_limit: int = Field(default=240, ge=1)
     link_rate_window_s: int = Field(default=60, ge=1)
+    #: Per-IP backstop: rotating tokens cannot escape one address's bucket.
+    link_ip_rate_limit: int = Field(default=1200, ge=1)
 
     # ---- behaviour ----------------------------------------------------------
     log_level: str = "INFO"

@@ -1,0 +1,16 @@
+# A22：静态规则禁止"裸静默异常"。CI 的 lint job 对 server/agent/tools/tests 跑
+# `ruff check`；规则集刻意保持最小——只收能抓住真问题的规则，避免噪声淹没信号。
+target-version = "py312"
+line-length = 120
+
+[lint]
+select = [
+    "E9",   # 语法/缩进级错误
+    "F",    # pyflakes：未用 import/变量、未定义名
+    "S110", # try-except-pass（静默异常，A22 的核心规则）
+    "S112", # try-except-continue
+]
+
+[lint.per-file-ignores]
+# 测试里允许用 pytest.raises 之外的宽捕获配合断言
+"tests/**" = ["S110"]

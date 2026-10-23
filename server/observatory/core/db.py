@@ -25,6 +25,7 @@ from pathlib import Path
 
 from fastapi import Request
 from sqlalchemy import event, text
+from sqlalchemy.pool import NullPool
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from .clock import now_ms
@@ -327,10 +328,13 @@ class Database:
         settings.ensure_dirs()
         self.path: Path = settings.db_path
         self.url = f"sqlite+aiosqlite:///{self.path.as_posix()}"
+        # NullPool：不复用池连接。QueuePool 在 dispose 时要走 aiosqlite 的
+        # terminate 优雅关闭，Python 3.14 上该路径会被取消并永久挂起（测试里
+        # 表现为 portal 线程 join 不返回）；SQLite 本地打开成本极低，不值得冒险。
         self.engine: AsyncEngine = create_async_engine(
             self.url,
             echo=False,
-            pool_pre_ping=True,
+            poolclass=NullPool,
             connect_args={"timeout": 15},
         )
         self.sessionmaker = async_sessionmaker(self.engine, expire_on_commit=False, class_=AsyncSession)
@@ -340,7 +344,6 @@ class Database:
     async def migrate(self) -> MigrationReport:
         """Bring the file to :data:`SCHEMA_VERSION`, backing up first if needed."""
 
-        settings = self.settings
         existing = self.path.exists() and self.path.stat().st_size > 0
         from_version = 0
         legacy_detected = False

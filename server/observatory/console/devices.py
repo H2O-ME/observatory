@@ -16,14 +16,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import presence
-from ..core.clock import now_ms
-from ..core.settings_spec import PER_DEVICE_KEYS, SettingsError, normalize
+from ..core.settings_spec import SettingsError, normalize
 from ..core.db import get_session
 from ..core.errors import AppError
 from ..core.models import Command, Device, Frame
 from . import audit
 from .deps import client_ip, get_journal, get_links, require_admin, store
-from .dto import budget_ms, command_out, device_out, device_safe_config, device_state, stamp
+from .dto import budget_ms, command_out, device_out, device_state, stamp
 from .envelope import ConsoleRoute
 from .settings import push_config
 from .updates import require_sha256

@@ -154,6 +154,48 @@ def seed_agent_package(client: object, version: str = "0.3.0") -> str:
     return digest
 
 
+def run_win_smoke(only: str, *, timeout_s: int = 240) -> dict:
+    """跑 ``tools/win_smoke.py --json --only <only>`` 并解析末尾 JSON 摘要。
+
+    返回 ``{"results": [...], "exit_code": 0, ...}``；有 FAIL 时先断言失败。
+    Windows-only 系统层验收（A1/A2/A17）用真实冒烟结果作证据，不再静态跳过。
+    """
+
+    import json  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    script = REPO_ROOT / "tools/win_smoke.py"
+    completed = subprocess.run(
+        [sys.executable, str(script), "--json", "--only", only],
+        capture_output=True,
+        text=True,
+        timeout=timeout_s,
+    )
+    assert completed.returncode == 0, (
+        f"win_smoke --only {only!r} 失败（rc={completed.returncode}）：\n"
+        f"{completed.stdout[-3000:]}\n{completed.stderr[-2000:]}"
+    )
+    payload = None
+    for line in reversed(completed.stdout.splitlines()):
+        candidate = line.strip()
+        if candidate.startswith("{") and candidate.endswith("}"):
+            try:
+                payload = json.loads(candidate)
+                break
+            except json.JSONDecodeError:
+                continue
+    assert payload is not None, f"win_smoke 未输出 JSON 摘要：\n{completed.stdout[-3000:]}"
+    return payload
+
+
+def win_smoke_result(payload: dict, name: str) -> dict:
+    for item in payload.get("results", []):
+        if item.get("name") == name:
+            return item
+    raise AssertionError(f"win_smoke 结果缺少检查项 {name!r}；实际 {[i.get('name') for i in payload.get('results', [])]}")
+
+
 __all__ = [
     "REPO_ROOT",
     "SERVER_DIR",
@@ -164,7 +206,9 @@ __all__ = [
     "TEST_SECRET_KEY",
     "legacy_token",
     "prepare_env",
+    "run_win_smoke",
     "running_app",
     "seed_agent_package",
     "seed_device",
+    "win_smoke_result",
 ]

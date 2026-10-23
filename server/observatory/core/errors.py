@@ -56,12 +56,15 @@ class AppError(Exception):
         *,
         retryable: bool = False,
         http_status: int | None = None,
+        retry_after: int | None = None,
     ) -> None:
         super().__init__(message)
         self.code = ErrorCode(code)
         self.message = str(message)
         self.retryable = bool(retryable)
         self._http_status = http_status
+        #: Seconds a rate-limited caller should wait before retrying (``Retry-After``).
+        self.retry_after = max(1, int(retry_after)) if retry_after else None
 
     @property
     def http_status(self) -> int:
@@ -92,8 +95,8 @@ class AppError(Exception):
         return cls(TIMEOUT, message, retryable=retryable)
 
     @classmethod
-    def rate(cls, message: str = "请求过于频繁") -> AppError:
-        return cls(RATE, message, retryable=True)
+    def rate(cls, message: str = "请求过于频繁", *, retry_after: int | None = None) -> AppError:
+        return cls(RATE, message, retryable=True, retry_after=retry_after)
 
     @classmethod
     def internal(cls, message: str = "服务器内部错误", *, retryable: bool = True) -> AppError:
@@ -138,7 +141,8 @@ def install_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(AppError)
     async def _app_error_handler(_request: Request, exc: AppError) -> JSONResponse:
-        return JSONResponse(error_payload(exc), status_code=exc.http_status)
+        headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
+        return JSONResponse(error_payload(exc), status_code=exc.http_status, headers=headers)
 
     @app.exception_handler(RequestValidationError)
     async def _validation_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:

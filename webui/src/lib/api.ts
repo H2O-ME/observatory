@@ -50,7 +50,9 @@ import type {
   Package,
   SessionInfo,
   SettingsPayload,
+  EffectiveSettings,
   SystemStatus,
+  HealthInfo,
   Timeline,
   TotpSetup,
   UninstallAccepted,
@@ -611,6 +613,12 @@ export const api = {
       opKey: "settings.patch",
     });
   },
+  /** Server-truth effective config for one device (global + this device's overrides). */
+  getEffectiveSettings(uid: string) {
+    return request<EffectiveSettings>(`${API_ROOT}/settings/effective/${encodeURIComponent(uid)}`, {
+      opKey: "settings.effective",
+    });
+  },
   listAudit(params: { limit?: number; offset?: number; action?: string; deviceUid?: string } = {}) {
     return request<AuditList>(
       `${API_ROOT}/audit${query({
@@ -624,6 +632,10 @@ export const api = {
   },
   getSystem() {
     return request<SystemStatus>(`${API_ROOT}/system`, { opKey: "system.get" });
+  },
+  /** Public liveness endpoint (`main.py`), used by the system page for carriers. */
+  getHealth() {
+    return request<HealthInfo>(`${API_ROOT}/health`, { opKey: "system.health" });
   },
 
   // ---- updates -------------------------------------------------------

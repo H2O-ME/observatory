@@ -25,14 +25,28 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from ..core.clock import Clock, SYSTEM_CLOCK, now_ms
 from ..core.config import Settings, get_settings
 from ..core.errors import AppError
-from ..core.models import Command
+from ..core.models import AuditEntry, Command, Device
 from ..core.log import log_event
-from .envelope import Result, TERMINAL_RESULT_STATES
+from .envelope import Result
 
 log = logging.getLogger(__name__)
 
 #: Commands whose result has been reported are finished from the bus' point of view.
 TERMINAL_COMMAND_STATUSES: frozenset[str] = frozenset({"ok", "error", "timeout", "cancelled"})
+
+#: Replay budget: initial delivery + up to 5 reconnect attempts, then give up.
+MAX_REPLAY_ATTEMPTS = 5
+REPLAY_BACKOFF_BASE_MS = 1_000
+REPLAY_BACKOFF_MAX_MS = 60_000
+REPLAY_EXHAUSTED = "REPLAY_EXHAUSTED"
+
+
+def replay_backoff_ms(attempts: int) -> int:
+    """Delay before replay attempt ``attempts + 1``: 1s, 2s, 4s … capped at 60s."""
+
+    if attempts <= 0:
+        return 0
+    return min(REPLAY_BACKOFF_BASE_MS * (2 ** (attempts - 1)), REPLAY_BACKOFF_MAX_MS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,10 +253,12 @@ class CommandJournal:
         return [CommandRecord.from_model(row) for row in rows]
 
     async def replay_for_device(self, device_id: int, limit: int = 50) -> list[CommandRecord]:
-        """Claim undelivered commands after a carrier reconnect (at-least-once).
+        """Replay undelivered commands after a carrier reconnect (at-least-once).
 
-        Rows stay ``dispatched`` so a lost result triggers another replay on the
-        next reconnect; the stable command id lets the agent dedupe execution.
+        Rows stay ``dispatched`` so a lost result triggers another replay; the
+        stable command id lets the agent dedupe execution (at-most-once). Replays
+        are capped at :data:`MAX_REPLAY_ATTEMPTS` with exponential backoff; past
+        that the command becomes ``failed/REPLAY_EXHAUSTED`` and is audited.
         Expired commands are skipped (housekeeping marks them timeout).
         """
 
@@ -261,13 +277,61 @@ class CommandJournal:
             rows = list((await session.execute(statement)).scalars().all())
             if not rows:
                 return []
+            replayed: list[Command] = []
+            exhausted: list[tuple[Command, int]] = []
             for row in rows:
+                attempts = int(row.attempts or 0)
+                if attempts >= MAX_REPLAY_ATTEMPTS:
+                    row.status = "failed"
+                    row.error_code = REPLAY_EXHAUSTED
+                    row.error = f"replay exhausted after {attempts} attempts"
+                    row.finished_at_ms = now
+                    exhausted.append((row, attempts))
+                    continue
+                last = int(row.dispatched_at_ms or 0)
+                if attempts > 0 and last and now - last < replay_backoff_ms(attempts):
+                    continue
                 row.status = "dispatched"
                 row.dispatched_at_ms = now
-                row.attempts = int(row.attempts or 0) + 1
+                row.attempts = attempts + 1
+                replayed.append(row)
+            if exhausted:
+                device = await session.get(Device, int(device_id))
+                for row, attempts in exhausted:
+                    session.add(
+                        AuditEntry(
+                            ts_ms=now,
+                            actor="server",
+                            action="command.replay_exhausted",
+                            device_uid=(device.uid if device is not None else ""),
+                            device_name=(device.display_name if device is not None else ""),
+                            detail={
+                                "command_id": row.id,
+                                "type": row.type,
+                                "attempts": attempts,
+                                "error_code": REPLAY_EXHAUSTED,
+                            },
+                        )
+                    )
             await session.commit()
-            records = [CommandRecord.from_model(row) for row in rows]
-        log_event(log, logging.INFO, "journal.replayed", device_id=device_id, count=len(records))
+            records = [CommandRecord.from_model(row) for row in replayed]
+            exhausted_records = [(row.id, row.type, attempts) for row, attempts in exhausted]
+        log_event(
+            log,
+            logging.INFO,
+            "journal.replayed",
+            device_id=device_id,
+            count=len(records),
+        )
+        if exhausted_records:
+            log_event(
+                log,
+                logging.WARNING,
+                "journal.replay_exhausted",
+                device_id=device_id,
+                count=len(exhausted_records),
+                commands=exhausted_records,
+            )
         return records
 
     # -- scoped waiting ----------------------------------------------------
@@ -413,6 +477,11 @@ class CommandJournal:
 __all__ = [
     "CommandJournal",
     "CommandRecord",
+    "MAX_REPLAY_ATTEMPTS",
+    "REPLAY_BACKOFF_BASE_MS",
+    "REPLAY_BACKOFF_MAX_MS",
+    "REPLAY_EXHAUSTED",
     "TERMINAL_COMMAND_STATUSES",
     "WaiterSlot",
+    "replay_backoff_ms",
 ]

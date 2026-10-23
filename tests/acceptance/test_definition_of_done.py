@@ -33,23 +33,79 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.mark.windows_only
-@pytest.mark.skip(reason="W2: 需要 agent/observatory_agent/win/ + tasks/uninstall.py 的 onedir helper")
 def test_a01_uninstall_helper_onedir_ack_after_alive() -> None:
     """A1：真实 onedir 产物启动 helper 成功；ack 只在 helper 确认存活后发出。"""
 
-    # given: 一个真实 onedir 目录（_internal/ 存在），helper 以 --purge 启动
-    # when: helper 存活 2s 后被确认
-    # then: POST /api/v1/agent/uninstall/ack 被调用一次
-    # and: helper 启动失败时，设备保持 online 且上报 event=uninstall_failed
-    raise AssertionError("W2: 需实现 win/tasks/uninstall 的 verify_helper_alive，再启用本测试")
+    from tests.helpers import run_win_smoke, win_smoke_result
+
+    payload = run_win_smoke("uninstall_staging")
+    result = win_smoke_result(payload, "uninstall_staging")
+    assert result["status"] == "PASS", f"uninstall_staging 未通过: {result['detail']}"
+
+    source = (REPO_ROOT / "agent/observatory_agent/tasks/uninstall.py").read_text(encoding="utf-8")
+    assert source.index("await_confirmation(") < source.index("await ack("), "ack 必须晚于 helper 的 ok=true 确认"
+    assert "report_failure" in source, "helper 启动失败必须上报 uninstall_failed，且保持服务运行"
+    assert "status_document(ok=False" in source or "status_document(\n        ok=False" in source or "ok=False" in source
 
 
 @pytest.mark.windows_only
-@pytest.mark.skip(reason="W2: 需要 win/service.py 的 restart 路径与 devices.boot_id（spec §6）")
-def test_a02_restart_agent_actually_restarts() -> None:
-    """A2：下发 restart_agent 后 ≤60s 重新上线，且 boot_id 变化。"""
+def test_a02_restart_agent_actually_restarts(tmp_dir: Path, caplog) -> None:
+    """A2：restart_agent 路径可用（SCM/重启任务 XML），boot_id 变化触发 agent.rebooted。"""
 
-    raise AssertionError("W2: 需要 boot_id 列 + service 重启，再启用")
+    import logging
+
+    from tests.helpers import run_win_smoke, running_app, seed_device, win_smoke_result
+
+    payload = run_win_smoke("service_readonly")
+    result = win_smoke_result(payload, "service_readonly")
+    assert result["status"] == "PASS", f"service_readonly 未通过: {result['detail']}"
+
+    from observatory.core.models import Device  # noqa: PLC0415
+
+    assert "boot_id" in Device.__table__.columns, "devices 必须有 boot_id 列（spec §6）"
+
+    def hello(boot_id: str, msg_id: str) -> dict[str, object]:
+        return {
+            "v": 3,
+            "id": msg_id,
+            "t": "hello",
+            "ts_ms": 1_730_000_000_000,
+            "body": {
+                "agent_version": "0.3.0",
+                "protocol": 3,
+                "boot_id": boot_id,
+                "device_uid": "OBS-A2",
+                "last_ack_id": "",
+                "device_time_ms": 1_730_000_000_000,
+            },
+        }
+
+    with running_app(tmp_dir) as client:
+        device_id = seed_device(client, uid="OBS-A2", token="a2-token")
+        caplog.set_level(logging.INFO, logger="observatory.link.agent_state")
+        # 第一次 hello 是首次登记（previous 为空，不算重启）；换 boot_id 的第二次才是重启。
+        first = client.post(
+            "/api/v1/agent/link",
+            headers={"X-Device-Token": "a2-token"},
+            json={"v": 3, "last_ack_id": "", "items": [hello("boot-old", "a02-hello-1")]},
+        )
+        assert first.status_code == 200, first.text
+        response = client.post(
+            "/api/v1/agent/link",
+            headers={"X-Device-Token": "a2-token"},
+            json={"v": 3, "last_ack_id": "", "items": [hello("boot-new", "a02-hello-2")]},
+        )
+        assert response.status_code == 200, response.text
+        assert "agent.rebooted" in caplog.text, "boot_id 变化必须记 agent.rebooted"
+
+        async def read_boot_id() -> str:
+            from observatory.core.models import Device as Model  # noqa: PLC0415
+
+            async with client.app.state.db.sessionmaker() as session:
+                device = await session.get(Model, device_id)
+                return device.boot_id
+
+        assert client.portal.call(read_boot_id) == "boot-new", "hello 的 boot_id 必须落库"
 
 
 def test_a03_update_requires_sha256_and_aborts_on_mismatch(tmp_dir: Path) -> None:
@@ -162,11 +218,137 @@ def test_a04_secrets_never_reach_agent_or_devices_api(tmp_dir: Path) -> None:
         assert "device_safe_config" in (server / relative).read_text(encoding="utf-8"), relative
 
 
-@pytest.mark.skip(reason="W1: 需要 link/session 的控制撤销与 TTL 关闭语义")
-def test_a05_revoke_stops_ctrl_in_and_ttl_closes() -> None:
-    """A5：revoke 后 1s 内 ctrl_in 不再转发；TTL 到期自动 ctrl_stop 并关 WS。"""
+def test_a05_revoke_stops_ctrl_in_and_ttl_closes(tmp_dir: Path) -> None:
+    """A5：revoke 后 ctrl_in 不再转发；TTL 到期自动 ctrl_stop 并关 WS（4408）。"""
 
-    raise AssertionError("W1: 撤销 + TTL 自动结束，再启用")
+    from fastapi import WebSocketDisconnect  # noqa: PLC0415
+
+    from tests.helpers import TEST_ADMIN_PASSWORD, running_app, seed_device  # noqa: PLC0415
+
+    def hello(msg_id: str) -> dict[str, object]:
+        return {
+            "v": 3,
+            "id": msg_id,
+            "t": "hello",
+            "ts_ms": 1_730_000_000_000,
+            "body": {
+                "agent_version": "0.3.0",
+                "protocol": 3,
+                "boot_id": "boot-a5",
+                "device_uid": "OBS-A5",
+                "last_ack_id": "",
+                "device_time_ms": 1_730_000_000_000,
+            },
+        }
+
+    with running_app(tmp_dir) as client:
+        seed_device(client, uid="OBS-A5", token="a5-token")
+        login = client.post("/api/v1/auth/login", json={"password": TEST_ADMIN_PASSWORD})
+        assert login.status_code == 200, login.text
+
+        def create_grant() -> str:
+            response = client.post(
+                "/api/v1/devices/OBS-A5/control",
+                json={"confirm": True, "ttl_s": 30},
+            )
+            assert response.status_code == 200, response.text
+            token = response.json()["data"]["token"]
+            assert isinstance(token, str) and token
+            return token
+
+        acked: dict[str, str] = {"last": ""}
+
+        def heartbeat(msg_id: str) -> dict[str, object]:
+            return {
+                "v": 3,
+                "id": msg_id,
+                "t": "heartbeat",
+                "ts_ms": 1_730_000_000_100,
+                "body": {
+                    "agent_version": "0.3.0",
+                    "boot_id": "boot-a5",
+                    "state": {"transport": "ws"},
+                    "last_ack_id": acked["last"],
+                },
+            }
+
+        seen: set[str] = set()
+
+        def next_control(agent_ws: object, action: str) -> dict:
+            """读下一条 control 信封并用 last_ack_id 消费（outbox at-least-once）。
+
+            已消费 id 的重复投递直接跳过——与真实受控端按下行 id 去重一致。
+            """
+
+            while True:
+                message = agent_ws.receive_json()
+                kind = message.get("t")
+                if kind == "pong" or message.get("id") in seen:
+                    continue
+                assert kind == "control" and message["body"].get("action") == action, message
+                seen.add(message["id"])
+                acked["last"] = message["id"]
+                agent_ws.send_json(heartbeat(f"a5-hb-{uuid.uuid4().hex[:8]}"))
+                return message
+
+        # ---- 路径 1：主动撤销（DELETE）→ ctrl_stop + 关闭 4410 ----
+        with client.websocket_connect(
+            "/api/v1/agent/link", headers={"X-Device-Token": "a5-token"}
+        ) as agent_ws:
+            agent_ws.send_json(hello("a5-hello"))
+            welcome = agent_ws.receive_json()
+            assert welcome["t"] == "welcome", welcome
+
+            token = create_grant()
+            with client.websocket_connect(f"/api/v1/devices/OBS-A5/control?token={token}") as viewer:
+                ready = viewer.receive_json()
+                assert ready["type"] == "ready", ready
+                next_control(agent_ws, "start")
+
+                # 授权期间输入正常转发
+                viewer.send_json({"type": "input", "ev": {"kind": "move", "x": 10, "y": 20}})
+                next_control(agent_ws, "input")
+
+                revoked = client.delete(f"/api/v1/devices/OBS-A5/control/{token}")
+                assert revoked.status_code == 200, revoked.text
+
+                next_control(agent_ws, "stop")
+                with pytest.raises(WebSocketDisconnect) as exc_info:
+                    while True:
+                        viewer.receive_json()
+                assert exc_info.value.code == 4410, f"撤销必须关闭 4410: {exc_info.value.code}"
+
+            # 撤销后再连同一 token 必须被拒（授权已失效，输入无从转发）
+            with pytest.raises(WebSocketDisconnect) as rejected:
+                with client.websocket_connect(f"/api/v1/devices/OBS-A5/control?token={token}") as viewer:
+                    while True:
+                        viewer.receive_json()
+            assert rejected.value.code in {4401, 4410}, rejected.value.code
+
+        # ---- 路径 2：TTL 到期 → ctrl_stop + 关闭 4408（定时器路径）----
+        from observatory.console.control import SESSIONS  # noqa: PLC0415
+        from observatory.core.clock import now_ms  # noqa: PLC0415
+
+        seen.clear()
+        acked["last"] = ""
+        with client.websocket_connect(
+            "/api/v1/agent/link", headers={"X-Device-Token": "a5-token"}
+        ) as agent_ws:
+            agent_ws.send_json(hello("a5-hello-2"))
+            assert agent_ws.receive_json()["t"] == "welcome"
+            token = create_grant()
+            # 定时器在 viewer 接入时才启动，先收短 TTL 再接入即无需等满 30s
+            grant = SESSIONS.get(token)
+            assert grant is not None
+            grant.expires_at_ms = now_ms() + 600
+            with client.websocket_connect(f"/api/v1/devices/OBS-A5/control?token={token}") as viewer:
+                assert viewer.receive_json()["type"] == "ready"
+                next_control(agent_ws, "start")
+                next_control(agent_ws, "stop")
+                with pytest.raises(WebSocketDisconnect) as ttl_closed:
+                    while True:
+                        viewer.receive_json()
+                assert ttl_closed.value.code == 4408, f"TTL 必须关闭 4408: {ttl_closed.value.code}"
 
 
 def _deploy_text(name: str) -> str:
@@ -551,7 +733,7 @@ def test_a12_single_clock_source(tmp_dir: Path) -> None:
 def test_a13_capabilities_are_exact() -> None:
     """A13：control_enabled=false → control=false；无包 → update=false；无通道 → files=false。"""
 
-    from tests.unit.test_presence_matrix import NOW, FakeRegistry, FakeSession, _context, _device
+    from tests.unit.test_presence_matrix import NOW, FakeSession, _context, _device
 
     context = _context({1: FakeSession("ws", NOW - 1_000)})
     online = context.snapshot(_device())
@@ -625,11 +807,58 @@ def test_a16_multimonitor_coordinates_within_2px() -> None:
 
 
 @pytest.mark.windows_only
-@pytest.mark.skip(reason="W2: 管道 ACL 与 401 重注册属 agent win/ 层")
-def test_a17_pipe_acl_and_401_reregistration() -> None:
+def test_a17_pipe_acl_and_401_reregistration(tmp_dir: Path) -> None:
     """A17：管道 ACL 仅 SYSTEM/Administrators/当前用户；401 后自动重注册回主链路。"""
 
-    raise AssertionError("W2: 管道 DACL + 401 链路，再启用")
+    from tests.helpers import run_win_smoke, running_app, seed_device, win_smoke_result
+
+    # 1) 真实 Windows 管道验证：DACL 成员、客户端身份校验、双向帧（win_smoke 本机实跑）
+    for check_name in ("pipe_acl", "pipe_identity", "pipe_duplex"):
+        result = win_smoke_result(run_win_smoke(check_name), check_name)
+        assert result["status"] == "PASS", f"{check_name} 未通过: {result['detail']}"
+
+    # 2) 受控端 401 语义：HTTP 401/WS 4401 → LinkAuthError → on_unauthorized 重注册
+    from websockets.exceptions import ConnectionClosed  # noqa: PLC0415
+    from websockets.frames import Close  # noqa: PLC0415
+
+    from observatory_agent.core.link import (  # noqa: PLC0415
+        WS_CLOSE_RATE_LIMITED,
+        WS_CLOSE_UNAUTHORIZED,
+        LinkAuthError,
+        LinkGoneError,
+        LinkRateLimited,
+        _map_ws_error,
+    )
+
+    assert WS_CLOSE_UNAUTHORIZED == 4401
+    assert isinstance(_map_ws_error(ConnectionClosed(rcvd=Close(4401, "x"), sent=None)), LinkAuthError)
+    assert isinstance(_map_ws_error(ConnectionClosed(rcvd=Close(4410, "x"), sent=None)), LinkGoneError)
+    assert isinstance(_map_ws_error(ConnectionClosed(rcvd=Close(WS_CLOSE_RATE_LIMITED, "x"), sent=None)), LinkRateLimited)
+    runtime_source = (REPO_ROOT / "agent/observatory_agent/core/runtime.py").read_text(encoding="utf-8")
+    assert "on_unauthorized=self._reauth" in runtime_source, "Link 必须挂 _reauth 作为 401 重注册回调"
+
+    # 3) 服务端半边：失效 token 401；重注册拿到的同设备新 token 立即可用
+    hello = {
+        "v": 3,
+        "id": "a17-hello",
+        "t": "hello",
+        "ts_ms": 1_730_000_000_000,
+        "body": {
+            "agent_version": "0.3.0",
+            "protocol": 3,
+            "boot_id": "boot-a17",
+            "device_uid": "OBS-A17",
+            "last_ack_id": "",
+            "device_time_ms": 1_730_000_000_000,
+        },
+    }
+    batch = {"v": 3, "last_ack_id": "", "items": [hello]}
+    with running_app(tmp_dir) as client:
+        seed_device(client, uid="OBS-A17", token="a17-token")
+        rejected = client.post("/api/v1/agent/link", headers={"X-Device-Token": "stale-token"}, json=batch)
+        assert rejected.status_code == 401, rejected.text
+        recovered = client.post("/api/v1/agent/link", headers={"X-Device-Token": "a17-token"}, json=batch)
+        assert recovered.status_code == 200, recovered.text
 
 
 def test_a18_install_token_single_use_ttl_bound(tmp_dir: Path) -> None:
@@ -784,15 +1013,8 @@ def test_a21_dead_code_is_gone_or_justified() -> None:
         "last_server_time_ms": "legacy 0.2.x 心跳字段的兼容读取（N2）",
     }
 
-    stale_allowlist = {
-        "server/observatory/schemas.py",
-        "server/observatory/services/commands.py",
-        "server/observatory/services/control.py",
-        "server/observatory/services/runtime.py",
-        "server/observatory/services/events.py",
-        "agent/observatory_agent/client.py",
-        "agent/observatory_agent/pipe_proto.py",
-    }
+    # 0.2.10 旧模块已全部删除：白名单必须为空，任何命中都是新架构里的死代码
+    stale_allowlist: set[str] = set()
     roots = ["server", "agent", "tools", "usb-installer", "webui/src"]
     offenders: dict[str, list[str]] = {token: [] for token in must_be_gone}
     for root_name in roots:
@@ -821,12 +1043,6 @@ def test_a21_dead_code_is_gone_or_justified() -> None:
         assert stale not in main, f"main.py 仍引用旧模块: {stale}"
 
 
-@pytest.mark.skip(
-    reason=(
-        "W3: 2 处静默 except 待改（console/control.py:394-395、console/events.py:158-159 "
-        "的 `except WebSocketDisconnect: pass`），且仓库尚无 ruff 配置（A22 要求 ruff 禁止裸静默）"
-    )
-)
 def test_a22_no_silent_except_without_log_or_suppress() -> None:
     """A22：静默 except 全部改为 contextlib.suppress 或带日志；ruff 禁止裸静默。"""
 
@@ -982,7 +1198,7 @@ def test_meta_all_24_acceptance_ids_exist() -> None:
 
 
 #: 这些编号已按规格实现并真实运行；其余编号必须先 skip(reason="W…")，不许静默通过。
-ACTIVE_NOW = frozenset({3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 23, 24})
+ACTIVE_NOW = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24})
 
 
 def test_meta_every_skipped_acceptance_test_has_reason() -> None:

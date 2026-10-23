@@ -51,3 +51,5 @@ desktop.ini
 tmp_w0/
 .pytest-tmp/
 tmp_w1/
+# win_smoke 本机冒烟产物（tools/win_smoke.py 的运行目录）
+.win-smoke/

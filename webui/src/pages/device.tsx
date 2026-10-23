@@ -7,6 +7,7 @@ import { CommandsView } from "@/pages/device/commands-view";
 import { FilesView } from "@/pages/device/files-view";
 import { LiveView } from "@/pages/device/live-view";
 import { OverviewView } from "@/pages/device/overview-view";
+import { DeviceSettingsView } from "@/pages/device/settings-view";
 import { TimelineView } from "@/pages/device/timeline-view";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -24,6 +25,7 @@ const TABS = [
   { value: "timeline", label: "时间线" },
   { value: "files", label: "文件" },
   { value: "commands", label: "命令" },
+  { value: "settings", label: "设置" },
 ] as const;
 
 type TabValue = (typeof TABS)[number]["value"];
@@ -159,6 +161,9 @@ export function DevicePage() {
         </TabsContent>
         <TabsContent value="commands" className="mt-3">
           <CommandsView device={device} />
+        </TabsContent>
+        <TabsContent value="settings" className="mt-3">
+          <DeviceSettingsView device={device} />
         </TabsContent>
       </Tabs>
     </div>

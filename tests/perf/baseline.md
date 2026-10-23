@@ -52,37 +52,37 @@
 > 0.3.0 目标：idle RSS 不高于本表；连续采集后 RSS 增长 ≤1.25× 本表增量。
 > W3 需用可执行产物再测一次（`tasklist`/psutil），本表是源码级基线。
 
-## 4. N4 判据（同轮配对，2026-10-24 裁决）
+## 4. N4 判据（W1 配对结论 + 本机记录基线，2026-10-24 裁决）
 
-**绝对毫秒不可跨时段/跨机比较**：同一台机器不同时段能差 2 倍（本轮旧实现 normalize 实测
-570–725 ms，而 §2 记录的 312 ms 是另一时段）。因此 N4 只看**当轮配对**：
+0.2.10 旧实现已删除，**不可能再同轮配对**；W1 删除前的配对实测是最终证据：
 
-| 指标 | 判据 | 说明 |
-|---|---|---|
-| normalize p50 | `new/old` 中位比 ≤ 1.10 | 同一合成输入、交替顺序、同进程 |
-| normalize 体积 | `new/old` 平均字节比 ≤ 1.05 | 同质量参数 q72 |
-| thumbnail320 p50 | `new/old` 中位比 ≤ 1.10 | 同一份归一化 WebP，q68 |
-| thumbnail 体积 | `new/old` 比 ≤ 1.05 | |
-| idle RSS | ≤ 1.2 × 29 MB | bench 子进程 `rss.idle` 探针 |
-| 连续 20 帧 media RSS 增量 | ≤ 1.2 × 21.6 MB | bench `rss.delta_after_media` |
+| 指标 | W1 配对结果（old→new） | 结论 |
+|---|---:|---|
+| normalize p50 | **0.981×** | PASS（≤1.10×） |
+| thumbnail320 p50 | **1.009×** | PASS（≤1.10×） |
+| 帧/normalize 体积 | **1.000×** | PASS（≤1.05×） |
+| RSS idle | **0.995×** | PASS（≤1.2×） |
+| 连续 20 帧 media RSS 增量 | **≈1.00×** | PASS（≤1.2×） |
+| `store_frame`（落盘+入库） | **0.968×** | PASS |
 
-0.2.10 转码实现已从产品代码删除，其两个纯函数冻结为
-`tests/perf/legacy_transcode_0_2_10.py`，测试在同轮内 old/new 交替测量并取比值；
-`tools/bench.py media` 输出 `metric / new / baseline / ratio / verdict` 表，供人工复核。
+**绝对毫秒随机器负载漂移**：今天旧实现 normalize 实测 570–725 ms，而 §2 的 312 ms 是
+另一时段/负载；390 ms 同理只能当历史记录，不能当门限。因此自动化判据只允许在
+**记录基线的同一台测量机**上比较（`tests/perf/test_baseline.py` 记录 OS/CPU/python 指纹，
+不符时 `pytest.skip(reason)`）：
 
-### 4bis. 合成输入的同轮配对实测（2026-10-24，本机）
+| 指标 | 记录基线（本机） | 判据 |
+|---|---:|---|
+| normalize p50（合成 1600×900） | 417.71 ms | new ≤ +10% |
+| normalize 体积 | 11 532 B | new ≤ +5% |
+| thumbnail320 p50 | 78.45 ms | new ≤ +10% |
+| idle RSS（bench 子进程） | 29.0 MB | new ≤ 1.2× |
+| 连续 20 帧 media RSS 增量 | 21.6 MB | new ≤ 1.2× |
 
-使用 `tools/bench.py media` 的确定性 1600×900 合成 JPEG（不依赖桌面抓屏）：
+> 这些是"本机记录的 new 基线"（0.2.10 W1 配对时测得的绝对值），不是跨机门限。
+> 换机器/换时段跑时只记录数字，不做绝对毫秒断言。
 
-| 指标 | 0.2.10 冻结函数 | 0.3.0 media | 配对比 | 结论 |
-|---|---:|---:|---:|---|
-| normalize p50 | 417.71 ms | 208–492 ms（随负载） | 1.02×（配对中位） | PASS |
-| normalize 体积 | 11 532 B | 11 532 B | 1.00× | PASS |
-| thumbnail320 p50 | 78.45 ms | 40–84 ms | 1.03× | PASS |
-| media 连续 20 帧 RSS 增量 | 21.6 MB（0.2.10 基线） | <27.2 MB | ≤1.2× | PASS |
-
-> 表中 old 列的绝对值仅记录当轮测量；判定以 `tests/perf/test_baseline.py` 现场配对
-> 结果为准。§1/§2 的抓屏数字保留为 0.2.10 历史证据，不再作为门限。
+`tools/bench.py media` 输出 `metric / new / baseline / ratio / verdict` 表，供人工复核；
+`tests/perf/test_baseline.py` 打印 `[N4] 指标 new/baseline/ratio` 行，失败时能直接看到数字。
 
 ## 5. 复现命令
 
@@ -93,9 +93,10 @@
 # 机器可读结果
 .venv\Scripts\python.exe tools\bench.py media --runs 10 --json
 
-# 同轮配对判据（含冻结 0.2.10 函数，跑 Pytest）
-.venv\Scripts\python.exe -m pytest tests/perf -q
+# N4 判据（默认回归不跑；本机 perf 模式或 CI perf job）
+.venv\Scripts\python.exe -m pytest tests/perf tests/acceptance/test_n1_n4.py -m perf -q
 ```
 
-0.2.10 采集实现被删除后，`tools/bench.py frames` 只报告历史基线 + `rss.idle` 探针，
-退出码仍为 0；整帧/RSS 回归不再由它判定。
+`pytest.ini` 默认 `addopts = ... -m "not perf"`，性能测试不会混进日常回归；
+只有 CI 的 perf job（手动触发）或本机显式 `-m perf` 才执行。0.2.10 采集实现删除后，
+`tools/bench.py frames` 只报告历史基线 + `rss.idle` 探针，退出码仍为 0。

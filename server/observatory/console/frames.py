@@ -16,7 +16,6 @@ from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..core.clock import now_ms
 from ..core.db import get_session
 from ..core.errors import AppError
 from ..core.models import Device, Frame

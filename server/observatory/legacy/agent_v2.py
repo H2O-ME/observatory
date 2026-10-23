@@ -600,14 +600,16 @@ async def agent_socket(websocket: WebSocket) -> None:
                 await _handle_binary(websocket, agent_session, blob)
             agent_session.touch()
             links.touch(agent_session.device_id)
-    except WebSocketDisconnect:
-        pass
+    except WebSocketDisconnect as exc:
+        log.debug("legacy ws disconnected uid=%s code=%s: %s", agent_session.uid, exc.code, exc)
     finally:
         pump.cancel()
         try:
             await pump
-        except (asyncio.CancelledError, Exception):  # noqa: BLE001 - pump already finished or cancelled
-            pass
+        except asyncio.CancelledError:
+            log.debug("legacy ws pump cancelled uid=%s", agent_session.uid)
+        except Exception as exc:  # noqa: BLE001 - pump failure is observable, not fatal
+            log.warning("legacy ws pump stopped uid=%s: %s", agent_session.uid, exc)
         await links.unregister(agent_session.device_id, agent_session)
         await agent_session.close(code=1001, reason="legacy carrier closed")
         async with websocket.app.state.db.sessionmaker() as session:

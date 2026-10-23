@@ -100,6 +100,23 @@ def wait_until(predicate: Callable[[], bool], *, timeout_s: float, interval_s: f
     return bool(predicate())
 
 
+def current_image_path() -> str:
+    """当前进程的真实镜像路径。
+
+    开发机的 venv ``sys.executable`` 可能是启动器壳（真实解释器是它的子进程），
+    而 OS 的进程镜像查询返回的是真实解释器；生产环境两者一致（PyInstaller exe）。
+    管道镜像校验的期望值必须用真实镜像，否则在 venv 开发机上必然失配。
+    """
+
+    with contextlib.suppress(Exception):
+        import psutil
+
+        exe = psutil.Process(os.getpid()).exe()
+        if exe:
+            return exe
+    return sys.executable
+
+
 def win32():
     import win32api
     import win32con
@@ -326,7 +343,7 @@ def check_pipe_identity(ctx: Ctx) -> str:
 
     pipe_sid = pipe_session_id()
 
-    accepted = start_server(pipe_sid, ctx.session_id, str(Path(sys.executable)))
+    accepted = start_server(pipe_sid, ctx.session_id, current_image_path())
     client = None
     try:
         client = readonly_client(pipe_name(pipe_sid))
@@ -336,7 +353,7 @@ def check_pipe_identity(ctx: Ctx) -> str:
         assert identity is not None, "last_client 为空"
         assert identity.pid > 0 and identity.session_id == ctx.session_id, f"客户端会话不对: {identity}"
         assert identity.user_sid.upper() == ctx.user_sid.upper(), f"客户端 SID 不对: {identity}"
-        assert identity.image_path.lower() == str(Path(sys.executable)).lower(), (
+        assert identity.image_path.lower() == current_image_path().lower(), (
             f"客户端镜像路径不对: {identity.image_path}"
         )
     finally:
@@ -346,7 +363,7 @@ def check_pipe_identity(ctx: Ctx) -> str:
         accepted.stop()
 
     # 镜像路径不匹配：会话与 SID 都对，只错镜像 → 必须拒绝。
-    rejected = start_server(pipe_sid + 1, ctx.session_id, str(Path(sys.executable).with_name("not-the-worker.exe")))
+    rejected = start_server(pipe_sid + 1, ctx.session_id, Path(current_image_path()).with_name("not-the-worker.exe"))
     client = None
     try:
         client = readonly_client(pipe_name(pipe_sid + 1))
@@ -390,7 +407,7 @@ def check_pipe_duplex(ctx: Ctx) -> str:
             session_id,
             allowed_user_sid=ctx.user_sid,
             on_message=lambda header, payload: received.append((header, payload)),
-            expected_image_path=str(Path(sys.executable)),
+            expected_image_path=current_image_path(),
             expected_session_id=ctx.session_id,
             security_attributes=external_attributes,
         )
@@ -899,6 +916,7 @@ def check_uninstall_staging(ctx: Ctx) -> str:
     env["OBS_PROGRAM_DATA"] = str(data_dir)
     log_path = root / "helper.log"
     child: subprocess.Popen[bytes] | None = None
+    doc_pid = 0
     try:
         with open(log_path, "wb") as log_handle:
             child = subprocess.Popen(
@@ -916,10 +934,19 @@ def check_uninstall_staging(ctx: Ctx) -> str:
         time.sleep(0.2)
         document = json.loads(status_path.read_text(encoding="utf-8"))
         assert document.get("ok") is True, document
-        assert int(document.get("pid") or 0) == child.pid, document
-        assert child.poll() is None, "helper 写完确认后就退出了"
+        # 开发机用 venv 时 sys.executable 可能是启动器壳：真正的解释器是它的
+        # 子进程，helper 写回的是自己的 pid（生产是 PyInstaller exe，两者一致）。
+        # 所以这里只要求「文档里的 pid 是一个活着的 helper 进程」。
+        import psutil
+
+        doc_pid = int(document.get("pid") or 0)
+        helper_alive = child.poll() is None if doc_pid == child.pid else psutil.pid_exists(doc_pid)
+        assert doc_pid > 0 and doc_pid != os.getpid() and helper_alive, document
         document_seen = document
     finally:
+        if doc_pid and doc_pid != (child.pid if child is not None else 0):
+            with contextlib.suppress(Exception):
+                psutil.Process(doc_pid).kill()
         if child is not None and child.poll() is None:
             with contextlib.suppress(Exception):
                 child.kill()
