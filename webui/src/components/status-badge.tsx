@@ -1,7 +1,17 @@
+/**
+ * The only component that renders device liveness.
+ *
+ * It renders the server's verdict verbatim: `presence.state`, the transport and
+ * the server's own `reason` / `age_ms`. It does not add a "stale" heuristic of
+ * its own — the 0.2.x console did (`age > 120s → 状态未知`), which duplicated the
+ * server threshold and, worse, judged it with the local clock (spec C5, A12).
+ * When the console socket is down, the shell says so globally; the badge keeps
+ * showing the last server statement, which is the truth as of that response.
+ */
+
 import { formatAge } from "@/lib/format";
-import { transportOf } from "@/lib/presence";
+import { presenceAgeMs, transportOf } from "@/lib/presence";
 import type { Presence, TransportKind } from "@/lib/types";
-import { useAge } from "@/hooks/use-server-now";
 import { cn } from "@/lib/utils";
 
 const LABELS: Record<Presence["state"], string> = {
@@ -36,39 +46,13 @@ const TRANSPORT_LABELS: Record<TransportKind, string> = {
 
 interface Props {
   presence: Presence;
-  /** True when the console's own event socket is down, so "now" is unreliable. */
-  stale?: boolean;
   compact?: boolean;
   className?: string;
 }
 
-/**
- * The only component that renders device liveness.
- *
- * It shows the server's verdict verbatim, plus *why* when the state is not plain
- * "online". When the console's own socket is down and the device has not been heard
- * from recently, it says 状态未知 rather than inventing an answer.
- */
-export function StatusBadge({ presence, stale = false, compact = false, className }: Props) {
-  const age = useAge(presence.last_seen_ms);
+export function StatusBadge({ presence, compact = false, className }: Props) {
+  const age = presenceAgeMs(presence);
   const transport = transportOf(presence);
-  const unknown = stale && presence.state !== "uninstalled" && (age === null || age > 120_000);
-
-  if (unknown) {
-    return (
-      <span
-        className={cn(
-          "inline-flex items-center gap-1.5 rounded-full border border-line bg-sunken px-2 py-0.5 text-xs font-medium text-soft",
-          className,
-        )}
-        title="控制台与服务器的连接已断开，无法确认设备当前状态"
-      >
-        <span className="size-1.5 rounded-full bg-faint" />
-        状态未知
-      </span>
-    );
-  }
-
   const label = LABELS[presence.state];
   const detail =
     presence.state === "online"

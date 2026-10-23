@@ -6,6 +6,7 @@ import { LiveBridge } from "@/components/live-bridge";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { AuditPage } from "@/pages/audit";
+import { BackupPage } from "@/pages/backup";
 import { DevicePage } from "@/pages/device";
 import { LoginPage } from "@/pages/login";
 import { SettingsPage } from "@/pages/settings";
@@ -13,6 +14,14 @@ import { UpdatesPage } from "@/pages/updates";
 import { WallPage } from "@/pages/wall";
 import { useAuth } from "@/store/auth";
 
+/**
+ * Route table.
+ *
+ * The 0.3.0 URLs are `/wall`, `/device/:uid/{overview,live,timeline,files,commands}`,
+ * `/backup`, `/audit`, `/settings`, `/updates` (spec §2.2). The 0.2.x bookmarks
+ * `/` and `/devices/:uid` still resolve — same element, no redirect — so nobody's
+ * saved link breaks.
+ */
 export function App() {
   const { status, error, version, bootstrap, refresh } = useAuth();
 
@@ -35,7 +44,7 @@ export function App() {
         <div className="glass w-full max-w-sm rounded-panel border border-line p-6 text-center shadow-card">
           <p className="text-sm font-medium text-ink">{error}</p>
           <p className="mt-1.5 text-xs leading-relaxed text-soft">
-            服务器的实时连接可能已中断。你的登录状态仍然保留，网络恢复后可以继续使用。
+            控制台无法读取服务端会话。网络恢复后可以继续使用，登录状态会保留。
           </p>
           <Button className="mt-4 w-full" onClick={() => void refresh()}>
             重试
@@ -54,12 +63,17 @@ export function App() {
       <LiveBridge />
       <Routes>
         <Route element={<AppShell />}>
-          <Route index element={<WallPage />} />
-          <Route path="devices/:uid" element={<DevicePage />} />
+          <Route index element={<Navigate to="/wall" replace />} />
+          <Route path="wall" element={<WallPage />} />
+          <Route path="device/:uid/*" element={<DevicePage />} />
+          {/* 0.2.x bookmark compatibility: same page, no redirect. */}
+          <Route path="devices/:uid/*" element={<DevicePage />} />
+          <Route path="backup" element={<BackupPage />} />
           <Route path="updates" element={<UpdatesPage />} />
           <Route path="audit" element={<AuditPage />} />
           <Route path="settings" element={<SettingsPage />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
+          <Route path="login" element={<Navigate to="/wall" replace />} />
+          <Route path="*" element={<Navigate to="/wall" replace />} />
         </Route>
       </Routes>
     </>

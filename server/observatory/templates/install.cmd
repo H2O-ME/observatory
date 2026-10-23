@@ -1,8 +1,13 @@
 @echo off
 rem Observatory agent installer -- double-click to install.
 rem
+rem 0.3.0 (A18): this file carries a ONE-TIME install token when the server
+rem renders one (single use, short TTL, bound to the first device). It falls
+rem back to the legacy shared enrollment code only for 0.2.x compatibility.
+rem Never put a long-lived shared credential into a distributable file.
+rem
 rem Rendered per request by the server:
-rem   * the enrollment code and version are already inside
+rem   * the install credential (token preferred) and version are already inside
 rem   * several server addresses are embedded and tried in order
 rem   * the real work happens in install.ps1, which asks for elevation once
 rem
@@ -15,6 +20,8 @@ rem or use the console; remote uninstall never prompts for UAC.
 setlocal EnableExtensions
 title Observatory agent installer
 
+set "TOKEN=@@INSTALL_TOKEN@@"
+set "TOKEN_URL=@@INSTALL_TOKEN_URL@@"
 set "CODE=@@ENROLL_CODE@@"
 set "CODE_URL=@@ENROLL_CODE_URL@@"
 set "VERSION=@@VERSION@@"
@@ -23,11 +30,40 @@ set "TARGET=%TEMP%\observatory-install-%RANDOM%%RANDOM%.ps1"
 set "GOT="
 set "PROBESIZE="
 
+rem Older renderers left the @@...@@ markers in place. New renderers replace both
+rem the token and code placeholders (possibly with the same value). A leftover
+rem marker is the only reliable signal of "not provided": tokens are URL-safe and
+rem never contain '@'.
+if not "%TOKEN%"=="%TOKEN:@=%" set "TOKEN="
+if not "%TOKEN_URL%"=="%TOKEN_URL:@=%" set "TOKEN_URL="
+if not "%CODE%"=="%CODE:@=%" set "CODE="
+if not "%CODE_URL%"=="%CODE_URL:@=%" set "CODE_URL="
+
+set "CRED="
+set "CRED_Q="
+if defined TOKEN (
+  set "CRED=token"
+  set "CRED_Q=token=%TOKEN_URL%"
+) else if defined CODE (
+  set "CRED=code"
+  set "CRED_Q=code=%CODE_URL%"
+)
+
+if not defined CRED (
+  echo.
+  echo   FAILED: this installer has no install credential inside.
+  echo   Download it again from the console: Settings - Installer.
+  echo.
+  pause
+  exit /b 2
+)
+
 echo.
 echo   ==================================================
 echo      Observatory agent installer
 echo      version : %VERSION%
 echo      machine : %COMPUTERNAME%
+echo      credential : %CRED%
 echo   ==================================================
 echo.
 echo   Downloading the installer from the first reachable server...
@@ -47,7 +83,7 @@ if not defined GOT (
 
 echo   Download OK. Installing now ^(one UAC prompt^)...
 echo.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%TARGET%" -Code "%CODE%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%TARGET%" -Token "%TOKEN%" -Code "%CODE%"
 set "RC=%ERRORLEVEL%"
 del "%TARGET%" >nul 2>&1
 
@@ -72,9 +108,9 @@ set "CAND=%~1"
 set "PROBE=%TEMP%\observatory-probe-%RANDOM%.ps1"
 del "%PROBE%" >nul 2>&1
 
-curl.exe -fsSL --max-time 30 -o "%PROBE%" "%CAND%/api/v1/public/install.ps1?download=1&code=%CODE_URL%" >nul 2>&1
+curl.exe -fsSL --max-time 30 -o "%PROBE%" "%CAND%/api/v1/public/install.ps1?download=1&%CRED_Q%" >nul 2>&1
 if not exist "%PROBE%" (
-  powershell -NoProfile -Command "try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 30 -Uri '%CAND%/api/v1/public/install.ps1?download=1&code=%CODE_URL%' -OutFile '%PROBE%' } catch { exit 1 }" >nul 2>&1
+  powershell -NoProfile -Command "try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 30 -Uri '%CAND%/api/v1/public/install.ps1?download=1&%CRED_Q%' -OutFile '%PROBE%' } catch { exit 1 }" >nul 2>&1
 )
 
 if not exist "%PROBE%" exit /b 0

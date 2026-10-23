@@ -5,19 +5,30 @@ import { MonitorSmartphone, Plus, RefreshCw } from "lucide-react";
 import { DeviceCard } from "@/components/device-card";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api } from "@/lib/api";
+import { api, isApiError } from "@/lib/api";
 import { isPollMode } from "@/lib/presence";
 import { useViewport } from "@/hooks/use-viewport";
 import { useLive } from "@/store/live";
 import { cn } from "@/lib/utils";
 
+/**
+ * The wall.
+ *
+ * Every number and label here comes from the server's `presence` block: state
+ * counts are `presence.state` tallies, "poll only" is `presence.transport`, and
+ * the age on each card is `presence.age_ms`. The page never derives liveness and
+ * never compares timestamps itself (spec C5, A12).
+ */
 export function WallPage() {
   const viewport = useViewport();
   const connected = useLive((state) => state.connected);
+
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ["devices"],
-    queryFn: api.devices,
-    refetchInterval: connected ? 20_000 : 5_000,
+    queryFn: api.listDevices,
+    // The socket pushes changes; polling is the repair path. When it is down the
+    // console polls faster so the wall still converges without the event stream.
+    refetchInterval: connected ? 20_000 : 8_000,
   });
 
   const devices = data?.devices ?? [];
@@ -28,7 +39,6 @@ export function WallPage() {
       (device) => device.presence.state === "offline" || device.presence.state === "uninstalled",
     ).length,
   };
-  // "受限" alone does not tell anyone what they lost; name the real consequence.
   const pollOnly = devices.filter((device) => isPollMode(device.presence)).length;
 
   const columns =
@@ -69,12 +79,13 @@ export function WallPage() {
         {pollOnly > 0 ? (
           <span className="text-warn">{pollOnly} 台仅轮询：实时控制不可用，其余功能正常</span>
         ) : null}
-        {!connected ? <span className="text-warn">实时连接断开，数据每 5 秒刷新一次</span> : null}
+        {!connected ? <span className="text-warn">实时连接断开，正在每 8 秒轮询一次</span> : null}
       </div>
 
       {isError ? (
-        <div className="rounded-panel border border-danger/30 bg-danger/10 p-3 text-xs text-danger">
-          无法读取设备列表：{error instanceof Error ? error.message : "未知错误"}
+        <div role="alert" className="rounded-panel border border-danger/30 bg-danger/10 p-3 text-xs text-danger">
+          无法读取设备列表：{isApiError(error) ? error.message : "未知错误"}
+          {isApiError(error) && error.retryable ? "（可点击刷新重试）" : null}
         </div>
       ) : null}
 
@@ -89,22 +100,17 @@ export function WallPage() {
           <MonitorSmartphone className="size-8 text-faint" />
           <div>
             <p className="text-sm font-medium text-ink">还没有受控端</p>
-            <p className="mt-1 text-xs text-soft">在设置页复制安装命令，在目标机器上运行即可。</p>
+            <p className="mt-1 text-xs text-soft">在设置页获取安装程序，在目标机器上运行即可。</p>
           </div>
           <Link to="/settings" className={buttonVariants({ variant: "default", size: "sm" })}>
             <Plus className="size-3.5" />
-            获取安装命令
+            获取安装程序
           </Link>
         </div>
       ) : (
         <div className={cn("grid gap-3", columns)}>
           {devices.map((device) => (
-            <DeviceCard
-              key={device.uid}
-              device={device}
-              stale={!connected}
-              variant={viewport === "watch" ? "compact" : "full"}
-            />
+            <DeviceCard key={device.uid} device={device} variant={viewport === "watch" ? "compact" : "full"} />
           ))}
         </div>
       )}

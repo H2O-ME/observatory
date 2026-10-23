@@ -1,5 +1,4 @@
-import { useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronLeft, RefreshCw, WifiOff } from "lucide-react";
 
@@ -12,10 +11,9 @@ import { TimelineView } from "@/pages/device/timeline-view";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { api } from "@/lib/api";
+import { api, isApiError } from "@/lib/api";
 import { formatAge } from "@/lib/format";
 import { isPollMode } from "@/lib/presence";
-import { useAge } from "@/hooks/use-server-now";
 import { useViewport } from "@/hooks/use-viewport";
 import { useLive } from "@/store/live";
 import { cn } from "@/lib/utils";
@@ -26,36 +24,54 @@ const TABS = [
   { value: "timeline", label: "时间线" },
   { value: "files", label: "文件" },
   { value: "commands", label: "命令" },
-];
+] as const;
 
+type TabValue = (typeof TABS)[number]["value"];
+
+function isTabValue(value: string): value is TabValue {
+  return TABS.some((tab) => tab.value === value);
+}
+
+/**
+ * Device shell.
+ *
+ * The active tab lives in the URL (`/device/:uid/<tab>`), so a link to the live
+ * view stays a link to the live view after a reload. The 0.2.x URLs (`/` and
+ * `/devices/:uid`) are served by the same component.
+ */
 export function DevicePage() {
-  const { uid = "" } = useParams();
+  const params = useParams();
+  const uid = params.uid ?? "";
+  const splat = params["*"] ?? "";
+  const requestedTab = splat.split("/")[0] ?? "";
+  const tab: TabValue = isTabValue(requestedTab) ? requestedTab : "overview";
+  const navigate = useNavigate();
   const viewport = useViewport();
   const connected = useLive((state) => state.connected);
-  const [tab, setTab] = useState("overview");
 
   const query = useQuery({
     queryKey: ["device", uid],
-    queryFn: () => api.device(uid),
+    queryFn: () => api.getDevice(uid),
     enabled: Boolean(uid),
     refetchInterval: connected ? 10_000 : 4_000,
   });
 
   const device = query.data?.device;
-  const age = useAge(device?.last_seen_ms);
-  const shellPadding = useMemo(
-    () => (viewport === "watch" ? "space-y-2" : viewport === "mobile" ? "space-y-3" : "space-y-4"),
-    [viewport],
-  );
+  const spacing = viewport === "watch" ? "space-y-2" : viewport === "mobile" ? "space-y-3" : "space-y-4";
+
+  const selectTab = (value: string) => {
+    const next: TabValue = isTabValue(value) ? value : "overview";
+    navigate(`/device/${encodeURIComponent(uid)}/${next}`);
+  };
 
   if (query.isError) {
     return (
       <div className="space-y-3">
-        <Link to="/" className="inline-flex items-center gap-1 text-xs text-soft no-underline">
+        <Link to="/wall" className="inline-flex items-center gap-1 text-xs text-soft no-underline">
           <ChevronLeft className="size-3.5" /> 返回设备列表
         </Link>
-        <div className="rounded-panel border border-danger/30 bg-danger/10 p-3 text-xs text-danger">
-          无法读取设备：{query.error instanceof Error ? query.error.message : "未知错误"}
+        <div role="alert" className="rounded-panel border border-danger/30 bg-danger/10 p-3 text-xs text-danger">
+          无法读取设备：{isApiError(query.error) ? query.error.message : "未知错误"}
         </div>
       </div>
     );
@@ -71,22 +87,23 @@ export function DevicePage() {
   }
 
   return (
-    <div className={shellPadding}>
+    <div className={spacing}>
       <div className="flex items-start gap-2">
         <Link
-          to="/"
+          to="/wall"
           className="mt-0.5 inline-flex size-9 shrink-0 items-center justify-center rounded-lg border border-line text-soft no-underline"
-          aria-label="返回"
+          aria-label="返回设备列表"
         >
           <ChevronLeft className="size-4" />
         </Link>
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
             <h1 className="truncate text-base font-semibold text-ink">{device.name || device.uid}</h1>
-            <StatusBadge presence={device.presence} stale={!connected} />
+            <StatusBadge presence={device.presence} />
           </div>
           <p className="mt-0.5 truncate text-[0.7rem] text-soft">
-            {device.hostname} · v{device.agent_version || "?"} · {formatAge(age)}
+            {device.hostname} · v{device.agent_version || "?"}
+            {device.protocol ? ` · 协议 ${device.protocol}` : ""} · {formatAge(device.presence.age_ms)}
           </p>
         </div>
         <Button
@@ -100,13 +117,6 @@ export function DevicePage() {
         </Button>
       </div>
 
-      {/*
-        A poll-only device is reachable and can run every command, but live
-        control needs the WebSocket. Saying only "受限" made operators think the
-        console was broken. This banner names the mode and what still works;
-        the capture-blocked banner on the overview tab stays separate because it
-        is a different fault (screen, not transport).
-      */}
       {isPollMode(device.presence) ? (
         <div className="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[0.72rem] leading-relaxed text-warn">
           <p className="flex items-center gap-1.5 font-medium">
@@ -115,7 +125,7 @@ export function DevicePage() {
           </p>
           <p className="mt-0.5 font-normal">
             {device.presence.reason ? `${device.presence.reason}。` : ""}
-            设备通过 HTTPS 轮询上报，截图、文件管理、命令下发和历史画面仍然可用，只是响应更慢；受控端恢复 WebSocket 通道后会自动切回实时控制。
+            设备通过 HTTP 轮询上报，截图、文件管理、命令下发和历史画面仍然可用，只是响应更慢；受控端恢复实时通道后会自动切回。
           </p>
         </div>
       ) : device.presence.state !== "online" ? (
@@ -124,7 +134,7 @@ export function DevicePage() {
         </div>
       ) : null}
 
-      <Tabs value={tab} onValueChange={(value) => setTab(String(value))}>
+      <Tabs value={tab} onValueChange={selectTab}>
         <div className="-mx-1 overflow-x-auto px-1 scrollbar-none">
           <TabsList className="w-max">
             {TABS.map((item) => (

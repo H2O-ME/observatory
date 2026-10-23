@@ -8,7 +8,8 @@ Usage::
 
 The repository root ``VERSION`` file wins. The two ``FALLBACK_VERSION`` constants
 (server + agent) are rewritten to match so an offline build still reports the
-right number, and the WebUI/agent package.json versions are kept in step.
+right number, the WebUI/agent package.json versions are kept in step, and the
+version statements in ``README.md`` / ``docs/*.md`` are checked and synced (A19).
 """
 
 from __future__ import annotations
@@ -33,6 +34,73 @@ PACKAGE_JSONS = [
 ]
 
 SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
+
+# ---------------------------------------------------------------------------
+# 文档（A19）：--check 不只覆盖代码副本，也要覆盖 README 与 docs/*.md 的
+# 版本声明 / 未渲染占位符，否则发版后文档会静默漂移。
+# ---------------------------------------------------------------------------
+README_PATH = ROOT / "README.md"
+DOCS_DIR = ROOT / "docs"
+
+#: README 的权威声明：`当前版本：**0.3.0**`
+README_VERSION = re.compile(r"当前版本：\*\*([0-9]+\.[0-9]+\.[0-9]+)\*\*")
+#: 文档标题里的版本：`# 部署（Observatory 0.3.0）`
+DOC_HEADING_VERSION = re.compile(r"^#\s+.*（Observatory\s+([0-9]+\.[0-9]+\.[0-9]+)）", re.MULTILINE)
+#: 文档顶部的版本块：`> 版本：0.3.0（...）`
+DOC_HEADER_VERSION = re.compile(r"^>\s*版本：([0-9]+\.[0-9]+\.[0-9]+)", re.MULTILINE)
+#: 未渲染的版本占位符：`{{VERSION}}`（发布前必须替换成字面版本）
+DOC_PLACEHOLDER = re.compile(r"\{\{\s*VERSION\s*\}\}")
+#: 历史快照文档永久保留审计时的版本号（0.2.10 通读报告），不随 VERSION 漂移。
+HISTORICAL_DOCS = frozenset({"项目通读报告.md"})
+
+
+def _doc_targets() -> list[Path]:
+    targets = [README_PATH, *sorted(DOCS_DIR.glob("*.md"))]
+    return [path for path in targets if path.exists()]
+
+
+def _version_patterns(path: Path) -> list[re.Pattern[str]]:
+    if path == README_PATH:
+        return [README_VERSION]
+    if path.name in HISTORICAL_DOCS:
+        return []
+    return [DOC_HEADING_VERSION, DOC_HEADER_VERSION]
+
+
+def _check_docs(version: str) -> list[str]:
+    problems: list[str] = []
+    readme = README_PATH.read_text(encoding="utf-8")
+    readme_matches = README_VERSION.findall(readme)
+    if not readme_matches:
+        problems.append("README.md: 缺少“当前版本：**X.Y.Z**”声明")
+    for found in readme_matches:
+        if found != version:
+            problems.append(f"README.md: 当前版本 {found} != {version}")
+
+    for path in _doc_targets():
+        text = path.read_text(encoding="utf-8")
+        relative = path.relative_to(ROOT)
+        for pattern in _version_patterns(path):
+            for found in pattern.findall(text):
+                if found != version:
+                    problems.append(f"{relative}: 文档版本 {found} != {version}")
+        if DOC_PLACEHOLDER.search(text):
+            problems.append(f"{relative}: 仍有未渲染的 {{{{VERSION}}}} 占位符")
+    return problems
+
+
+def _sync_docs(version: str) -> list[str]:
+    changed: list[str] = []
+    for path in _doc_targets():
+        original = path.read_text(encoding="utf-8")
+        updated = original
+        for pattern in _version_patterns(path):
+            updated = pattern.sub(lambda match: match.group(0).replace(match.group(1), version, 1), updated)
+        updated = DOC_PLACEHOLDER.sub(version, updated)
+        if updated != original:
+            path.write_text(updated, encoding="utf-8", newline="\n")
+            changed.append(str(path.relative_to(ROOT)))
+    return changed
 
 
 def read_root_version() -> str:
@@ -79,6 +147,8 @@ def sync(version: str) -> list[str]:
             data["version"] = version
             pkg_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="\n")
             changed.append(str(pkg_path.relative_to(ROOT)))
+
+    changed.extend(_sync_docs(version))
     return changed
 
 
@@ -100,12 +170,14 @@ def check() -> int:
         data = json.loads(pkg_path.read_text(encoding="utf-8"))
         if data.get("version") != version:
             problems.append(f"{pkg_path.relative_to(ROOT)}: {data.get('version')} != {version}")
+    problems.extend(_check_docs(version))
     for problem in problems:
         print(f"DRIFT {problem}")
     if problems:
         print(f"\n{len(problems)} place(s) out of sync with VERSION={version}.")
         return 1
     print(f"VERSION={version} consistent everywhere.")
+    print("checked: VERSION, FALLBACK_VERSION x2, webui/package.json, README.md, docs/*.md")
     return 0
 
 

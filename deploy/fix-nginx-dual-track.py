@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Align the two host nginx vhosts with Observatory 0.2.0's dual-track contract.
+"""DEPRECATED（0.3.0）：改用 deploy/setup.sh 渲染 deploy/nginx/*.conf.template。
+
+仅当你在**没有本仓库部署目录**的旧宿主机上手工修 nginx 时才需要这个脚本；
+0.3.0 起 setup.sh 会安装 observatory-console / observatory-agent 两个站点模板，
+本脚本与旧的两个以域名命名的 vhost 文件不再参与部署（W3 计划删除）。
+
+Align the two host nginx vhosts with Observatory 0.2.0's dual-track contract.
 
 Rules after this patch:
 

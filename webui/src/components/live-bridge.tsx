@@ -1,74 +1,102 @@
+/**
+ * Bridges the server event socket into the clock, the live store and React Query.
+ *
+ * The socket is the second calibration source for the server clock (the first is
+ * every HTTP envelope). Every event carries a server timestamp, so the console's
+ * clock is re-anchored continuously while the connection is up — a tab that was
+ * suspended for ten minutes is correct again on the next tick (spec C5).
+ */
+
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { openEventSocket } from "@/lib/api";
 import type { SocketEvent } from "@/lib/api";
+import { syncClock } from "@/store/clock";
+import { useAuth } from "@/store/auth";
 import { useLive } from "@/store/live";
 
-/**
- * Bridges the server event socket into React Query.
- *
- * Two jobs: keep `useLive` (connection + server clock) current, and invalidate the
- * queries an event actually affects. Invalidation is intentional rather than
- * clever — the server is the only source of truth for device state.
- */
+function channelsOf(data: Record<string, unknown> | undefined): { ws: number; poll: number } | null {
+  const channels = data?.channels;
+  if (!channels || typeof channels !== "object") return null;
+  const record = channels as { ws?: unknown; poll?: unknown };
+  return { ws: Number(record.ws ?? 0), poll: Number(record.poll ?? 0) };
+}
+
 export function LiveBridge() {
   const queryClient = useQueryClient();
-  const { setConnected, syncTime, pushEvent, setMeta } = useLive();
 
   useEffect(() => {
+    const { setConnected, setMeta } = useLive.getState();
+
+    let socket: { setWatchdogMs: (ms: number) => void } | null = null;
+
     const handle = (event: SocketEvent) => {
-      const type = event.type;
-      if (type === "socket_open") {
-        setConnected(true);
-        void queryClient.invalidateQueries({ queryKey: ["devices"] });
-        return;
-      }
-      if (type === "socket_closed") {
-        setConnected(false);
-        return;
-      }
+      // Every event carries the server's clock: recalibrate before anything else.
+      if (typeof event.ts_ms === "number") syncClock(event.ts_ms);
 
-      const serverTime = Number((event.data?.server_time_ms as number | undefined) ?? event.ts_ms ?? 0);
-      if (serverTime) syncTime(serverTime);
-      pushEvent(type);
-
-      if (type === "hello") {
-        const version = event.data?.version;
-        if (typeof version === "string") setMeta({ version });
-        const channels = event.data?.channels;
-        if (channels && typeof channels === "object") {
-          const record = channels as { ws?: number; poll?: number };
-          setMeta({ channels: { ws: Number(record.ws ?? 0), poll: Number(record.poll ?? 0) } });
+      switch (event.type) {
+        case "socket_open":
+          setConnected(true);
+          void queryClient.invalidateQueries({ queryKey: ["devices"] });
+          return;
+        case "socket_closed":
+          setConnected(false);
+          return;
+        case "hello": {
+          const version = event.data?.version;
+          if (typeof version === "string") setMeta({ version });
+          const channels = channelsOf(event.data);
+          if (channels) setMeta({ channels });
+          const heartbeat = Number(event.data?.heartbeat_s ?? 0);
+          if (heartbeat > 0) socket?.setWatchdogMs(heartbeat * 1000 * 2.5 + 5_000);
+          return;
         }
-        return;
-      }
-      if (type === "tick") {
-        const channels = event.data?.channels;
-        if (channels && typeof channels === "object") {
-          const record = channels as { ws?: number; poll?: number };
-          setMeta({ channels: { ws: Number(record.ws ?? 0), poll: Number(record.poll ?? 0) } });
+        case "tick": {
+          const channels = channelsOf(event.data);
+          if (channels) setMeta({ channels });
+          return;
         }
-        return;
+        default:
+          break;
       }
 
-      if (event.device_uid) {
-        void queryClient.invalidateQueries({ queryKey: ["device", event.device_uid] });
+      const uid = event.device_uid;
+      if (uid) {
+        void queryClient.invalidateQueries({ queryKey: ["device", uid] });
       }
-      if (type === "device_updated" || type === "device_removed" || type === "uninstall_progress") {
+      if (event.type === "device_updated" || event.type === "device_removed" || event.type === "uninstall_progress") {
         void queryClient.invalidateQueries({ queryKey: ["devices"] });
       }
-      if (type === "frame_added" || type === "command_created" || type === "command_updated") {
+      if (event.type === "frame_added") {
+        // The wall renders `latest_frame_id` from the device list, so a new frame
+        // also invalidates the list (the 0.2.x bridge forgot this and the wall
+        // waited for its poll).
+        void queryClient.invalidateQueries({ queryKey: ["devices"] });
+        void queryClient.invalidateQueries({ queryKey: ["timeline"] });
+      }
+      if (event.type === "command_created" || event.type === "command_updated") {
         void queryClient.invalidateQueries({ queryKey: ["commands"] });
       }
-      if (type === "notice" || type === "version") {
+      if (event.type === "notice" || event.type === "version") {
         void queryClient.invalidateQueries({ queryKey: ["updates"] });
         void queryClient.invalidateQueries({ queryKey: ["system"] });
+        void queryClient.invalidateQueries({ queryKey: ["settings"] });
       }
     };
 
-    return openEventSocket(handle);
-  }, [pushEvent, queryClient, setConnected, setMeta, syncTime]);
+    const opened = openEventSocket({
+      onEvent: handle,
+      onAuthFailure: () => {
+        // Session expired while the socket was open: asking the server for a
+        // session turns this into an anonymous state and shows the login page.
+        void useAuth.getState().refresh();
+      },
+    });
+    socket = opened;
+
+    return () => opened.close();
+  }, [queryClient]);
 
   return null;
 }

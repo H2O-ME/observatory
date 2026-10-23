@@ -1,24 +1,38 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { KeyRound, Loader2, ShieldCheck } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ApiError } from "@/lib/api";
+import { isApiError } from "@/lib/api";
 import { useAuth } from "@/store/auth";
 
 interface Props {
   version: string;
 }
 
+/**
+ * Login.
+ *
+ * The TOTP field is shown *before* the first attempt when the server's session
+ * payload says `totp_enabled`, instead of guessing from an error string. The
+ * error-string fallback stays for a server that enables TOTP between the session
+ * probe and the login attempt.
+ */
 export function LoginPage({ version }: Props) {
   const login = useAuth((state) => state.login);
+  const totpEnabled = useAuth((state) => state.totpEnabled);
   const consoleHost = useAuth((state) => state.consoleHost);
+  const navigate = useNavigate();
+
   const [password, setPassword] = useState("");
   const [totp, setTotp] = useState("");
   const [needTotp, setNeedTotp] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  const showTotp = totpEnabled || needTotp;
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -26,11 +40,12 @@ export function LoginPage({ version }: Props) {
     setBusy(true);
     setError("");
     try {
-      await login(password, needTotp ? totp : undefined);
+      await login(password, showTotp ? totp : undefined);
+      navigate("/wall", { replace: true });
     } catch (failure) {
-      const detail = failure instanceof ApiError ? failure.detail : "登录失败";
-      if (detail.includes("二次验证")) setNeedTotp(true);
-      setError(detail);
+      const message = isApiError(failure) ? failure.message : "登录失败";
+      setError(message);
+      if (/二次验证|验证码/.test(message)) setNeedTotp(true);
     } finally {
       setBusy(false);
     }
@@ -47,10 +62,7 @@ export function LoginPage({ version }: Props) {
           </p>
         </div>
 
-        <form
-          onSubmit={submit}
-          className="glass space-y-3.5 rounded-panel border border-line p-5 shadow-card"
-        >
+        <form onSubmit={submit} className="glass space-y-3.5 rounded-panel border border-line p-5 shadow-card">
           <div className="space-y-1.5">
             <Label htmlFor="password" className="text-xs text-soft">
               控制台密码
@@ -68,7 +80,7 @@ export function LoginPage({ version }: Props) {
             />
           </div>
 
-          {needTotp ? (
+          {showTotp ? (
             <div className="space-y-1.5">
               <Label htmlFor="totp" className="flex items-center gap-1.5 text-xs text-soft">
                 <ShieldCheck className="size-3.5" />
@@ -83,12 +95,19 @@ export function LoginPage({ version }: Props) {
                 placeholder="6 位数字"
                 className="h-11 text-center font-mono text-lg tracking-[0.3em]"
                 maxLength={6}
+                autoFocus={totpEnabled}
               />
             </div>
           ) : null}
 
           {error ? (
-            <p className="rounded-md border border-danger/30 bg-danger/10 px-2.5 py-1.5 text-xs text-danger">{error}</p>
+            <p
+              role="alert"
+              aria-live="polite"
+              className="rounded-md border border-danger/30 bg-danger/10 px-2.5 py-1.5 text-xs text-danger"
+            >
+              {error}
+            </p>
           ) : null}
 
           <Button type="submit" className="h-11 w-full text-[0.95rem]" disabled={busy || !password}>
@@ -98,9 +117,9 @@ export function LoginPage({ version }: Props) {
         </form>
 
         <p className="mt-4 text-center text-[0.68rem] leading-relaxed text-faint">
-          控制台只在这个域名提供：{consoleHost || "control.tianhw.top"}
+          控制台域名为 {consoleHost || "（服务端未配置）"}
           <br />
-          受控端可通过双域名任意一个接入。
+          受控端可通过任一备用域名接入。
         </p>
       </div>
     </div>

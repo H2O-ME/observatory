@@ -1,0 +1,50 @@
+# 构建上下文忽略规则（Observatory 0.3.0）
+#
+# 生效位置：仓库根。deploy/docker-compose.yml 的构建上下文是仓库根
+# （context: ..），Docker 只读取上下文根目录的 .dockerignore。
+# 旧版把规则放在 server/.dockerignore，因此从未生效（A24）。
+#
+# 原则：镜像构建只需要 VERSION、server/requirements.txt、server/observatory/、
+# webui/ 源码；其余一律不进入上下文。
+
+.git
+.gitignore
+.gitattributes
+.github
+.github/**
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+*.egg-info
+
+# 本地运行数据与密钥（绝不进入镜像层）
+.localdata
+data
+backups
+certs
+server/.env
+server/.env.*
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# 构建/发布产物
+dist
+agent
+*.zip
+
+# 与镜像无关的目录（减少上下文与误拷贝）
+deploy
+docs
+tests
+tools
+usb-installer
+tmp_w0
+tmp_analysis
+
+# WebUI 依赖与产物：由镜像内 npm ci / npm run build 重新生成
+webui/node_modules
+webui/dist
+webui/*.tsbuildinfo

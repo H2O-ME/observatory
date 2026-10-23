@@ -7,7 +7,6 @@ import { StatusBadge } from "@/components/status-badge";
 import { formatAge, formatBytes } from "@/lib/format";
 import { isPollMode } from "@/lib/presence";
 import type { Device } from "@/lib/types";
-import { useAge } from "@/hooks/use-server-now";
 import { cn } from "@/lib/utils";
 
 function numberFrom(source: Record<string, unknown>, key: string): number | null {
@@ -22,25 +21,21 @@ function textFrom(source: Record<string, unknown>, key: string): string {
 
 interface Props {
   device: Device;
-  stale: boolean;
   /** `compact` is the phone/watch card: fewer lines, larger touch target. */
   variant?: "full" | "compact";
 }
 
-export function DeviceCard({ device, stale, variant = "full" }: Props) {
+export function DeviceCard({ device, variant = "full" }: Props) {
   const cpu = numberFrom(device.sysinfo, "cpu_percent");
   const memory = numberFrom(device.sysinfo, "mem_percent");
   const memTotal = numberFrom(device.sysinfo, "mem_total");
-  const age = useAge(device.last_seen_ms);
   const offline = device.presence.state === "offline" || device.presence.state === "uninstalled";
-  // Reachable but poll-only: the card must say why live control is missing,
-  // otherwise "受限" looks like an arbitrary label. Kept separate from the
-  // capture-blocked banner on the detail page — different fault, different fix.
+  // Reachable but poll-only: name the consequence instead of showing a bare "受限".
   const pollMode = isPollMode(device.presence);
 
   return (
     <Link
-      to={`/devices/${encodeURIComponent(device.uid)}`}
+      to={`/device/${encodeURIComponent(device.uid)}`}
       className={cn(
         "group flex min-w-0 flex-col gap-2 rounded-panel border border-line bg-panel p-3 no-underline shadow-card transition-colors active:bg-sunken",
         "hover:border-line-strong",
@@ -57,7 +52,7 @@ export function DeviceCard({ device, stale, variant = "full" }: Props) {
           </div>
         )}
         <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-end justify-between gap-2 bg-gradient-to-t from-black/55 to-transparent p-2">
-          <StatusBadge presence={device.presence} stale={stale} compact />
+          <StatusBadge presence={device.presence} compact />
           <span className="shrink-0 rounded bg-black/45 px-1.5 py-0.5 text-[0.65rem] font-medium text-white/90">
             v{device.agent_version || "?"}
           </span>
@@ -72,7 +67,8 @@ export function DeviceCard({ device, stale, variant = "full" }: Props) {
             {device.os_name ? ` · ${device.os_name}` : ""}
           </p>
         </div>
-        <span className="shrink-0 text-[0.68rem] text-faint">{formatAge(age)}</span>
+        {/* The age is computed by the server (`presence.age_ms`), not by us. */}
+        <span className="shrink-0 text-[0.68rem] text-faint">{formatAge(device.presence.age_ms)}</span>
       </div>
 
       {pollMode ? (
@@ -90,7 +86,7 @@ export function DeviceCard({ device, stale, variant = "full" }: Props) {
           <Meter label="内存" value={memory} compact />
           <div className="col-span-2 flex items-center gap-1 text-[0.68rem] text-faint">
             <MemoryStick className="size-3" />
-            <span className="truncate">{memTotal ? formatBytes(memTotal) : "—"}</span>
+            <span className="truncate">{formatBytes(memTotal)}</span>
             <Cpu className="ml-1 size-3" />
             <span className="truncate">{device.arch || "—"}</span>
             <HardDrive className="ml-1 size-3" />

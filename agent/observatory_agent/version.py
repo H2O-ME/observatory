@@ -14,7 +14,7 @@ from pathlib import Path
 
 __all__ = ["FALLBACK_VERSION", "VERSION_RE", "parse_version", "resolve_version", "version_tuple", "is_newer"]
 
-FALLBACK_VERSION = "0.2.10"
+FALLBACK_VERSION = "0.3.0"
 
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 

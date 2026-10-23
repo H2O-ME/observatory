@@ -7,23 +7,29 @@
     <meta name="color-scheme" content="light dark" />
     <title>Observatory</title>
     <script>
-      /* Runs before the first paint so the stored theme is on <html> by the
-         time the stylesheet applies — otherwise a dark-mode operator gets a
-         white flash on every reload. Mirrors the key used by useTheme in
-         src/components/app-shell.tsx. */
+      /*
+        Resolve the theme before the first paint and hand the *mode* to React.
+
+        One decision, one switch: the `<html class="dark">` class plus
+        `color-scheme`. The rule below is byte-for-byte the same rule the shell
+        applies (`resolveDark` in src/components/app-shell.tsx), so React never
+        disagrees with the frame that is already on screen — that disagreement is
+        what produced a white flash for dark-mode operators in 0.2.x.
+      */
       (function () {
         try {
           var stored = localStorage.getItem("observatory.theme");
-          var pinned =
-            stored === "light" || stored === "dark" ? stored : "system";
+          var mode = stored === "light" || stored === "dark" ? stored : "system";
           var dark =
-            pinned === "dark" ||
-            (pinned === "system" &&
-              window.matchMedia("(prefers-color-scheme: dark)").matches);
+            mode === "dark" ||
+            (mode === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
           document.documentElement.classList.toggle("dark", dark);
           document.documentElement.style.colorScheme = dark ? "dark" : "light";
+          window.__OBS_THEME_MODE__ = mode;
         } catch (e) {
-          /* Private mode with storage disabled — fall through to light. */
+          /* Private mode with storage disabled — light is a safe first frame. */
+          document.documentElement.style.colorScheme = "light";
+          window.__OBS_THEME_MODE__ = "light";
         }
       })();
     </script>
