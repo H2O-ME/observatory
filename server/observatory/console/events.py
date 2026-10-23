@@ -155,8 +155,9 @@ async def console_socket(websocket: WebSocket) -> None:
             if text and '"ping"' in text:
                 with contextlib.suppress(Exception):
                     await websocket.send_json(build("pong"))
-    except WebSocketDisconnect:
-        pass
+    except WebSocketDisconnect as exc:
+        # Normal console disconnect; visible at debug level instead of a bare pass (A22).
+        log.debug("console ws disconnected code=%s: %s", exc.code, exc)
     finally:
         await HUB.unregister(websocket)
         log.info("console ws disconnected (%d clients)", HUB.client_count)

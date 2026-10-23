@@ -358,6 +358,14 @@ export interface SettingsPayload {
   server_time_ms: number;
 }
 
+/** `GET /settings/effective/{uid}` — server truth for one device, secrets stripped. */
+export interface EffectiveSettings {
+  uid: string;
+  /** Global defaults + stored values + this device's overrides, agent-safe view. */
+  settings: Record<string, unknown>;
+  server_time_ms: number;
+}
+
 // ---------------------------------------------------------------------- audit ---
 
 export interface AuditEntry {
@@ -556,8 +564,10 @@ export interface SystemStatus {
   frames: number;
   commands: number;
   pending_commands: number;
-  channels: { ws: number; poll: number };
+  /** Carrier → session count (`link/registry.counts()`: ws / poll / …). */
+  channels: Record<string, number>;
   control_sessions: number;
+  /** Server process storage footprint; all sizes are bytes. */
   storage: {
     frames_bytes: number;
     thumbs_bytes: number;
@@ -569,6 +579,17 @@ export interface SystemStatus {
   console_host: string;
   install: InstallInfo;
   server_time_ms: number;
+}
+
+/** `GET /api/v1/health` — public liveness payload (no auth). */
+export interface HealthInfo {
+  ok: boolean;
+  product: string;
+  version: string;
+  server_time_ms: number;
+  uptime_s: number;
+  /** Carrier → session count, same source as `SystemStatus.channels`. */
+  carriers: Record<string, number>;
 }
 
 // ------------------------------------------------------------- console socket ---

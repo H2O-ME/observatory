@@ -53,6 +53,9 @@ CONTROL_SEND_DEADLINE_MS = 5_000
 CONTROL_DEADLINE_MS = 5_000
 CLOSE_NO_CHANNEL = 4409
 CLOSE_REVOKED = 4410
+#: A5: the per-grant TTL timer closes the viewer with an explicit code so the
+#: browser can distinguish "your 600 s control session expired" from a revoke.
+CLOSE_TTL = 4408
 
 
 @dataclass
@@ -152,8 +155,11 @@ async def _close_viewer(grant: Grant, code: int, reason: str) -> None:
     if viewer is None:
         return
     async with grant.send_lock:
-        with contextlib.suppress(Exception):
+        try:
             await viewer.close(code=code, reason=reason)
+        except (RuntimeError, WebSocketDisconnect) as exc:
+            # The peer is already gone; log it instead of swallowing silently (A22).
+            log.debug("control viewer close failed token=%s code=%s: %s", grant.token, code, exc)
 
 
 async def stop_grant(request: Request, grant: Grant, *, code: int = CLOSE_REVOKED, reason: str = "revoked") -> None:
@@ -180,7 +186,7 @@ async def _expire_after(request: Request, grant: Grant) -> None:
     if grant.revoked:
         return
     log.info("control TTL expired device=%s token=%s", grant.device_id, grant.token)
-    await stop_grant(request, grant, reason="ttl expired")
+    await stop_grant(request, grant, code=CLOSE_TTL, reason="ttl expired")
 
 
 async def _load_device(session: AsyncSession, uid: str) -> Device:
@@ -349,7 +355,7 @@ async def control_socket(websocket: WebSocket, uid: str) -> None:
             # A5: the grant is re-checked for every single input event.
             live = SESSIONS.get(grant.token, device_id=device.id)
             if live is None or live.expires_at_ms <= now_ms():
-                await stop_grant(websocket, grant, reason="grant expired")
+                await stop_grant(websocket, grant, code=CLOSE_TTL, reason="grant expired")
                 return
             text = message.get("text")
             if text:
@@ -391,8 +397,9 @@ async def control_socket(websocket: WebSocket, uid: str) -> None:
     grant.tasks.add(frames_task)
     try:
         await pump_input()
-    except WebSocketDisconnect:
-        pass
+    except WebSocketDisconnect as exc:
+        # Normal browser disconnect: still leave a debug trace for A22.
+        log.debug("control viewer disconnected token=%s code=%s: %s", grant.token, exc.code, exc)
     except AppError as exc:
         log.info("control closed: %s", exc.message)
     finally:

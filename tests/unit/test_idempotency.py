@@ -16,6 +16,16 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
+class _StepClock:
+    """可手动推进的时钟：替换 journal._clock，用于跨过重投退避窗口。"""
+
+    def __init__(self, now: int) -> None:
+        self._now = now
+
+    def now_ms(self) -> int:
+        return self._now
+
+
 def test_outbox_redelivery_is_bounded_and_idempotent() -> None:
     """未 ack 的下行会重投；ack 后不再出现；同一 id 入队只保留一份。"""
 
@@ -41,17 +51,55 @@ def test_command_journal_replay_uses_stable_ids(tmp_dir: Path) -> None:
     with running_app(tmp_dir) as client:
         device_id = seed_device(client, uid="OBS-REPLAY", token="replay-token")
 
-        async def scenario() -> tuple[list[str], list[str]]:
+        async def scenario() -> tuple[list[str], list[str], list[str]]:
             journal = client.app.state.journal
             await journal.create(device_id, "sysinfo", {"seq": 1})
             await journal.create(device_id, "sysinfo", {"seq": 2})
             first = [record.id for record in await journal.replay_for_device(device_id)]
+            # 退避窗口内立即重连：节流不重发，且不改变任何 id / 状态
             second = [record.id for record in await journal.replay_for_device(device_id)]
-            return first, second
+            # 时钟越过退避窗口后：同样的稳定 id 再次投递（agent 按 command_id 去重）
+            journal._clock = _StepClock(journal._clock.now_ms() + 2_000)
+            third = [record.id for record in await journal.replay_for_device(device_id)]
+            return first, second, third
 
-        first, second = client.portal.call(scenario)
+        first, second, third = client.portal.call(scenario)
         assert len(first) == 2
-        assert first == second, "两次重投的 command_id 必须一致，否则 agent 无法去重"
+        assert second == [], "退避窗口内的重复重连不应重发"
+        assert first == third, "退避窗口后的重投必须复用稳定 command_id，否则 agent 无法去重"
+
+
+def test_command_journal_replay_exhaustion_marks_failed(tmp_dir: Path) -> None:
+    """A10：超过 MAX_REPLAY_ATTEMPTS 次真实重投后命令置 failed/REPLAY_EXHAUSTED（可观测、不再重发）。"""
+
+    from observatory.link.journal import MAX_REPLAY_ATTEMPTS, replay_backoff_ms
+    from tests.helpers import running_app, seed_device
+
+    with running_app(tmp_dir) as client:
+        device_id = seed_device(client, uid="OBS-EXHAUST", token="exhaust-token")
+
+        async def scenario() -> tuple[int, str, str]:
+            journal = client.app.state.journal
+            record = await journal.create(device_id, "sysinfo", {"seq": 1})
+            delivered: list[str] = []
+            attempts = 0
+            # 每轮把时钟推过当前退避窗口，保证每轮都是一次"真实"重投；
+            # 累计 ~20s，远小于 create 的 ≥60s 过期窗口，不会误触过期过滤。
+            for _ in range(MAX_REPLAY_ATTEMPTS + 2):
+                journal._clock = _StepClock(journal._clock.now_ms() + replay_backoff_ms(attempts) + 1_000)
+                batch = [item.id for item in await journal.replay_for_device(device_id)]
+                if not batch:
+                    break
+                delivered.extend(batch)
+                attempts += 1
+            final = await journal.get(record.id)
+            assert final is not None
+            return len(delivered), final.status, final.error_code or ""
+
+        count, status, error_code = client.portal.call(scenario)
+        assert count == MAX_REPLAY_ATTEMPTS, "恰好重投 MAX_REPLAY_ATTEMPTS 次"
+        assert status == "failed"
+        assert error_code == "REPLAY_EXHAUSTED"
 
 
 def test_frame_idempotency_key(tmp_dir: Path) -> None:

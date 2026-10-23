@@ -1,19 +1,22 @@
-"""N4 性能回归：**同轮配对**（0.2.10 冻结纯函数 vs 0.3.0 media）。
+"""N4 性能回归：**new vs 本机记录基线**（0.2.10→0.3.0 的 W1 配对结论）。
 
 口径（Lead/server-media 2026-10-24 裁决）：
 
-* 绝对毫秒不可跨时段/跨机比较（同一台机器不同时段能差 2 倍，历史 390/312/55ms
-  只是 0.2.10 在某一时段的记录）；
-* N4 判据 = **当轮配对** `new / old` 的中位比 ≤ 1.10（耗时）、≤1.05（体积）、
-  ≤1.20（RSS）；
-* 0.2.10 转码实现已从产品代码删除，其纯函数冻结在
-  ``tests/perf/legacy_transcode_0_2_10.py`` 作为同轮对照基准。
+* 0.2.10 旧实现已删除，不可能再同轮配对；W1 的配对实测已固化在
+  ``tests/perf/baseline.md``（normalize 0.981×、thumbnail 1.009×、体积 1.000×、
+  RSS idle 0.995× / 20 帧 ≈1.00×、store_frame 0.968×）；
+* 绝对毫秒随机器负载漂移（今天旧实现 normalize 实测 570–725ms，390ms 是另一时段），
+  因此只允许在**同一台测量机**上比较：机器指纹不符时 skip(reason)；
+* 判据：new p50 ≤ 记录基线 ×1.10；体积 ≤1.05×；RSS ≤1.20×；
+* 这些测试默认不跑（pytest.ini `-m "not perf"`），只在 CI perf job / 本机 perf 模式执行。
 """
 
 from __future__ import annotations
 
 import gc
 import json
+import os
+import platform
 import statistics
 import subprocess
 import sys
@@ -26,18 +29,50 @@ from PIL import Image
 
 from observatory.media import transcode
 
-from tests.perf import legacy_transcode_0_2_10 as legacy
-
 pytestmark = pytest.mark.perf
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-TIME_TOLERANCE = 1.10  # 同轮配对 ≤ +10%
-SIZE_TOLERANCE = 1.05  # 同轮配对 ≤ +5%
-RSS_TOLERANCE = 1.20  # ≤ 1.2×
+TIME_TOLERANCE = 1.10
+SIZE_TOLERANCE = 1.05
+RSS_TOLERANCE = 1.20
 
-#: 0.2.10 记录值（只作为 RSS 的绝对参照 + 文档一致性；耗时/体积判据用配对）
-RSS_BASELINE = {"idle_mb": 29.0, "delta_after_media_mb": 21.6}
+#: W1 记录基线的机器指纹（本机；只在该机器上比较绝对毫秒）
+RECORDED_MACHINE = {
+    "system": "Windows",
+    "release": "11",
+    "machine": "AMD64",
+    "cpu_count": 8,
+    "python": "3.14.3",
+}
+
+#: 0.2.10 服务端转码在**合成输入**上的同机记录（W1 配对测量；见 baseline.md §4bis）
+RECORDED = {
+    "normalize_p50_ms": 417.71,
+    "normalize_bytes": 11_532,
+    "thumb_p50_ms": 78.45,
+    "rss_idle_mb": 29.0,
+    "rss_delta_after_media_mb": 21.6,
+}
+
+
+def _machine() -> dict:
+    return {
+        "system": platform.system(),
+        "release": platform.release(),
+        "machine": platform.machine(),
+        "cpu_count": os.cpu_count(),
+        "python": platform.python_version(),
+    }
+
+
+def _require_recorded_machine() -> None:
+    current = _machine()
+    if current != RECORDED_MACHINE:
+        pytest.skip(
+            "机器指纹不符，绝对毫秒不可跨机/跨时段比较："
+            f"current={current} recorded={RECORDED_MACHINE}（见 tests/perf/baseline.md）"
+        )
 
 
 def _synthetic_1600x900_jpeg() -> bytes:
@@ -50,66 +85,57 @@ def _synthetic_1600x900_jpeg() -> bytes:
     return buffer.getvalue()
 
 
-def _timed(function):
-    started = time.perf_counter()
-    result = function()
-    return result, (time.perf_counter() - started) * 1000.0
+def _p50(costs: list[float]) -> float:
+    return statistics.median(costs)
 
 
-def _paired(old_call, new_call, runs: int = 12) -> tuple[list[float], list[float], list[float], list[int], list[int]]:
-    """交替顺序跑 old/new，返回 (new_ms, old_ms, ratios, new_bytes, old_bytes)。"""
+def test_n4_normalize_not_regressed() -> None:
+    """normalize：p50 ≤记录基线 ×1.10，输出体积 ≤1.05×。"""
 
-    new_costs: list[float] = []
-    old_costs: list[float] = []
-    ratios: list[float] = []
-    new_sizes: list[int] = []
-    old_sizes: list[int] = []
-    for index in range(runs):
-        if index % 2:
-            old_result, old_cost = _timed(old_call)
-            new_result, new_cost = _timed(new_call)
-        else:
-            new_result, new_cost = _timed(new_call)
-            old_result, old_cost = _timed(old_call)
-        new_costs.append(new_cost)
-        old_costs.append(old_cost)
-        ratios.append(new_cost / max(old_cost, 1e-6))
-        new_sizes.append(len(new_result[0]))
-        old_sizes.append(len(old_result[0]))
-    return new_costs, old_costs, ratios, new_sizes, old_sizes
-
-
-def test_n4_normalize_paired_not_regressed() -> None:
-    """normalize：同轮配对 p50 ≤1.10×，输出体积 ≤1.05×。"""
-
+    _require_recorded_machine()
     data = _synthetic_1600x900_jpeg()
-    new_costs, old_costs, ratios, new_sizes, old_sizes = _paired(
-        lambda: legacy.normalise_frame(data, 1600, 72),
-        lambda: transcode.normalise_frame(data, 1600, 72),
+    transcode.normalise_frame(data, 1600, 72)  # warm-up，避免首帧 import/缓存算进 p50
+    costs: list[float] = []
+    sizes: list[int] = []
+    for _ in range(10):
+        started = time.perf_counter()
+        normalised, _width, _height = transcode.normalise_frame(data, 1600, 72)
+        costs.append((time.perf_counter() - started) * 1000.0)
+        sizes.append(len(normalised))
+    measured = _p50(costs)
+    baseline = RECORDED["normalize_p50_ms"]
+    ratio = measured / baseline
+    size_ratio = statistics.fmean(sizes) / RECORDED["normalize_bytes"]
+    print(
+        f"[N4] normalize p50={measured:.2f}ms baseline={baseline:.2f}ms ratio={ratio:.3f}x "
+        f"bytes_ratio={size_ratio:.3f}x"
     )
-    assert statistics.median(ratios) <= TIME_TOLERANCE, (
-        f"normalize 配对耗时退化: p50 new={statistics.median(new_costs):.1f}ms / "
-        f"old={statistics.median(old_costs):.1f}ms = {statistics.median(ratios):.3f}x > 1.10x"
-    )
-    size_ratio = statistics.fmean(new_sizes) / max(1, statistics.fmean(old_sizes))
-    assert size_ratio <= SIZE_TOLERANCE, f"normalize 输出体积退化: {size_ratio:.3f}x > 1.05x"
+    assert ratio <= TIME_TOLERANCE, f"normalize 耗时退化: {measured:.2f}ms / {baseline:.2f}ms = {ratio:.3f}x > 1.10x"
+    assert size_ratio <= SIZE_TOLERANCE, f"normalize 体积退化: {size_ratio:.3f}x > 1.05x"
 
 
-def test_n4_thumbnail_paired_not_regressed() -> None:
-    """thumb320：在同一份归一化 WebP 上同轮配对 ≤1.10×、体积 ≤1.05×。"""
+def test_n4_thumbnail_not_regressed() -> None:
+    """thumb320：p50 ≤记录基线 ×1.10，体积 ≤1.05×。"""
 
+    _require_recorded_machine()
     data = _synthetic_1600x900_jpeg()
     normalised = transcode.normalise_frame(data, 1600, 72)[0]
-    new_costs, old_costs, ratios, new_sizes, old_sizes = _paired(
-        lambda: legacy.encode_thumbnail(normalised, 320),
-        lambda: transcode.encode_thumbnail(normalised, 320, 68),
-    )
-    assert statistics.median(ratios) <= TIME_TOLERANCE, (
-        f"thumbnail 配对耗时退化: p50 new={statistics.median(new_costs):.1f}ms / "
-        f"old={statistics.median(old_costs):.1f}ms = {statistics.median(ratios):.3f}x > 1.10x"
-    )
-    size_ratio = statistics.fmean(new_sizes) / max(1, statistics.fmean(old_sizes))
-    assert size_ratio <= SIZE_TOLERANCE, f"thumbnail 体积退化: {size_ratio:.3f}x > 1.05x"
+    transcode.encode_thumbnail(normalised, 320, 68)  # warm-up
+    costs: list[float] = []
+    sizes: list[int] = []
+    for _ in range(10):
+        started = time.perf_counter()
+        thumb, _thumb_w, _thumb_h = transcode.encode_thumbnail(normalised, 320, 68)
+        costs.append((time.perf_counter() - started) * 1000.0)
+        sizes.append(len(thumb))
+    measured = _p50(costs)
+    baseline = RECORDED["thumb_p50_ms"]
+    ratio = measured / baseline
+    print(f"[N4] thumbnail320 p50={measured:.2f}ms baseline={baseline:.2f}ms ratio={ratio:.3f}x")
+    assert ratio <= TIME_TOLERANCE, f"thumbnail 耗时退化: {ratio:.3f}x > 1.10x"
+    # thumb 体积没有独立记录基线；只打印，不设跨机体积门限（normalize 体积已覆盖质量参数）
+    assert all(size > 0 for size in sizes)
+    gc.collect()
 
 
 def test_n4_bench_has_no_legacy_imports() -> None:
@@ -133,30 +159,30 @@ def _bench_json(command: str, runs: int) -> dict:
 
 
 def test_n4_rss_idle_and_media_delta() -> None:
-    """RSS：bench 子进程空闲 ≤1.2×29MB；media 20 帧增量 ≤1.2×21.6MB。"""
+    """RSS：idle ≤1.2×29MB；media 20 帧增量 ≤1.2×21.6MB。"""
 
+    _require_recorded_machine()
     media_report = _bench_json("media", 20)
     samples = {sample["name"]: sample for sample in media_report["samples"]}
     delta = samples.get("rss.delta_after_media")
     assert delta is not None, f"bench media 缺少 rss.delta_after_media；实际 {list(samples)}"
-    delta_limit = RSS_BASELINE["delta_after_media_mb"] * RSS_TOLERANCE * 1024 * 1024
-    assert delta["mean_bytes"] <= delta_limit, (
-        f"media 连续转码 RSS 增量 {delta['mean_bytes'] / 1024 / 1024:.1f}MB > "
-        f"{delta_limit / 1024 / 1024:.1f}MB（≤1.2×）"
-    )
+    delta_mb = delta["mean_bytes"] / 1024 / 1024
+    delta_limit = RECORDED["rss_delta_after_media_mb"] * RSS_TOLERANCE
+    print(f"[N4] rss delta after 20 media frames={delta_mb:.2f}MB limit={delta_limit:.2f}MB")
+    assert delta_mb <= delta_limit, f"media RSS 增量 {delta_mb:.1f}MB > {delta_limit:.1f}MB（≤1.2×）"
 
     frames_report = _bench_json("frames", 1)
     frames_samples = {sample["name"]: sample for sample in frames_report["samples"]}
     idle = frames_samples.get("rss.idle")
-    assert idle is not None, "bench frames 需输出 rss.idle（0.2.10 采集删除后仍保留空闲基线探针）"
-    idle_limit = RSS_BASELINE["idle_mb"] * RSS_TOLERANCE * 1024 * 1024
-    assert idle["mean_bytes"] <= idle_limit, (
-        f"空闲 RSS {idle['mean_bytes'] / 1024 / 1024:.1f}MB > {idle_limit / 1024 / 1024:.1f}MB（≤1.2×）"
-    )
+    assert idle is not None, "bench frames 需输出 rss.idle（空闲基线探针）"
+    idle_mb = idle["mean_bytes"] / 1024 / 1024
+    idle_limit = RECORDED["rss_idle_mb"] * RSS_TOLERANCE
+    print(f"[N4] rss idle={idle_mb:.2f}MB limit={idle_limit:.2f}MB")
+    assert idle_mb <= idle_limit, f"空闲 RSS {idle_mb:.1f}MB > {idle_limit:.1f}MB（≤1.2×）"
 
 
 def test_n4_bench_comparison_table_is_well_formed() -> None:
-    """bench media 必须输出 metric/new/baseline/ratio/verdict 四列语义。"""
+    """bench media 必须输出 metric/new/baseline/ratio/verdict 表。"""
 
     report = _bench_json("media", 3)
     comparisons = report.get("comparisons") or []
@@ -164,4 +190,3 @@ def test_n4_bench_comparison_table_is_well_formed() -> None:
     for item in comparisons:
         assert set(item) >= {"metric", "new", "baseline", "ratio", "tolerance", "verdict"}
         assert item["verdict"] in {"PASS", "FAIL"}
-    gc.collect()

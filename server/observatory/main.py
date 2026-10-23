@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import importlib
 import logging
+import os
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -44,6 +45,30 @@ OPTIONAL_PACKAGES = (("observatory.console", "console"),)
 #: ``media.configure/start/stop`` below. Retention is expensive (unlink per frame),
 #: so it runs on its own low-frequency schedule, not on every housekeeping tick.
 MEDIA_RETENTION_KEY = "media_retention_interval_s"
+
+#: WebUI resolution: the data volume wins, then the copy baked into the image
+#: (``/srv/webui-dist`` in the Dockerfile), then — only for local development —
+#: the repository build output. ``OBS_WEBUI_DIR`` is the explicit override.
+BUNDLED_WEBUI = Path(__file__).resolve().parent.parent / "webui-dist"
+REPO_WEBUI_DIST = Path(__file__).resolve().parents[2] / "webui" / "dist"
+WEBUI_DEV_ENVS = frozenset({"dev", "development", "local"})
+
+
+def _resolve_webui_dir(settings: Settings) -> tuple[Path, str]:
+    """Return ``(directory, source)`` for the console assets (startup log uses it)."""
+
+    override = os.environ.get("OBS_WEBUI_DIR", "").strip()
+    if override:
+        return Path(override).expanduser(), "OBS_WEBUI_DIR"
+    configured = Path(settings.webui_dir)
+    if (configured / "index.html").is_file():
+        return configured, "data"
+    if (BUNDLED_WEBUI / "index.html").is_file():
+        return BUNDLED_WEBUI, "bundled"
+    env = os.environ.get("OBS_ENV", "").strip().lower()
+    if env in WEBUI_DEV_ENVS and (REPO_WEBUI_DIST / "index.html").is_file():
+        return REPO_WEBUI_DIST, "dev-repo"
+    return configured, "missing"
 
 
 def _load_media() -> Any | None:
@@ -349,6 +374,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.retention_task = None
     app.state.media_retention_interval_s = int(SPECS[MEDIA_RETENTION_KEY].default)
     app.state.link_limiter = RateLimiter(settings.link_rate_limit, settings.link_rate_window_s)
+    app.state.link_ip_limiter = RateLimiter(settings.link_ip_rate_limit, settings.link_rate_window_s)
 
     app.add_middleware(
         HostSplit,
@@ -386,7 +412,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "server_time_ms": clock.now_ms(),
         }
 
-    webui_dir = Path(settings.webui_dir)
+    webui_dir, webui_source = _resolve_webui_dir(settings)
+    if webui_source == "missing":
+        log.warning(
+            "webui.index missing path=%s bundled=%s: set OBS_ENV=dev (repo webui/dist) "
+            "or OBS_WEBUI_DIR, otherwise / returns 404",
+            webui_dir,
+            BUNDLED_WEBUI,
+        )
+    else:
+        log.info("webui.serving dir=%s source=%s", webui_dir, webui_source)
     assets_dir = webui_dir / "assets"
     if assets_dir.is_dir():
         app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")

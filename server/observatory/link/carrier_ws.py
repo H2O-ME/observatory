@@ -12,7 +12,6 @@ import asyncio
 import contextlib
 import json
 import logging
-from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -75,13 +74,23 @@ async def link_ws(websocket: WebSocket) -> None:
 
     await websocket.accept()
     token = websocket.headers.get(DEVICE_TOKEN_HEADER, "").strip()
+    ip = client_ip(websocket.headers, websocket.client, settings)
     try:
         enforce(
             getattr(websocket.app.state, "link_limiter", None),
+            getattr(websocket.app.state, "link_ip_limiter", None),
             token,
-            client_ip(websocket.headers, websocket.client, settings),
+            ip,
         )
     except AppError as exc:
+        log_event(
+            log,
+            logging.WARNING,
+            "link.ws_rate_limited",
+            ip=ip,
+            retry_after=exc.retry_after,
+            authenticated=bool(token),
+        )
         await websocket.close(code=CLOSE_RATE, reason=exc.message)
         return
     try:

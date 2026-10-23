@@ -10,7 +10,6 @@ protocols converge on one registry and one presence function.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import threading
 from collections.abc import Mapping

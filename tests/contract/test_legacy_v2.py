@@ -239,7 +239,7 @@ def _legacy_app():
 def test_replay_http_legacy_flow(tmp_dir: Path) -> None:
     """旧端 HTTP 载体完整回放：enroll → heartbeat → poll → result → frames。"""
 
-    from tests.helpers import legacy_token, running_app
+    from tests.helpers import running_app
 
     with running_app(tmp_dir) as client:
         enroll = client.post("/api/v1/agent/enroll", json=legacy.enroll_request(code="test-enroll-code"))

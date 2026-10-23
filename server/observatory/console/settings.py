@@ -14,7 +14,6 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..core.clock import now_ms
 from ..core.config import resolve_version
 from ..core.settings_spec import SettingsError, describe, public_view
 from ..core.db import get_session

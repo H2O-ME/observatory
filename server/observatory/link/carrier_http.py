@@ -60,11 +60,24 @@ async def link_http(
     directory = _directory(request)
 
     token = request.headers.get(DEVICE_TOKEN_HEADER, "").strip()
-    enforce(
-        getattr(request.app.state, "link_limiter", None),
-        token,
-        client_ip(request.headers, request.client, settings),
-    )
+    ip = client_ip(request.headers, request.client, settings)
+    try:
+        enforce(
+            getattr(request.app.state, "link_limiter", None),
+            getattr(request.app.state, "link_ip_limiter", None),
+            token,
+            ip,
+        )
+    except AppError as exc:
+        log_event(
+            log,
+            logging.WARNING,
+            "link.http_rate_limited",
+            ip=ip,
+            retry_after=exc.retry_after,
+            authenticated=bool(token),
+        )
+        raise
     if not token:
         raise AppError.auth("缺少设备令牌")
     # Invalid token → None → 401; uninstalled device raises AppError.gone → 410.

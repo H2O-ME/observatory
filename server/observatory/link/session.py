@@ -25,7 +25,7 @@ from .envelope import (
     Result,
     new_envelope,
 )
-from .journal import CommandJournal, CommandRecord
+from .journal import CommandJournal
 from .outbox import Outbox
 
 log = logging.getLogger(__name__)

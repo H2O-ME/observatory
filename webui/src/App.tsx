@@ -5,11 +5,13 @@ import { AppShell } from "@/components/app-shell";
 import { LiveBridge } from "@/components/live-bridge";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
+import { AccountPage } from "@/pages/account";
 import { AuditPage } from "@/pages/audit";
 import { BackupPage } from "@/pages/backup";
 import { DevicePage } from "@/pages/device";
 import { LoginPage } from "@/pages/login";
 import { SettingsPage } from "@/pages/settings";
+import { SystemPage } from "@/pages/system";
 import { UpdatesPage } from "@/pages/updates";
 import { WallPage } from "@/pages/wall";
 import { useAuth } from "@/store/auth";
@@ -72,6 +74,8 @@ export function App() {
           <Route path="updates" element={<UpdatesPage />} />
           <Route path="audit" element={<AuditPage />} />
           <Route path="settings" element={<SettingsPage />} />
+          <Route path="system" element={<SystemPage />} />
+          <Route path="account" element={<AccountPage />} />
           <Route path="login" element={<Navigate to="/wall" replace />} />
           <Route path="*" element={<Navigate to="/wall" replace />} />
         </Route>

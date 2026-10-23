@@ -18,9 +18,11 @@ import {
   Moon,
   PackageCheck,
   ScrollText,
+  ServerCog,
   Settings as SettingsIcon,
   Sun,
   SunMoon,
+  UserRound,
   WifiOff,
 } from "lucide-react";
 
@@ -35,6 +37,7 @@ const NAV = [
   { to: "/backup", label: "备份", icon: Archive },
   { to: "/updates", label: "更新", icon: PackageCheck },
   { to: "/audit", label: "审计", icon: ScrollText },
+  { to: "/system", label: "系统", icon: ServerCog },
   { to: "/settings", label: "设置", icon: SettingsIcon },
 ];
 
@@ -161,6 +164,14 @@ export function AppShell() {
         </div>
         <div className="ml-auto flex items-center gap-1.5">
           <ConnectionDot />
+          <NavLink
+            to="/account"
+            aria-label="账号与安全"
+            title="账号与安全"
+            className="flex size-8 items-center justify-center rounded-lg text-soft transition-colors hover:bg-sunken hover:text-ink"
+          >
+            <UserRound className="size-4" />
+          </NavLink>
           <Button variant="ghost" size="icon-sm" onClick={cycle} aria-label={THEME_LABEL[mode]} title={THEME_LABEL[mode]}>
             <ThemeIcon className="size-4" />
           </Button>

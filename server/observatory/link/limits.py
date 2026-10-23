@@ -1,8 +1,14 @@
 """Link rate limiting helpers (spec §5.5: RATE → 429 + retryable).
 
-Both carriers share one limiter from ``app.state.link_limiter``. Keys are
-derived from the token's SHA-256 (never the raw token) or the client IP when the
-request is unauthenticated, so one noisy device cannot starve the fleet.
+Two buckets guard every carrier request:
+
+* a token bucket (SHA-256 of the token, never the raw token) so one noisy device
+  cannot starve the fleet;
+* a per-IP bucket that applies to authenticated and unauthenticated traffic, so
+  rotating random tokens from one address cannot dodge the limiter.
+
+The stricter of the two wins; the 429 carries ``Retry-After`` (and the WS close
+path logs the IP + retry delay before closing with 4429).
 """
 
 from __future__ import annotations
@@ -27,21 +33,30 @@ def client_ip(headers: Any, client: Any, settings: Settings) -> str:
     return str(host or "unknown")
 
 
+def ip_rate_key(ip: str) -> str:
+    return f"link-ip:{ip or 'unknown'}"
+
+
 def rate_key(token: str, ip: str) -> str:
     cleaned = (token or "").strip()
     if cleaned:
         digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:16]
         return f"link:{digest}"
-    return f"link-ip:{ip}"
+    return ip_rate_key(ip)
 
 
-def enforce(limiter: Any, token: str, ip: str) -> None:
-    """Raise :class:`AppError` RATE when this token/IP exceeds its window."""
+def enforce(limiter: Any, ip_limiter: Any, token: str, ip: str) -> None:
+    """Raise :class:`AppError` RATE when the token or client IP exceeds its window."""
 
-    if limiter is None:
-        return
-    if not limiter.allow(rate_key(token, ip)):
-        raise AppError.rate(RATE_MESSAGE)
+    retry_after = 0
+    key = rate_key(token, ip)
+    if limiter is not None and not limiter.allow(key):
+        retry_after = max(retry_after, int(limiter.retry_after(key)))
+    ip_key = ip_rate_key(ip)
+    if ip_limiter is not None and not ip_limiter.allow(ip_key):
+        retry_after = max(retry_after, int(ip_limiter.retry_after(ip_key)))
+    if retry_after:
+        raise AppError.rate(RATE_MESSAGE, retry_after=retry_after)
 
 
-__all__ = ["RATE_MESSAGE", "client_ip", "enforce", "rate_key"]
+__all__ = ["RATE_MESSAGE", "client_ip", "enforce", "ip_rate_key", "rate_key"]

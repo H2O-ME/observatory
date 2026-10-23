@@ -12,7 +12,6 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.clock import now_ms
