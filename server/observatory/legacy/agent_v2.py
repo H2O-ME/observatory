@@ -42,6 +42,7 @@ from ..console.deps import client_ip, store
 from ..console.dto import device_safe_config
 from ..console.install import consume_install_token, validate_install_token
 from ..console.updates import PackageService
+from ..link.agent_state import apply_agent_report
 from ..link.registry import registry as links
 from ..link.session import AgentSession
 
@@ -391,12 +392,7 @@ async def heartbeat(
     device: Device = Depends(_require_device),
 ) -> dict[str, Any]:
     settings = request.app.state.settings
-    device.last_seen_ms = now_ms()
-    device.protocol = 3 if int(device.protocol or 0) == 3 else 2
-    if payload.get("agent_version"):
-        device.agent_version = str(payload["agent_version"])[:30]
-    if payload.get("boot_id"):
-        device.boot_id = str(payload["boot_id"])[:64]
+    apply_agent_report(device, payload, protocol=3 if int(device.protocol or 0) == 3 else 2)
     _merge_report(device, sysinfo=payload.get("sysinfo"), state=payload.get("state"))
     await session.commit()
 
@@ -642,11 +638,7 @@ async def _handle_text(
             row = await session.get(Device, agent_session.device_id)
             if row is None:
                 return
-            row.agent_version = str(message.get("agent_version", row.agent_version))[:30]
-            row.last_seen_ms = now_ms()
-            row.protocol = 3 if int(row.protocol or 0) == 3 else 2
-            if message.get("boot_id"):
-                row.boot_id = str(message["boot_id"])[:64]
+            apply_agent_report(row, message, protocol=3 if int(row.protocol or 0) == 3 else 2)
             _merge_report(row, sysinfo=message.get("sysinfo"), state=message.get("state"))
             await session.commit()
             config = device_safe_config(await _effective(session, row))
@@ -657,12 +649,7 @@ async def _handle_text(
             row = await session.get(Device, agent_session.device_id)
             if row is None:
                 return
-            row.last_seen_ms = now_ms()
-            row.protocol = 3 if int(row.protocol or 0) == 3 else 2
-            if message.get("agent_version"):
-                row.agent_version = str(message["agent_version"])[:30]
-            if message.get("boot_id"):
-                row.boot_id = str(message["boot_id"])[:64]
+            apply_agent_report(row, message, protocol=3 if int(row.protocol or 0) == 3 else 2)
             _merge_report(row, sysinfo=message.get("sysinfo"), state=message.get("state"))
             await session.commit()
             config = await _effective(session, row)

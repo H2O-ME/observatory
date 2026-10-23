@@ -18,6 +18,7 @@ from ..core.crypto import DEVICE_TOKEN_HEADER
 from ..core.errors import AppError
 from ..core.log import log_event
 from .agent_config import build_agent_config
+from .agent_state import make_agent_report_reporter
 from .envelope import UplinkBatch, decode_uplink_batch, encode_downlink_batch
 from .journal import CommandJournal
 from .limits import client_ip, enforce
@@ -88,6 +89,7 @@ async def link_http(
             carrier="http",
             protocol=batch.protocol,
             agent_config=await build_agent_config(request.app, identity.settings),
+            device_reporter=make_agent_report_reporter(request.app),
         )
         await registry.register(identity.device_id, session)
         replayed = await session.replay_pending()

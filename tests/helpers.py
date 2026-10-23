@@ -122,6 +122,38 @@ def seed_device(client: object, *, uid: str = "OBS-V3-TEST", token: str = "v3-te
     return client.portal.call(insert)  # type: ignore[attr-defined]
 
 
+def seed_agent_package(client: object, version: str = "0.3.0") -> str:
+    """造一个真实可下载的 agent 更新包（DB 行 + packages 目录文件），返回 sha256。
+
+    文件内容必须是可解压 zip 的"外观"由下载/更新链路自行决定；这里用固定字节，
+    N2 只要求 sha256 与下载字节一致且 offer 非空。
+    """
+
+    import hashlib  # noqa: PLC0415
+    import zipfile  # noqa: PLC0415
+    from io import BytesIO  # noqa: PLC0415
+
+    app = client.app  # type: ignore[attr-defined]
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("observatory-agent.exe", b"fake-agent-binary")
+    data = buffer.getvalue()
+    digest = hashlib.sha256(data).hexdigest()
+    filename = f"observatory-agent-{version}.zip"
+
+    async def save() -> str:
+        from observatory.console.updates import PackageService  # noqa: PLC0415
+
+        async with app.state.db.sessionmaker() as session:
+            service = PackageService(app.state.settings)
+            package = await service.save(session, filename=filename, data=data, notes="pytest")
+            await session.commit()
+            return str(package.version)
+
+    client.portal.call(save)  # type: ignore[attr-defined]
+    return digest
+
+
 __all__ = [
     "REPO_ROOT",
     "SERVER_DIR",
@@ -133,5 +165,6 @@ __all__ = [
     "legacy_token",
     "prepare_env",
     "running_app",
+    "seed_agent_package",
     "seed_device",
 ]

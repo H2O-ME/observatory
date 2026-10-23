@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import importlib
 import logging
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ from .core.crypto import RateLimiter
 from .core.db import Database
 from .core.log import configure_logging, log_event
 from .core.models import Package
+from .core.settings_spec import SPECS
 from .link.carrier_http import router as link_http_router
 from .link.carrier_ws import router as link_ws_router
 from .link.journal import CommandJournal
@@ -39,8 +41,9 @@ log = logging.getLogger(__name__)
 OPTIONAL_PACKAGES = (("observatory.console", "console"),)
 
 #: Media has no HTTP router (its API lives in console); it is wired via
-#: ``media.configure/start/stop`` below, and retention runs every housekeeping tick.
-MEDIA_RETENTION_EVERY = 1
+#: ``media.configure/start/stop`` below. Retention is expensive (unlink per frame),
+#: so it runs on its own low-frequency schedule, not on every housekeeping tick.
+MEDIA_RETENTION_KEY = "media_retention_interval_s"
 
 
 def _load_media() -> Any | None:
@@ -77,22 +80,104 @@ async def _stop_media(app: FastAPI) -> None:
         log.exception("media layer failed to stop cleanly (%s)", exc)
 
 
+async def _media_retention_interval_s(app: FastAPI) -> int:
+    """Effective retention cadence from runtime settings, clamped by its Spec."""
+
+    spec = SPECS[MEDIA_RETENTION_KEY]
+    value: Any = spec.default
+    provider = getattr(app.state, "runtime_settings_provider", None)
+    database = getattr(app.state, "db", None)
+    if provider is not None and database is not None:
+        try:
+            async with database.sessionmaker() as session:
+                runtime = await provider(session)
+            value = runtime.get(MEDIA_RETENTION_KEY, value)
+        except Exception as exc:  # noqa: BLE001 - fall back to the default cadence
+            log_event(log, logging.WARNING, "housekeeping.runtime_settings_failed", error=str(exc))
+    try:
+        interval = int(value)
+    except (TypeError, ValueError):
+        interval = int(spec.default)
+    minimum = int(spec.minimum if spec.minimum is not None else interval)
+    maximum = int(spec.maximum if spec.maximum is not None else interval)
+    return max(minimum, min(interval, maximum))
+
+
+async def _run_media_retention(app: FastAPI) -> None:
+    """One retention pass in a background task; logs stats + wall time."""
+
+    media = getattr(app.state, "media", None)
+    database = getattr(app.state, "db", None)
+    if media is None or database is None:
+        return
+    started = time.monotonic()
+    try:
+        async with database.sessionmaker() as session:
+            stats = await media.run_retention(session) or {}
+        duration_ms = int((time.monotonic() - started) * 1000)
+        removed = sum(
+            int(stats.get(key, 0) or 0)
+            for key in ("frames", "dangling", "quota_reclaimed", "archives", "audit", "commands")
+        )
+        log_event(
+            log,
+            logging.INFO,
+            "housekeeping.media_retention",
+            frames=int(stats.get("frames", 0) or 0),
+            frames_bytes=int(stats.get("frames_bytes", 0) or 0),
+            removed=removed,
+            orphans=int(stats.get("orphans", 0) or 0),
+            duration_ms=duration_ms,
+            dangling=int(stats.get("dangling", 0) or 0),
+            quota_reclaimed=int(stats.get("quota_reclaimed", 0) or 0),
+            audit=int(stats.get("audit", 0) or 0),
+            commands=int(stats.get("commands", 0) or 0),
+            archives=int(stats.get("archives", 0) or 0),
+            archive_enqueued=int(stats.get("archive_enqueued", 0) or 0),
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - maintenance must never kill the loop
+        duration_ms = int((time.monotonic() - started) * 1000)
+        log_event(
+            log,
+            logging.ERROR,
+            "housekeeping.media_retention_failed",
+            duration_ms=duration_ms,
+            error=str(exc),
+        )
+    finally:
+        app.state.retention_task = None
+
+
 async def _housekeeping(app: FastAPI) -> None:
     interval = app.state.settings.housekeeping_interval_s
-    tick = 0
+    app.state.retention_task = None
+    app.state.last_retention_at = 0.0
     while True:
         await asyncio.sleep(interval)
-        tick += 1
         try:
             expired = await app.state.journal.expire_stale()
             if expired:
                 log_event(log, logging.INFO, "housekeeping.commands_expired", count=expired)
             media = getattr(app.state, "media", None)
-            if media is not None and tick % MEDIA_RETENTION_EVERY == 0:
-                async with app.state.db.sessionmaker() as session:
-                    stats = await media.run_retention(session)
-                if stats:
-                    log_event(log, logging.INFO, "housekeeping.media_retention", **{str(k): v for k, v in stats.items()})
+            if media is not None:
+                task = app.state.retention_task
+                if task is not None and task.done():
+                    app.state.retention_task = None
+                    task = None
+                # Only refresh the cadence while retention is idle: a long pass
+                # holds the DB, and a settings read here must not wait behind it.
+                if task is None:
+                    app.state.media_retention_interval_s = await _media_retention_interval_s(app)
+                retention_interval_s = app.state.media_retention_interval_s
+                now = time.monotonic()
+                if task is None and now - app.state.last_retention_at >= retention_interval_s:
+                    app.state.last_retention_at = now
+                    app.state.retention_task = asyncio.create_task(
+                        _run_media_retention(app),
+                        name="observatory-media-retention",
+                    )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - maintenance must never kill the loop
@@ -145,6 +230,21 @@ def _load_agent_config_provider() -> Any | None:
     return provider
 
 
+def _load_runtime_settings_provider() -> Any | None:
+    """Console-backed reader for runtime settings scheduling (e.g. retention)."""
+
+    try:
+        from .console.deps import store
+    except ImportError as exc:
+        log.warning("console runtime-settings provider unavailable (%s); using spec defaults", exc)
+        return None
+
+    async def provider(session: Any) -> dict[str, Any]:
+        return await store().load(session)
+
+    return provider
+
+
 def _uptime_s(app: FastAPI) -> int:
     started = getattr(app.state, "started_at_ms", 0)
     return max(0, (clock.now_ms() - started) // 1000) if started else 0
@@ -172,6 +272,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.device_directory = DatabaseDeviceDirectory(database.sessionmaker, settings)
     app.state.started_at_ms = clock.now_ms()
     app.state.agent_config_provider = _load_agent_config_provider()
+    app.state.runtime_settings_provider = _load_runtime_settings_provider()
+    app.state.retention_task = None
+    app.state.media_retention_interval_s = int(SPECS[MEDIA_RETENTION_KEY].default)
     directory_name = type(app.state.device_directory).__name__
     latest_agent_version = None
     try:
@@ -209,6 +312,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         with contextlib.suppress(asyncio.CancelledError):
             # Reason: cancellation is the normal way to stop housekeeping.
             await task
+        retention_task = getattr(app.state, "retention_task", None)
+        if retention_task is not None and not retention_task.done():
+            retention_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                # Reason: a retention pass may be mid-unlink; cancel before DB close.
+                await retention_task
+        app.state.retention_task = None
         await _stop_media(app)
         closed = await registry.close_all()
         presence.reset()
@@ -235,6 +345,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.links = registry
     app.state.device_directory = None
     app.state.agent_config_provider = None
+    app.state.runtime_settings_provider = None
+    app.state.retention_task = None
+    app.state.media_retention_interval_s = int(SPECS[MEDIA_RETENTION_KEY].default)
     app.state.link_limiter = RateLimiter(settings.link_rate_limit, settings.link_rate_window_s)
 
     app.add_middleware(

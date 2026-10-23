@@ -88,7 +88,6 @@ def test_c2_frames_have_single_ingress() -> None:
     assert offenders == [], f"C2 违规: {offenders}"
 
 
-@pytest.mark.skip(reason="W1: 需要 C7（legacy 只被 main/装配处 import）")
 def test_c7_legacy_is_imported_only_by_assembly() -> None:
     offenders = []
     for path in SERVER_SRC.rglob("*.py"):
@@ -100,7 +99,6 @@ def test_c7_legacy_is_imported_only_by_assembly() -> None:
     assert offenders == [], f"C7 违规: {offenders}"
 
 
-@pytest.mark.skip(reason="W1: 需要 C4（registry 不允许被 console/业务直接读）")
 def test_c4_registry_not_read_outside_presence() -> None:
     allowed = {"presence.py", "registry.py", "session.py"}
     offenders = []
@@ -126,13 +124,12 @@ def _enrolled_token(client) -> str:
     return response.json()["token"]
 
 
-@pytest.mark.skip(reason="W1: 需要 HTTP 载体与 session 的 ack_id 推进（spec §5.6）")
-def test_ack_id_is_last_uplink_id() -> None:
+def test_ack_id_is_last_uplink_id(tmp_dir: Path) -> None:
     """ack_id = 服务端已处理的最后一条**上行** id；不是下行 id。"""
 
-    from fastapi.testclient import TestClient  # noqa: PLC0415
+    from tests.helpers import running_app  # noqa: PLC0415
 
-    with TestClient(_app()) as client:
+    with running_app(tmp_dir) as client:
         token = _enrolled_token(client)
         items = [
             {
@@ -153,20 +150,20 @@ def test_ack_id_is_last_uplink_id() -> None:
         assert response.json()["ack_id"] == "c"
 
 
-@pytest.mark.skip(reason="W1: 需要下行重投队列（spec §5.6，last_ack_id 抑制重发）")
-def test_last_ack_id_suppresses_downlink_redelivery() -> None:
+def test_last_ack_id_suppresses_downlink_redelivery(tmp_dir: Path) -> None:
     """请求带 last_ack_id=<下行 id> 时，服务端不再重发该下行。"""
 
-    from fastapi.testclient import TestClient  # noqa: PLC0415
+    from tests.helpers import running_app  # noqa: PLC0415
 
-    with TestClient(_app()) as client:
+    with running_app(tmp_dir) as client:
         token = _enrolled_token(client)
         headers = {"X-Device-Token": token}
         first = client.post("/api/v1/agent/link", headers=headers, json={"v": 3, "last_ack_id": "", "items": []})
         assert first.status_code == 200
         downlink_ids = [item["id"] for item in first.json()["items"]]
         if not downlink_ids:
-            pytest.skip("当前没有待下发信封，无法验证重投抑制")
+            # 新会话首帧必带 welcome；没有下行说明实现退化，直接失败而不是 skip
+            pytest.fail("首帧没有 welcome/下行，无法验证 last_ack_id 抑制重投")
         confirmed = downlink_ids[0]
         second = client.post(
             "/api/v1/agent/link",
@@ -177,20 +174,20 @@ def test_last_ack_id_suppresses_downlink_redelivery() -> None:
         assert confirmed not in [item["id"] for item in second.json()["items"]]
 
 
-@pytest.mark.skip(reason="W1: 需要 media/ingest 的 X-Frame-Id 幂等（spec §5.6）")
-def test_v3_frame_upload_contract() -> None:
+def test_v3_frame_upload_contract(tmp_dir: Path) -> None:
     """帧上传：device_ts_ms 查询参数 + X-Frame-Id + image/jpeg；重复 id 返回同一 ts_ms。"""
 
     import io  # noqa: PLC0415
 
-    from fastapi.testclient import TestClient  # noqa: PLC0415
     from PIL import Image  # noqa: PLC0415
+
+    from tests.helpers import running_app  # noqa: PLC0415
 
     buffer = io.BytesIO()
     Image.new("RGB", (320, 200), (32, 64, 96)).save(buffer, format="JPEG", quality=80)
     body = buffer.getvalue()
 
-    with TestClient(_app()) as client:
+    with running_app(tmp_dir) as client:
         token = _enrolled_token(client)
         headers = {
             "X-Device-Token": token,

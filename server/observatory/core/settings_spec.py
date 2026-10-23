@@ -55,6 +55,7 @@ SPECS: dict[str, Spec] = {
     "auto_update": Spec("bool", True, per_device=True, description="允许自动更新"),
     # ---- retention ---------------------------------------------------------
     "frame_retention_days": Spec("int", 14, 1, 365, description="画面保留天数"),
+    "media_retention_interval_s": Spec("int", 300, 30, 86_400, description="媒体保留执行间隔（秒）"),
     "audit_retention_days": Spec("int", 180, 7, 3650, description="审计保留天数"),
     "command_retention_days": Spec("int", 30, 1, 365, description="命令保留天数"),
     "storage_quota_mb": Spec("int", 4096, 256, 1_048_576, description="数据卷配额（MB）"),

@@ -18,6 +18,7 @@ from ..core.clock import Clock, SYSTEM_CLOCK, client_timeout_s, server_deadline_
 from ..core.config import Settings, resolve_version
 from ..core.errors import AppError
 from ..core.log import log_event, redact
+from .agent_state import DeviceReporter
 from .envelope import (
     PROTOCOL_VERSION,
     Envelope,
@@ -129,6 +130,7 @@ class AgentSession:
         carrier: str = "http",
         protocol: int = PROTOCOL_VERSION,
         agent_config: Mapping[str, Any] | None = None,
+        device_reporter: DeviceReporter | None = None,
     ) -> None:
         self.device_id = int(device_id)
         self.uid = str(uid)
@@ -141,6 +143,9 @@ class AgentSession:
         #: injects ``agent_view(SettingsStore.effective(...))`` so link never
         #: imports console and there is only one whitelist implementation.
         self.agent_config: dict[str, Any] = dict(agent_config or {})
+        #: One DB write path for hello/heartbeat (agent_version/boot_id/protocol/
+        #: last_seen_ms); carriers inject it, session never talks to the DB itself.
+        self.device_reporter = device_reporter
         self.last_seen_ms = self.clock.now_ms()
         self.connected_at_ms = self.last_seen_ms
         self.agent_version = ""
@@ -353,11 +358,13 @@ class AgentSession:
         if kind == "hello":
             self._apply_agent_info(envelope.body)
             self.protocol = envelope.v
+            await self._persist_device_report(envelope.body, envelope.v)
             self._ack_from_body(envelope.body)
             return [self._welcome()]
 
         if kind == "heartbeat":
             self._apply_agent_info(envelope.body)
+            await self._persist_device_report(envelope.body, envelope.v)
             self._ack_from_body(envelope.body)
             return []
 
@@ -477,6 +484,22 @@ class AgentSession:
         boot_id = body.get("boot_id")
         if isinstance(boot_id, str):
             self.boot_id = boot_id[:64]
+
+    async def _persist_device_report(self, body: dict[str, Any], protocol: int) -> None:
+        """Persist the report through the injected writer (single DB fact)."""
+
+        if self.device_reporter is None:
+            return
+        try:
+            await self.device_reporter(self.device_id, dict(body), int(protocol))
+        except Exception as exc:  # noqa: BLE001 - a DB hiccup must not drop the link
+            log_event(
+                log,
+                logging.ERROR,
+                "session.device_report_failed",
+                device_id=self.device_id,
+                error=str(exc),
+            )
 
     def _ack_from_body(self, body: dict[str, Any]) -> None:
         """Advance the **downlink** cursor (the agent's ``last_ack_id``)."""

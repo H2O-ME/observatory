@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -235,150 +236,238 @@ def _legacy_app():
     return create_app()
 
 
-@pytest.mark.skip(reason="W1: 等待 server/observatory/legacy/agent_v2.py 提供旧端点")
-def test_replay_http_legacy_flow() -> None:
+def test_replay_http_legacy_flow(tmp_dir: Path) -> None:
     """旧端 HTTP 载体完整回放：enroll → heartbeat → poll → result → frames。"""
 
-    from fastapi.testclient import TestClient
+    from tests.helpers import legacy_token, running_app
 
-    client = TestClient(_legacy_app())
-    enroll = client.post("/api/v1/agent/enroll", json=legacy.enroll_request(code="test-enroll-code"))
-    assert enroll.status_code == 200, enroll.text
-    body = enroll.json()
-    assert set(body) >= legacy.ENROLL_RESPONSE_REQUIRED_KEYS
-    token = body["token"]
+    with running_app(tmp_dir) as client:
+        enroll = client.post("/api/v1/agent/enroll", json=legacy.enroll_request(code="test-enroll-code"))
+        assert enroll.status_code == 200, enroll.text
+        body = enroll.json()
+        assert set(body) >= legacy.ENROLL_RESPONSE_REQUIRED_KEYS
+        token = body["token"]
 
-    heartbeat = client.post(
-        "/api/v1/agent/heartbeat",
-        headers={legacy.DEVICE_TOKEN_HEADER: token},
-        json=legacy.HEARTBEAT_REQUEST,
-    )
-    assert heartbeat.status_code == 200, heartbeat.text
-    assert set(heartbeat.json()) >= legacy.HEARTBEAT_RESPONSE_REQUIRED_KEYS
+        heartbeat = client.post(
+            "/api/v1/agent/heartbeat",
+            headers={legacy.DEVICE_TOKEN_HEADER: token},
+            json=legacy.HEARTBEAT_REQUEST,
+        )
+        assert heartbeat.status_code == 200, heartbeat.text
+        assert set(heartbeat.json()) >= legacy.HEARTBEAT_RESPONSE_REQUIRED_KEYS
 
-    polled = client.get(
-        "/api/v1/agent/commands", params={"wait": 0}, headers={legacy.DEVICE_TOKEN_HEADER: token}
-    )
-    assert polled.status_code == 200
-    assert set(polled.json()) >= legacy.POLL_RESPONSE_REQUIRED_KEYS
+        polled = client.get(
+            "/api/v1/agent/commands", params={"wait": 0}, headers={legacy.DEVICE_TOKEN_HEADER: token}
+        )
+        assert polled.status_code == 200
+        assert set(polled.json()) >= legacy.POLL_RESPONSE_REQUIRED_KEYS
 
-    upload = client.post(
-        "/api/v1/agent/frames",
-        params=legacy.FRAME_UPLOAD_QUERY,
-        headers={legacy.DEVICE_TOKEN_HEADER: token, **legacy.FRAME_UPLOAD_HEADERS},
-        content=b"\x89PNG\r\n\x1a\n" + b"0" * 64,
-    )
-    assert upload.status_code in (200, 422), upload.text
+        # 旧端上传真实 WebP 帧（Content-Type/webp + 旧 ts_ms 查询参数）
+        from io import BytesIO
+
+        from PIL import Image
+
+        buffer = BytesIO()
+        Image.new("RGB", (8, 8), color=(10, 20, 30)).save(buffer, format="WEBP")
+        upload = client.post(
+            "/api/v1/agent/frames",
+            params=legacy.FRAME_UPLOAD_QUERY,
+            headers={legacy.DEVICE_TOKEN_HEADER: token, **legacy.FRAME_UPLOAD_HEADERS},
+            content=buffer.getvalue(),
+        )
+        assert upload.status_code == 200, upload.text
 
 
-@pytest.mark.skip(reason="W1: 等待 legacy/agent_v2.py 的 WS 兼容通道")
-def test_replay_ws_legacy_flow() -> None:
+def test_replay_ws_legacy_flow(tmp_dir: Path) -> None:
     """旧端 WS 载体：welcome 形状、心跳回应、命令下发与回执。"""
 
-    from fastapi.testclient import TestClient
+    from tests.helpers import legacy_token, running_app
 
-    client = TestClient(_legacy_app())
-    with client.websocket_connect(f"/api/v1/agent/ws?token=legacy-token") as ws:
-        welcome = ws.receive_json()
-        assert welcome["t"] == "welcome"
-        assert set(welcome) >= legacy.WS_SERVER_WELCOME_REQUIRED_KEYS
-        ws.send_json(legacy.WS_CLIENT_HEARTBEAT)
-        reply = ws.receive_json()
-        assert reply["t"] in {"pong", "config", "command"}
-
-
-@pytest.mark.skip(reason="W1: 新 app 尚未挂载 legacy 端点，无法断言端点在一个 app 内共存")
-def test_all_legacy_endpoints_registered_on_new_app() -> None:
-    app = _legacy_app()
-    paths = {route.path for route in app.routes if hasattr(route, "path")}
-    assert "/api/v1/agent/enroll" in paths
-    assert "/api/v1/agent/heartbeat" in paths
-    assert "/api/v1/agent/commands" in paths
-    assert "/api/v1/agent/commands/{command_id}/result" in paths
-    assert "/api/v1/agent/frames" in paths
-    assert "/api/v1/agent/state" in paths
-    assert "/api/v1/agent/uninstall/ack" in paths
-    assert "/api/v1/agent/ws" in paths
+    with running_app(tmp_dir) as client:
+        token = legacy_token(client)
+        with client.websocket_connect(f"/api/v1/agent/ws?token={token}") as ws:
+            welcome = ws.receive_json()
+            assert welcome["t"] == "welcome"
+            assert set(welcome) >= legacy.WS_SERVER_WELCOME_REQUIRED_KEYS
+            ws.send_json(legacy.WS_CLIENT_HEARTBEAT)
+            reply = ws.receive_json()
+            assert reply["t"] in {"pong", "config", "command"}
 
 
-@pytest.mark.skip(reason="W1: 需要在被测端实现 update 包发布 + legacy update 下发")
-def test_legacy_update_offer_always_has_sha256() -> None:
+def test_all_legacy_endpoints_registered_on_new_app(tmp_dir: Path) -> None:
+    """用真实请求探活 legacy 端点（FastAPI 惰性 include_router 让 app.routes 看不到子路由）。"""
+
+    from tests.helpers import running_app
+
+    probes = [
+        ("POST", "/api/v1/agent/enroll"),
+        ("POST", "/api/v1/agent/heartbeat"),
+        ("GET", "/api/v1/agent/commands"),
+        ("POST", "/api/v1/agent/commands/unknown-command/result"),
+        ("POST", "/api/v1/agent/frames"),
+        ("GET", "/api/v1/agent/state"),
+        ("POST", "/api/v1/agent/uninstall/ack"),
+    ]
+    with running_app(tmp_dir) as client:
+        for method, path in probes:
+            if method == "GET":
+                response = client.get(path)
+            else:
+                response = client.post(path, json={})
+            assert response.status_code != 404, f"{method} {path} 未注册（404）"
+            assert response.status_code != 405, f"{method} {path} 方法不匹配（405）"
+
+
+def test_legacy_update_offer_always_has_sha256(tmp_dir: Path) -> None:
     """A3：发给 0.2.10 的 update 必须带非空 sha256，否则旧端跳过校验。"""
 
-    from fastapi.testclient import TestClient
+    from tests.helpers import legacy_token, running_app, seed_agent_package
 
-    client = TestClient(_legacy_app())
-    enroll = client.post("/api/v1/agent/enroll", json=legacy.enroll_request(code="test-enroll-code"))
-    token = enroll.json()["token"]
-    heartbeat = client.post(
-        "/api/v1/agent/heartbeat",
-        headers={legacy.DEVICE_TOKEN_HEADER: token},
-        json=legacy.HEARTBEAT_REQUEST,
-    ).json()
-    offer = heartbeat.get("update")
-    if offer is not None:
+    with running_app(tmp_dir) as client:
+        digest = seed_agent_package(client, version="0.3.0")
+        token = legacy_token(client)
+        heartbeat = client.post(
+            "/api/v1/agent/heartbeat",
+            headers={legacy.DEVICE_TOKEN_HEADER: token},
+            json=legacy.HEARTBEAT_REQUEST,
+        ).json()
+        offer = heartbeat.get("update")
+        assert offer is not None, "有更新包时必须向 0.2.10 设备下发 offer"
+        assert offer["version"] == "0.3.0"
         assert isinstance(offer.get("sha256"), str) and len(offer["sha256"]) == 64
+        assert offer["sha256"] == digest
 
 
-@pytest.mark.skip(reason="W1: 需要新核心 settings 下发路径 + A4 断言实现")
-def test_legacy_config_contains_no_secret_keys() -> None:
+def test_legacy_config_contains_no_secret_keys(tmp_dir: Path) -> None:
     """A4：下发给旧端的 config（enroll/heartbeat/WS config）不含 SECRET_KEYS。"""
 
-    from fastapi.testclient import TestClient
+    from tests.helpers import legacy_token, running_app
 
-    client = TestClient(_legacy_app())
-    enroll = client.post("/api/v1/agent/enroll", json=legacy.enroll_request(code="test-enroll-code"))
-    config = enroll.json()["config"]
-    forbidden = {"archive_token", "secret_key", "admin_password", "enroll_code", "totp_secret"}
-    assert not (forbidden & set(config)), f"配置泄漏: {forbidden & set(config)}"
+    with running_app(tmp_dir) as client:
+        enroll = client.post("/api/v1/agent/enroll", json=legacy.enroll_request(code="test-enroll-code"))
+        assert enroll.status_code == 200, enroll.text
+        config = enroll.json()["config"]
+        forbidden = {"archive_token", "secret_key", "admin_password", "enroll_code", "totp_secret"}
+        assert not (forbidden & set(config)), f"配置泄漏: {forbidden & set(config)}"
 
-
-@pytest.mark.skip(reason="W1: 需要 401 → 自动重注册链路")
-def test_old_agent_401_triggers_reregistration() -> None:
-    """旧端收到 401 会清 token 重新 enroll（runner.py:389-392）；服务端必须允许。"""
-
-    from fastapi.testclient import TestClient
-
-    client = TestClient(_legacy_app())
-    denied = client.post(
-        "/api/v1/agent/heartbeat",
-        headers={legacy.DEVICE_TOKEN_HEADER: "invalid-token"},
-        json=legacy.HEARTBEAT_REQUEST,
-    )
-    assert denied.status_code == 401
-    assert denied.json()["detail"] == "设备令牌无效"
-    fresh = client.post("/api/v1/agent/enroll", json=legacy.enroll_request(code="test-enroll-code"))
-    assert fresh.status_code == 200
+        token = legacy_token(client)
+        heartbeat = client.post(
+            "/api/v1/agent/heartbeat",
+            headers={legacy.DEVICE_TOKEN_HEADER: token},
+            json=legacy.HEARTBEAT_REQUEST,
+        ).json()
+        heartbeat_config = heartbeat.get("config") or {}
+        assert not (forbidden & set(heartbeat_config)), f"heartbeat 配置泄漏: {forbidden & set(heartbeat_config)}"
 
 
-@pytest.mark.skip(reason="W1: 需要 legacy 端点 + 帧解析 + N2 升级包发布链路")
-def test_n2_zero_reinstall_upgrade() -> None:
+def test_old_agent_401_triggers_reregistration(tmp_dir: Path) -> None:
+    """旧端收到 401 会清 token 重新 enroll（runner.py:389-392）；服务端必须允许。
+
+    旧端只看状态码，但 0.3.0 的 401 体是结构化信封 `{code,message,retryable}`；
+    这里同时锁定"状态码 + 信封形状"，防止兼容层退回到 `{detail}`。
+    """
+
+    from tests.helpers import running_app
+
+    with running_app(tmp_dir) as client:
+        denied = client.post(
+            "/api/v1/agent/heartbeat",
+            headers={legacy.DEVICE_TOKEN_HEADER: "invalid-token"},
+            json=legacy.HEARTBEAT_REQUEST,
+        )
+        assert denied.status_code == 401
+        payload = denied.json()
+        assert payload.get("code") == "AUTH", payload
+        assert isinstance(payload.get("message"), str) and payload["message"], payload
+        assert payload.get("retryable") is False, payload
+
+        fresh = client.post("/api/v1/agent/enroll", json=legacy.enroll_request(code="test-enroll-code"))
+        assert fresh.status_code == 200
+        assert fresh.json().get("token")
+
+
+def test_n2_zero_reinstall_upgrade(tmp_dir: Path) -> None:
     """N2 端到端：0.2.10 旧端跑通旧协议 → 收到 0.3.0 更新 → 新端以 v3 重连。"""
 
-    from fastapi.testclient import TestClient
-
-    client = TestClient(_legacy_app())
-    # 1) 旧协议继续可用
-    enroll = client.post("/api/v1/agent/enroll", json=legacy.enroll_request(code="test-enroll-code"))
-    assert enroll.status_code == 200
-    token = enroll.json()["token"]
-    # 2) 旧端拿到 0.3.0 更新提供（非空 sha256）
-    heartbeat = client.post(
-        "/api/v1/agent/heartbeat",
-        headers={legacy.DEVICE_TOKEN_HEADER: token},
-        json=legacy.HEARTBEAT_REQUEST,
-    ).json()
-    offer = heartbeat.get("update")
-    assert offer is not None, "0.3.0 服务器必须向 0.2.10 设备提供更新"
-    assert offer["version"] == "0.3.0"
-    assert len(offer["sha256"]) == 64
-    # 3) 旧端自己拼的下载路径可用，且字节摘要与 offer 一致
-    package = client.get(f"/api/v1/public/agent/{offer['version']}/package")
-    assert package.status_code == 200
     import hashlib
+    from io import BytesIO
 
-    assert hashlib.sha256(package.content).hexdigest() == offer["sha256"]
-    # 4) 替换后新端以 v3 信封重连（由 W1/W2 的 v3 contract 测试覆盖）
-    #    这里只断言设备 uid 与 token 未变，即"零重装"
-    devices = client.get("/api/v1/devices", headers={"Authorization": "Bearer test-session"})
-    assert devices.status_code in (200, 401)
+    from PIL import Image
+    from sqlalchemy import select
+
+    from observatory.core.models import Device
+    from observatory.link.session import AgentSession
+    from tests.helpers import running_app, seed_agent_package
+
+    with running_app(tmp_dir) as client:
+        digest = seed_agent_package(client, version="0.3.0")
+
+        # 1) 旧协议继续可用（真实 enroll 报文）
+        enroll = client.post("/api/v1/agent/enroll", json=legacy.enroll_request(code="test-enroll-code"))
+        assert enroll.status_code == 200, enroll.text
+        body = enroll.json()
+        token = body["token"]
+        uid = body["device_uid"]
+
+        # 2) 旧端拿到 0.3.0 更新提供（非空 sha256）
+        heartbeat = client.post(
+            "/api/v1/agent/heartbeat",
+            headers={legacy.DEVICE_TOKEN_HEADER: token},
+            json=legacy.HEARTBEAT_REQUEST,
+        ).json()
+        offer = heartbeat.get("update")
+        assert offer is not None, "0.3.0 服务器必须向 0.2.10 设备提供更新"
+        assert offer["version"] == "0.3.0"
+        assert len(offer["sha256"]) == 64
+        assert offer["sha256"] == digest
+
+        # 3) 旧端自己拼的下载路径可用，且字节摘要与 offer 一致
+        package = client.get(f"/api/v1/public/agent/{offer['version']}/package")
+        assert package.status_code == 200, package.text
+        assert hashlib.sha256(package.content).hexdigest() == offer["sha256"]
+
+        # 4) 旧 ts_ms 帧仍可入库（升级前采集的数据不能丢）
+        buffer = BytesIO()
+        Image.new("RGB", (8, 8), color=(1, 2, 3)).save(buffer, format="WEBP")
+        upload = client.post(
+            "/api/v1/agent/frames",
+            params=legacy.FRAME_UPLOAD_QUERY,
+            headers={legacy.DEVICE_TOKEN_HEADER: token, **legacy.FRAME_UPLOAD_HEADERS},
+            content=buffer.getvalue(),
+        )
+        assert upload.status_code == 200, upload.text
+
+        # 5) 同一 token 以 v3 信封重连 → 同一设备（零重装），registry 仍是单个 AgentSession
+        hello = {
+            "v": 3,
+            "id": "n2-upgrade-hello",
+            "t": "hello",
+            "ts_ms": 1_760_000_100_000,
+            "body": {
+                "agent_version": "0.3.0",
+                "protocol": 3,
+                "boot_id": "n2-boot",
+                "device_uid": uid,
+                "last_ack_id": "",
+                "device_time_ms": 1_760_000_100_000,
+            },
+        }
+        upgraded = client.post(
+            "/api/v1/agent/link",
+            headers={"X-Device-Token": token},
+            json={"v": 3, "last_ack_id": "", "items": [hello]},
+        )
+        assert upgraded.status_code == 200, upgraded.text
+        assert upgraded.json()["items"][0]["t"] == "welcome"
+
+        sessions = client.app.state.links.sessions()
+        assert sessions and all(isinstance(session, AgentSession) for session in sessions)
+
+        async def device_rows() -> list[Device]:
+            async with client.app.state.db.sessionmaker() as session:
+                return list((await session.execute(select(Device).where(Device.uid == uid))).scalars().all())
+
+        rows = client.portal.call(device_rows)
+        assert len(rows) == 1, "N2 零重装：同一 uid 只能有一条设备记录"
+        assert rows[0].token_hash
+        assert "UPLINK" not in str(rows[0].agent_version)  # 只确认行可读；版本由 hello 更新

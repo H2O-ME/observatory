@@ -210,6 +210,12 @@ def python_version() -> str:
     return (completed.stdout or completed.stderr).decode("utf-8", "replace").strip()
 
 
+def pipe_session_id() -> int:
+    """随机的管道名后缀：不占用真实会话名，机器上即使装了真实服务也不冲突。"""
+
+    return 500_000 + random.randint(0, 400_000)
+
+
 # ------------------------------------------------------------------ checks ---
 @check("environment")
 def check_environment(ctx: Ctx) -> str:
@@ -304,20 +310,26 @@ def check_pipe_identity(ctx: Ctx) -> str:
     _a, _c, win32file, _p, _s, _t = win32()
     from observatory_agent.win.pipe import PipeServer, pipe_name
 
-    def start_server(session_id: int, expected_image: str | None) -> PipeServer:
+    def start_server(pipe_sid: int, expected_session_id: int, expected_image: str | None) -> PipeServer:
         server = PipeServer(
-            session_id,
+            pipe_sid,
             allowed_user_sid=ctx.user_sid,
             on_message=lambda header, payload: None,
             expected_image_path=expected_image,
+            expected_session_id=expected_session_id,
         )
         server.start()
+        if not wait_until(lambda: server._handle is not None, timeout_s=5.0):
+            server.stop()
+            raise AssertionError(f"管道实例没有创建出来（{pipe_name(pipe_sid)}）")
         return server
 
-    accepted = start_server(ctx.session_id, str(Path(sys.executable)))
+    pipe_sid = pipe_session_id()
+
+    accepted = start_server(pipe_sid, ctx.session_id, str(Path(sys.executable)))
     client = None
     try:
-        client = readonly_client(pipe_name(ctx.session_id))
+        client = readonly_client(pipe_name(pipe_sid))
         if not wait_until(lambda: accepted.connected.is_set(), timeout_s=5.0):
             raise AssertionError("服务器没有接受身份合法的客户端")
         identity = accepted.last_client
@@ -334,10 +346,10 @@ def check_pipe_identity(ctx: Ctx) -> str:
         accepted.stop()
 
     # 镜像路径不匹配：会话与 SID 都对，只错镜像 → 必须拒绝。
-    rejected = start_server(ctx.session_id, str(Path(sys.executable).with_name("not-the-worker.exe")))
+    rejected = start_server(pipe_sid + 1, ctx.session_id, str(Path(sys.executable).with_name("not-the-worker.exe")))
     client = None
     try:
-        client = readonly_client(pipe_name(ctx.session_id))
+        client = readonly_client(pipe_name(pipe_sid + 1))
         time.sleep(1.0)
         assert not rejected.connected.is_set(), "镜像路径不匹配的客户端被接受了"
     finally:
@@ -347,11 +359,11 @@ def check_pipe_identity(ctx: Ctx) -> str:
         rejected.stop()
 
     # 期望会话号 ≠ 客户端真实会话：必须拒绝（期望值只影响校验，不影响管道名）。
-    other_session = ctx.session_id + 1000
-    wrong_session = start_server(other_session, None)
+    wrong_pipe = pipe_sid + 2
+    wrong_session = start_server(wrong_pipe, ctx.session_id + 1000, None)
     client = None
     try:
-        client = readonly_client(pipe_name(other_session))
+        client = readonly_client(pipe_name(wrong_pipe))
         time.sleep(1.0)
         assert not wrong_session.connected.is_set(), "会话号不匹配的客户端被接受了"
     finally:
@@ -368,8 +380,8 @@ def check_pipe_duplex(ctx: Ctx) -> str:
     from observatory_agent.core.envelope import new_envelope
     from observatory_agent.win.pipe import PipeClient, PipeServer, PipeUnavailable
 
-    # 管道名与“期望会话”同为 session_id，因此必须用本进程真实会话（沙箱里是 1）才能通过身份校验。
-    session_id = ctx.session_id
+    # 管道名用独立的随机后缀（不抢占真实会话名）；期望会话仍是本进程真实会话。
+    session_id = pipe_session_id()
     received: list[tuple[dict[str, Any], bytes]] = []
     mode = "production-DACL"
 
@@ -379,9 +391,13 @@ def check_pipe_duplex(ctx: Ctx) -> str:
             allowed_user_sid=ctx.user_sid,
             on_message=lambda header, payload: received.append((header, payload)),
             expected_image_path=str(Path(sys.executable)),
+            expected_session_id=ctx.session_id,
             security_attributes=external_attributes,
         )
         server.start()
+        if not wait_until(lambda: server._handle is not None, timeout_s=5.0):
+            server.stop()
+            raise AssertionError("duplex 管道实例没有创建出来")
         client = PipeClient(session_id)
         try:
             client.connect(timeout_s=10.0)
@@ -426,8 +442,14 @@ def check_pipe_stop_reclaim(ctx: Ctx) -> str:
 
     from observatory_agent.win.pipe import PipeServer, pipe_name
 
+    pipe_sid = pipe_session_id()
     for attempt in range(3):
-        server = PipeServer(ctx.session_id, allowed_user_sid=ctx.user_sid, on_message=lambda header, payload: None)
+        server = PipeServer(
+            pipe_sid,
+            allowed_user_sid=ctx.user_sid,
+            on_message=lambda header, payload: None,
+            expected_session_id=ctx.session_id,
+        )
         server.start()
         assert wait_until(lambda: server._handle is not None, timeout_s=5.0), f"第 {attempt + 1} 次没有创建出管道实例"
         started = time.monotonic()
@@ -435,8 +457,8 @@ def check_pipe_stop_reclaim(ctx: Ctx) -> str:
         elapsed = time.monotonic() - started
         assert elapsed < 5.0, f"stop() 用了 {elapsed:.1f}s（CloseHandle 未解开 ConnectNamedPipe？）"
         assert server._thread is None or not server._thread.is_alive(), "server 线程没有退出"
-    assert pipe_name(ctx.session_id).startswith("\\\\.\\pipe\\"), pipe_name(ctx.session_id)
-    return "同一会话名 create→stop→create 连续 3 次成功，stop() < 5s 且线程退出"
+    assert pipe_name(pipe_sid).startswith("\\\\.\\pipe\\"), pipe_name(pipe_sid)
+    return "同一管道名 create→stop→create 连续 3 次成功，stop() < 5s 且线程退出"
 @check("wts_sessions")
 def check_wts_sessions(ctx: Ctx) -> str:
     from observatory_agent.win.session import (

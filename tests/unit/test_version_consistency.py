@@ -42,7 +42,7 @@ def test_version_file_is_semver() -> None:
 
 def test_fallback_copies_match_version() -> None:
     version = _read(REPO_ROOT / "VERSION").strip()
-    assert _fallback_of(REPO_ROOT / "server/observatory/version.py") == version
+    assert _fallback_of(REPO_ROOT / "server/observatory/core/config.py") == version
     assert _fallback_of(REPO_ROOT / "agent/observatory_agent/version.py") == version
 
 
@@ -66,7 +66,7 @@ def test_set_version_targets_cover_the_copies() -> None:
 
     source = _read(REPO_ROOT / "tools/set_version.py")
     for fragment in (
-        "server/observatory/version.py",
+        "server/observatory/core/config.py",
         "agent/observatory_agent/version.py",
         "webui/package.json",
         "webui/package-lock.json",
