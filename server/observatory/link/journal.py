@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..core.clock import Clock, SYSTEM_CLOCK, now_ms
@@ -32,10 +32,15 @@ from .envelope import Result
 log = logging.getLogger(__name__)
 
 #: Commands whose result has been reported are finished from the bus' point of view.
-TERMINAL_COMMAND_STATUSES: frozenset[str] = frozenset({"ok", "error", "timeout", "cancelled"})
+#: Rows in a terminal status never change again (F20: `"failed"` is terminal —
+#: without it, REPLAY_EXHAUSTED rows leaked forever and a late result could
+#: overwrite an exhausted replay).
+TERMINAL_COMMAND_STATUSES: frozenset[str] = frozenset({"ok", "error", "timeout", "cancelled", "failed"})
 
 #: Replay budget: initial delivery + up to 5 reconnect attempts, then give up.
 MAX_REPLAY_ATTEMPTS = 5
+#: expire_stale handles at most this many rows per UPDATE (F59: bound one tick).
+EXPIRE_BATCH = 500
 REPLAY_BACKOFF_BASE_MS = 1_000
 REPLAY_BACKOFF_MAX_MS = 60_000
 REPLAY_EXHAUSTED = "REPLAY_EXHAUSTED"
@@ -222,29 +227,6 @@ class CommandJournal:
             row = await session.get(Command, command_id)
         return CommandRecord.from_model(row) if row is not None else None
 
-    async def claim_pending(self, device_id: int, limit: int = 10) -> list[CommandRecord]:
-        """Hand undelivered commands to the legacy poll carrier, marking them sent."""
-
-        statement = (
-            select(Command)
-            .where(Command.device_id == int(device_id), Command.status == "pending")
-            .order_by(Command.created_at_ms.asc())
-            .limit(max(1, limit))
-        )
-        now = self._clock.now_ms()
-        async with self._sessionmaker() as session:
-            rows = list((await session.execute(statement)).scalars().all())
-            if not rows:
-                return []
-            for row in rows:
-                row.status = "dispatched"
-                row.dispatched_at_ms = now
-                row.attempts = int(row.attempts or 0) + 1
-            await session.commit()
-            records = [CommandRecord.from_model(row) for row in rows]
-        log_event(log, logging.DEBUG, "journal.claimed", device_id=device_id, count=len(records))
-        return records
-
     async def pending_for_device(self, device_id: int, limit: int = 50) -> list[CommandRecord]:
         """Hook for W1 outbox replay after reconnects (A10)."""
 
@@ -290,20 +272,34 @@ class CommandJournal:
             exhausted: list[tuple[Command, int]] = []
             for row in rows:
                 attempts = int(row.attempts or 0)
+                # F20: every state advance is a conditional UPDATE keyed on the
+                # non-terminal statuses — a result that settles concurrently
+                # makes the rowcount 0 and this replay skips the row.
                 if attempts >= MAX_REPLAY_ATTEMPTS:
-                    row.status = "failed"
-                    row.error_code = REPLAY_EXHAUSTED
-                    row.error = f"replay exhausted after {attempts} attempts"
-                    row.finished_at_ms = now
-                    exhausted.append((row, attempts))
+                    outcome = await session.execute(
+                        update(Command)
+                        .where(Command.id == row.id, Command.status.in_(("pending", "dispatched")))
+                        .values(
+                            status="failed",
+                            error_code=REPLAY_EXHAUSTED,
+                            error=f"replay exhausted after {attempts} attempts",
+                            finished_at_ms=now,
+                        )
+                    )
+                    if outcome.rowcount == 1:
+                        exhausted.append((row, attempts))
                     continue
                 last = int(row.dispatched_at_ms or 0)
                 if attempts > 0 and last and now - last < replay_backoff_ms(attempts):
                     continue
-                row.status = "dispatched"
-                row.dispatched_at_ms = now
-                row.attempts = attempts + 1
-                replayed.append(row)
+                outcome = await session.execute(
+                    update(Command)
+                    .where(Command.id == row.id, Command.status.in_(("pending", "dispatched")))
+                    .values(status="dispatched", dispatched_at_ms=now, attempts=attempts + 1)
+                )
+                if outcome.rowcount == 1:
+                    row.attempts = attempts + 1
+                    replayed.append(row)
             if exhausted:
                 device = await session.get(Device, int(device_id))
                 for row, attempts in exhausted:
@@ -386,14 +382,34 @@ class CommandJournal:
         error: str | None = None,
         error_code: str | None = None,
     ) -> CommandRecord | None:
+        """Settle with a **conditional** UPDATE (F20/C10).
+
+        ``WHERE status NOT IN (terminal)`` + rowcount decides the winner, so a
+        concurrent ``mark_timeout``/``expire_stale`` and a late agent result can
+        never interleave into a lost update: first writer wins, the loser reads
+        the winner's row back.
+        """
+
         now = self._clock.now_ms()
         async with self._sessionmaker() as session:
-            row = await session.get(Command, command_id)
+            outcome = await session.execute(
+                update(Command)
+                .where(Command.id == str(command_id), Command.status.not_in(TERMINAL_COMMAND_STATUSES))
+                .values(
+                    status=str(status),
+                    result=dict(result) if isinstance(result, dict) else None,
+                    error=error,
+                    error_code=error_code,
+                    finished_at_ms=now,
+                )
+            )
+            await session.commit()
+            row = (await session.execute(select(Command).where(Command.id == str(command_id)))).scalars().first()
             if row is None:
                 log_event(log, logging.WARNING, "journal.settle_missing", command_id=command_id)
                 return None
             record = CommandRecord.from_model(row)
-            if record.status in TERMINAL_COMMAND_STATUSES:
+            if outcome.rowcount != 1:
                 # First result wins: a late duplicate must not flip an outcome.
                 log_event(
                     log,
@@ -408,14 +424,6 @@ class CommandJournal:
                     except Exception as exc:  # noqa: BLE001 - observability must not fail settlement
                         log_event(log, logging.WARNING, "journal.late_result_listener_failed", error=str(exc))
                 return record
-            row.status = status
-            row.result = dict(result) if isinstance(result, dict) else None
-            row.error = error
-            row.error_code = error_code
-            row.finished_at_ms = now
-            await session.commit()
-            await session.refresh(row)
-            record = CommandRecord.from_model(row)
 
         settle_ms = now
         result_value = Result(
@@ -444,25 +452,47 @@ class CommandJournal:
         )
 
     async def expire_stale(self, *, now: int | None = None) -> int:
-        """Mark commands past their expiry as timeout; settles any waiter."""
+        """Mark commands past their expiry as timeout; settles any waiter.
+
+        F20: one conditional UPDATE per batch (rowcount = actually expired, no
+        read-modify-write race) and a LIMIT so a huge backlog cannot turn one
+        housekeeping tick into an unbounded transaction.
+        """
 
         moment = now if now is not None else self._clock.now_ms()
-        statement = select(Command).where(
-            Command.status.in_(("pending", "dispatched")),
-            Command.expires_at_ms > 0,
-            Command.expires_at_ms < moment,
-        )
         expired: list[str] = []
         async with self._sessionmaker() as session:
-            rows = list((await session.execute(statement)).scalars().all())
-            for row in rows:
-                row.status = "timeout"
-                row.error = "命令已过期（受控端未在期限内响应）"
-                row.error_code = "TIMEOUT"
-                row.finished_at_ms = moment
-                expired.append(row.id)
-            if expired:
+            while True:
+                rows = list(
+                    (
+                        await session.execute(
+                            select(Command.id)
+                            .where(
+                                Command.status.in_(("pending", "dispatched")),
+                                Command.expires_at_ms > 0,
+                                Command.expires_at_ms < moment,
+                            )
+                            .order_by(Command.expires_at_ms.asc())
+                            .limit(EXPIRE_BATCH)
+                        )
+                    ).scalars().all()
+                )
+                if not rows:
+                    break
+                outcome = await session.execute(
+                    update(Command)
+                    .where(Command.id.in_(rows), Command.status.in_(("pending", "dispatched")))
+                    .values(
+                        status="timeout",
+                        error="命令已过期（受控端未在期限内响应）",
+                        error_code="TIMEOUT",
+                        finished_at_ms=moment,
+                    )
+                )
                 await session.commit()
+                expired.extend(rows[: outcome.rowcount] if outcome.rowcount >= 0 else rows)
+                if len(rows) < EXPIRE_BATCH:
+                    break
         for command_id in expired:
             slot = self._waiters.get(command_id)
             if slot is not None:

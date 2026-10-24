@@ -30,6 +30,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from observatory.core.clock import now_ms as _now_ms
+from observatory.core.errors import AppError
 from observatory.core.models import Device, Frame
 
 from . import archive, retention, storage, transcode
@@ -190,9 +191,12 @@ async def store_frame(
         await asyncio.to_thread(storage.write_atomic, frame_path, encoded)
         await asyncio.to_thread(storage.write_atomic, thumb_path, thumb)
     except OSError as exc:
+        # F24: a full disk / IO hiccup is transient — answer 5xx (the agent
+        # retries with backoff) instead of 400, which made the agent discard
+        # the frame permanently as if it were undecodable.
         log.error("帧落盘失败 device=%s: %s", device_uid, exc)
         await asyncio.to_thread(_remove_files, [frame_path, thumb_path])
-        return None
+        raise AppError.internal("帧落盘失败（存储暂不可用），请稍后重试") from exc
 
     frame = Frame(
         device_id=device_id,
@@ -229,8 +233,9 @@ async def store_frame(
     except SQLAlchemyError as exc:
         await session.rollback()
         await asyncio.to_thread(_remove_files, [frame_path, thumb_path])
+        # F24: same as the OSError path — transient DB trouble must be retryable.
         log.error("帧入库失败 device=%s: %s", device_uid, exc)
-        return None
+        raise AppError.internal("帧入库失败（数据库暂不可用），请稍后重试") from exc
 
     await session.refresh(frame)
     await _notify(device, frame)

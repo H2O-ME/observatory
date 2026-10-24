@@ -28,7 +28,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 from sqlalchemy import and_, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,8 +52,18 @@ ARCHIVE_ROW_RETENTION_DAYS = 30
 #: 突发不应挤占转码的并发额度。
 UNLINK_WORKERS = 8
 
-# 命令终结态（与 0.2.10 的 commands 状态集合一致，只有这些能被保留策略回收）
-_FINISHED_COMMAND_STATUSES = ("ok", "error", "timeout", "cancelled")
+#: _purge_dangling 的轮转游标（进程内状态；重启归零无害，只是从最旧开始）。
+_dangling_cursor = 0
+
+# 命令终结态：单一事实来源是 journal.TERMINAL_COMMAND_STATUSES（0.3.1 起
+# 含 "failed"——缺了它 REPLAY_EXHAUSTED 行会永久泄漏）
+def _finished_command_statuses() -> tuple[str, ...]:
+    from ..link.journal import TERMINAL_COMMAND_STATUSES
+
+    return tuple(sorted(TERMINAL_COMMAND_STATUSES))
+
+
+_FINISHED_COMMAND_STATUSES = _finished_command_statuses()
 
 _UNLINK_POOL: ThreadPoolExecutor | None = None
 
@@ -519,10 +529,29 @@ async def _purge_dangling(
     *,
     timings: _Timings | None = None,
 ) -> int:
-    """处理"行在、文件没了"的幽灵占用；只扫最旧的一小批，成本可控。"""
+    """处理"行在、文件没了"的幽灵占用。
 
+    0.3.1：扫描起点按 id 游标轮转（模块级状态，每轮前移），不再永远只盯最旧
+    的 200 行——否则较新设备的整树丢失永远轮不到检查，且其字节会卡死配额。
+    """
+
+    global _dangling_cursor
     t0 = time.perf_counter()
-    rows = (await session.execute(select(Frame).order_by(Frame.ts_ms.asc()).limit(DANGLING_CHECK_LIMIT))).scalars().all()
+    rows = list(
+        (
+            await session.execute(
+                select(Frame)
+                .where(Frame.id > _dangling_cursor)
+                .order_by(Frame.id.asc())
+                .limit(DANGLING_CHECK_LIMIT)
+            )
+        ).scalars().all()
+    )
+    if len(rows) < DANGLING_CHECK_LIMIT:
+        # Wrap around: next pass starts from the oldest row again.
+        _dangling_cursor = 0
+    elif rows:
+        _dangling_cursor = int(rows[-1].id)
     if timings is not None:
         timings.add("dangling.select", t0)
     if not rows:
@@ -628,6 +657,47 @@ async def purge_device(session: AsyncSession, device_id: int) -> int:
     return int(deleted.rowcount or 0)
 
 
+async def purge_device_frames(session: AsyncSession, device_id: int, media_settings: MediaSettings) -> dict[str, Any]:
+    """F25：控制台"清空某设备画面"的唯一入口。
+
+    之前 console/frames.py 自己实现了一遍：事件循环里同步 unlink + 逐行 ORM
+    delete，2 万帧设备能把整个事件循环卡住数十秒；且不收敛归档状态行，sweep
+    会对着已删除的本地文件永远重试。这里统一：线程池删文件 + 归档收敛 +
+    批量 DELETE，一条路径。
+    """
+
+    started = _elapsed_ms_factory()
+    frames = list(
+        (await session.execute(select(Frame).where(Frame.device_id == int(device_id)))).scalars().all()
+    )
+    paths = frame_storage_paths(media_settings, frames)
+    removed_files = await asyncio.get_running_loop().run_in_executor(_unlink_pool(), _unlink_all, paths)
+    converged = await _converge_archives_on_purge(session, media_settings, frames)
+    deleted_rows = 0
+    for chunk_start in range(0, len(frames), PURGE_BATCH):
+        chunk = frames[chunk_start : chunk_start + PURGE_BATCH]
+        result = await session.execute(
+            delete(Frame).where(Frame.id.in_([int(frame.id) for frame in chunk]))
+        )
+        deleted_rows += int(result.rowcount or 0)
+    await session.commit()
+    return {
+        "frames": deleted_rows,
+        "files": int(removed_files),
+        "archives_converged": int(converged),
+        "duration_ms": started(),
+    }
+
+
+def _elapsed_ms_factory() -> Callable[[], int]:
+    started = time.monotonic()
+
+    def elapsed() -> int:
+        return int((time.monotonic() - started) * 1000)
+
+    return elapsed
+
+
 __all__ = [
     "ARCHIVE_ROW_RETENTION_DAYS",
     "DANGLING_CHECK_LIMIT",
@@ -638,6 +708,7 @@ __all__ = [
     "frame_storage_paths",
     "orphan_is_expired",
     "purge_device",
+    "purge_device_frames",
     "run_once",
     "select_quota_victims",
     "split_orphans",

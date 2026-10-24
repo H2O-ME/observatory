@@ -301,7 +301,10 @@ async def delete_device(
     )
     await session.delete(device)
     await session.commit()
+    from .control import revoke_device_grants
     from .events import EVENT_DEVICE_REMOVED, emit
+
+    await revoke_device_grants(request.app, device.id, reason="device deleted")
 
     await emit(EVENT_DEVICE_REMOVED, device_uid=uid, data={"purge_remote": bool(purge_remote)})
     archive_error = str(media_result.get("archive_error") or "")
@@ -334,6 +337,12 @@ async def uninstall_device(
     _effective, snapshot = await device_state_for(session, device)
     if not snapshot.get("capabilities", {}).get("uninstall"):
         raise AppError.bad_request(snapshot.get("reason") or "设备当前不在线，无法下发卸载指令")
+
+    # F23: uninstall and an open control session must not coexist — the agent is
+    # about to tear itself down while the viewer keeps injecting.
+    from .control import revoke_device_grants
+
+    await revoke_device_grants(request.app, device.id, reason="device uninstalling")
 
     await audit.record(
         session,

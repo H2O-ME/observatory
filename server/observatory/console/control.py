@@ -195,6 +195,32 @@ async def _expire_after(request: Request, grant: Grant) -> None:
     await stop_grant(request, grant, code=CLOSE_TTL, reason="ttl expired")
 
 
+async def _grant_ttl_watchdog(app: Any, grant: Grant) -> None:
+    """F23: TTL fallback armed at grant time (the socket timer covers the connected case)."""
+
+    delay_s = max(0.0, (grant.expires_at_ms - now_ms()) / 1000)
+    try:
+        await asyncio.sleep(delay_s)
+    except asyncio.CancelledError:
+        raise
+    if grant.revoked or grant.viewer is not None:
+        # Either already stopped, or the viewer socket owns the full stop path.
+        return
+    grant.revoked = True
+    SESSIONS.remove(grant.token)
+    database = getattr(app.state, "db", None)
+    if database is not None:
+        try:
+            async with database.sessionmaker() as session:
+                await audit.record(
+                    session,
+                    action=audit.ACTION_CONTROL_GRANT,
+                    detail={"stage": "ttl", "token_hint": grant.token[:8], "device_id": grant.device_id},
+                )
+        except Exception as exc:  # noqa: BLE001 - audit is best-effort here
+            log.warning("control watchdog audit failed: %s", exc)
+
+
 async def revoke_device_grants(
     app: Any,
     device_id: int,
@@ -275,12 +301,22 @@ async def create_control_grant(
     if agent_session is None:
         raise AppError.unsupported("设备没有活动链路")
 
+    # F23: one viewer per device. A second grant kills the first instead of the
+    # worker's single control stream silently dropping the older viewer's fps
+    # to zero while it kept injecting.
+    await revoke_device_grants(request.app, device.id, reason="superseded by a new control session")
+
     grant = SESSIONS.grant(
         device=device,
         fps=int(effective.get("control_fps", 8)),
         quality=int(effective.get("control_quality", 55)),
         ttl_s=ttl_s,
         actor="console",
+    )
+    # F23: the TTL watchdog is armed at grant time, not at socket time — a
+    # token that never reaches the WS used to live in the table forever.
+    grant.tasks.add(
+        asyncio.create_task(_grant_ttl_watchdog(request.app, grant), name=f"control-watchdog-{grant.token}")
     )
     await audit.record(
         session,
@@ -391,6 +427,12 @@ async def control_socket(websocket: WebSocket, uid: str) -> None:
             return
         while not grant.revoked:
             frame = await queue.get()
+            if frame is None:
+                # F23: the ControlStream was closed server-side (agent session
+                # replaced/closed). ``send_bytes(None)`` used to raise an
+                # unretrieved TypeError and leave the viewer silently black.
+                await stop_grant(websocket, grant, code=CLOSE_NO_CHANNEL, reason="control channel closed")
+                return
             async with grant.send_lock:
                 if grant.viewer is not websocket:
                     return
@@ -405,6 +447,15 @@ async def control_socket(websocket: WebSocket, uid: str) -> None:
             live = SESSIONS.get(grant.token, device_id=device.id)
             if live is None or live.expires_at_ms <= now_ms():
                 await stop_grant(websocket, grant, code=CLOSE_TTL, reason="grant expired")
+                return
+            # F23: a replaced viewer (second tab on the same token) and a
+            # degraded carrier must not keep injecting into the dark —
+            # capability was only verified at grant time before.
+            if grant.viewer is not websocket:
+                return
+            current_session = websocket.app.state.links.get(device.id)
+            if current_session is not agent_session or getattr(current_session, "carrier", "") != "ws":
+                await stop_grant(websocket, grant, code=CLOSE_NO_CHANNEL, reason="realtime channel lost")
                 return
             text = message.get("text")
             if text:

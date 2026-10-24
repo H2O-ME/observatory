@@ -765,7 +765,13 @@ class ArchiveService:
             tree_body = tree.json()
             entries = tree_body.get("tree") or []
             if tree_body.get("truncated"):
-                log.warning("归档仓库树过大被截断，递归删除可能不完整 repo=%s", repo)
+                # 0.3.1 F26: a truncated tree means we cannot see (and therefore
+                # cannot delete) the whole subtree. Proceeding used to mark rows
+                # "已删除" while blobs stayed orphaned on GitHub — fail
+                # observably instead (C6).
+                raise RuntimeError(
+                    "归档仓库树过大被 GitHub 截断，无法安全执行递归删除；请缩减归档仓库规模后重试"
+                )
 
             matched = [
                 entry

@@ -94,7 +94,7 @@ async def link_http(
     if not is_new:
         stale = now_ms() - int(session.last_seen_ms or 0) > settings.poll_stale_ms
     if is_new:
-        session = AgentSession(
+        candidate = AgentSession(
             device_id=identity.device_id,
             uid=identity.uid,
             journal=journal,
@@ -106,7 +106,11 @@ async def link_http(
             update_offer_provider=getattr(request.app.state, "update_offer_provider", None),
             event_sink=getattr(request.app.state, "agent_event_sink", None),
         )
-        await registry.register(identity.device_id, session)
+        # F21: atomic compare-and-set — a concurrent POST may have registered its
+        # own session between our get() and here; only the winner proceeds.
+        session, loser = registry.register_if_absent(identity.device_id, candidate)
+        if loser is not None and loser is not session:
+            await loser.close(code=4000, reason="superseded before first exchange")
         replayed = await session.replay_pending()
         log_event(
             log,

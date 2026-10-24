@@ -210,37 +210,30 @@ async def purge_frames(
 ) -> dict[str, Any]:
     """Delete one device's frame rows and local files, observably (C6).
 
-    Media owns storage primitives; this handler only orchestrates the two calls
-    and never deletes a device or archive row.
+    F25: this used to re-implement deletion with synchronous unlinks on the
+    event loop (tens of seconds of global stall for a 20k-frame device). The
+    single deletion path is ``media.retention`` — threaded unlinks, batched
+    DELETEs and archive-row convergence included.
     """
 
     device = await _load_device(session, uid)
-    rows = list((await session.execute(select(Frame).where(Frame.device_id == device.id))).scalars().all())
     try:
-        from ..media import settings as media_settings, storage
+        from ..media import retention, settings as media_settings
     except ImportError as exc:  # pragma: no cover - W0 skeleton guard
         raise AppError.internal("媒体存储层未就绪") from exc
-    settings = await media_settings.load(session)
-    removed_files = 0
-    for frame in rows:
-        for relative in (frame.path, frame.thumb_path):
-            if not relative:
-                continue
-            try:
-                removed_files += storage.delete_path(storage.absolute(settings, relative))
-            except storage.StorageError as exc:
-                log.warning("skip invalid frame path uid=%s frame=%s: %s", uid, frame.id, exc)
-    for frame in rows:
-        await session.delete(frame)
-    await session.commit()
+    stats = await retention.purge_device_frames(session, device.id, await media_settings.load(session))
+    removed = int(stats.get("frames", 0) or 0)
     await audit.record(
         session,
         action=audit.ACTION_FILE_OP,
         device=device,
         ip=client_ip(request),
-        detail={"scope": "frames", "deleted": len(rows), "files": removed_files},
+        detail={"scope": "frames", "deleted": removed, "stats": stats},
     )
-    return stamp({"ok": True, "message": f"已删除 {len(rows)} 张画面", "deleted": len(rows)})
+    from .events import EVENT_DEVICE_UPDATED, emit
+
+    await emit(EVENT_DEVICE_UPDATED, device_uid=uid, data={"frames_purged": removed})
+    return stamp({"ok": True, "message": f"已删除 {removed} 张画面", "deleted": removed})
 
 
 __all__ = ["choose_bucket", "router"]

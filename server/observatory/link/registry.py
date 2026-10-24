@@ -197,6 +197,30 @@ class LinkRegistry:
         log_event(log, logging.DEBUG, "registry.registered", device_id=key, carrier=getattr(session, "carrier", "?"))
         return previous
 
+    def register_if_absent(self, device_id: int, session: AgentSession) -> tuple[SessionProtocol, SessionProtocol | None]:
+        """Atomically install *session* only when no equivalent one is live (F21).
+
+        Returns ``(winner, loser)``. The HTTP carrier's "get→create→register"
+        sequence raced between two concurrent POSTs: both saw ``None``, both
+        registered, and ``register`` closed the winner's session out from under
+        its long poll. Inside the registry lock this is compare-and-set.
+        """
+
+        if not isinstance(session, AgentSession):
+            raise TypeError(
+                "registry only accepts link.session.AgentSession; "
+                f"got {type(session).__name__}"
+            )
+        key = int(device_id)
+        with self._lock:
+            current = self._sessions.get(key)
+            if current is not None and not bool(getattr(current, "closed", True)) and int(
+                getattr(current, "protocol", 0) or 0
+            ) == int(getattr(session, "protocol", 0) or 0):
+                return current, session
+            self._sessions[key] = session
+            return session, current
+
     async def unregister(self, device_id: int, session: Any | None = None) -> bool:
         key = int(device_id)
         with self._lock:

@@ -107,11 +107,17 @@ class Outbox:
         Returns ``True`` when a put/ack/close woke the caller. Unlike
         :meth:`wait_for_messages` this does not return immediately when the queue
         already has pending items, which is what the WS pump needs.
+
+        F22: re-checks ``pending()`` after clearing — a put that landed while the
+        caller was draining (before ``clear()``) used to have its wakeup eaten
+        and the pump slept a whole heartbeat interval with work queued.
         """
 
         if self._closed:
             return True
         self._event.clear()
+        if self._pending:
+            return True
         try:
             await asyncio.wait_for(self._event.wait(), timeout=max(0.01, float(timeout_s)))
         except asyncio.TimeoutError:

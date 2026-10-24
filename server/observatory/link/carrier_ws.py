@@ -163,6 +163,10 @@ async def link_ws(websocket: WebSocket) -> None:
                 for envelope in queued:
                     if not await send_envelope(envelope):
                         return
+                # F22: a put during the batch's awaits must not be slept away —
+                # only wait when the queue really is empty now.
+                if session.outbox.pending():
+                    continue
                 await session.outbox.wait_for_change(settings.heartbeat_interval_s)
                 continue
             changed = await session.outbox.wait_for_change(settings.heartbeat_interval_s)
