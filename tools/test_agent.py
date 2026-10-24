@@ -6,7 +6,7 @@
 
 0.2.10 的纯逻辑自检（版本/配置/帧协议/传输阶梯/更新/卸载范围）已迁移为：
 - `tests/unit/`（纯函数）
-- `tests/contract/`（协议与 legacy 兼容）
+- `tests/contract/`（协议契约）
 - `tests/integration/`（W1 后接真受控端）
 Windows 系统层用例带 `windows_only` 标记，在 Linux 上由 skip 处理。
 原实现保留在 tag `pre-rewrite-0.2.10`。

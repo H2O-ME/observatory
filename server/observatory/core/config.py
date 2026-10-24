@@ -52,7 +52,6 @@ class Settings(BaseSettings):
     # ---- identity / secrets -------------------------------------------------
     secret_key: str = "change-me-in-production"
     admin_password: str = "change-me-in-production"
-    enroll_code: str = ""
     session_ttl_minutes: int = Field(default=720, ge=5, le=60 * 24 * 30)
 
     # ---- storage ------------------------------------------------------------

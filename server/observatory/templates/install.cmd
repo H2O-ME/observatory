@@ -1,13 +1,13 @@
 @echo off
 rem Observatory agent installer -- double-click to install.
 rem
-rem 0.3.0 (A18): this file carries a ONE-TIME install token when the server
-rem renders one (single use, short TTL, bound to the first device). It falls
-rem back to the legacy shared enrollment code only for 0.2.x compatibility.
-rem Never put a long-lived shared credential into a distributable file.
+rem This file carries a ONE-TIME install token when the server renders one
+rem (single use, short TTL, bound to the first device). Never put a long-lived
+rem shared credential into a distributable file; the legacy shared enrollment
+rem code was removed in 0.3.1.
 rem
 rem Rendered per request by the server:
-rem   * the install credential (token preferred) and version are already inside
+rem   * the install token and version are already inside
 rem   * several server addresses are embedded and tried in order
 rem   * the real work happens in install.ps1, which asks for elevation once
 rem
@@ -22,36 +22,26 @@ title Observatory agent installer
 
 set "TOKEN=@@INSTALL_TOKEN@@"
 set "TOKEN_URL=@@INSTALL_TOKEN_URL@@"
-set "CODE=@@ENROLL_CODE@@"
-set "CODE_URL=@@ENROLL_CODE_URL@@"
 set "VERSION=@@VERSION@@"
 @@URL_LINES@@
 set "TARGET=%TEMP%\observatory-install-%RANDOM%%RANDOM%.ps1"
 set "GOT="
 set "PROBESIZE="
 
-rem Older renderers left the @@...@@ markers in place. New renderers replace both
-rem the token and code placeholders (possibly with the same value). A leftover
-rem marker is the only reliable signal of "not provided": tokens are URL-safe and
-rem never contain '@'.
+rem Renderers that left the @@...@@ markers in place did not inject a token.
+rem A leftover marker is the only reliable signal of "not provided": tokens are
+rem URL-safe and never contain '@'.
 if not "%TOKEN%"=="%TOKEN:@=%" set "TOKEN="
 if not "%TOKEN_URL%"=="%TOKEN_URL:@=%" set "TOKEN_URL="
-if not "%CODE%"=="%CODE:@=%" set "CODE="
-if not "%CODE_URL%"=="%CODE_URL:@=%" set "CODE_URL="
 
-set "CRED="
 set "CRED_Q="
 if defined TOKEN (
-  set "CRED=token"
   set "CRED_Q=token=%TOKEN_URL%"
-) else if defined CODE (
-  set "CRED=code"
-  set "CRED_Q=code=%CODE_URL%"
 )
 
-if not defined CRED (
+if not defined CRED_Q (
   echo.
-  echo   FAILED: this installer has no install credential inside.
+  echo   FAILED: this installer has no install token inside.
   echo   Download it again from the console: Settings - Installer.
   echo.
   pause
@@ -83,7 +73,7 @@ if not defined GOT (
 
 echo   Download OK. Installing now ^(one UAC prompt^)...
 echo.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%TARGET%" -Token "%TOKEN%" -Code "%CODE%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%TARGET%" -Token "%TOKEN%"
 set "RC=%ERRORLEVEL%"
 del "%TARGET%" >nul 2>&1
 

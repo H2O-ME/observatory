@@ -313,10 +313,7 @@ export function SettingsPage() {
           </span>
         </div>
         <p className="mb-2 text-[0.66rem] leading-relaxed text-faint">
-          0.3.0 用一次性令牌替代共享注册码：令牌只用于一次安装，绑定第一台使用它的机器，下载脚本本身不会消耗它。
-          {install?.legacy_code_enabled
-            ? " 旧的共享注册码仍然兼容（0.4 移除），但不再写进新脚本。"
-            : " 共享注册码已关闭。"}
+          令牌只用于一次安装，绑定第一台使用它的机器，下载脚本本身不会消耗它。旧的共享注册码已于 0.3.1 移除。
         </p>
 
         <div className="flex flex-wrap items-end gap-2">

@@ -10,15 +10,12 @@
     * 双域名热备：control.tianhw.top 与 observatory.123423.xyz 互为备份，
       任意一个可达即可完成安装与上报。
     * 版本号在开头显著显示，且与服务器、控制台完全一致。
-    * 0.3.0（A18）：安装凭据优先使用**一次性安装令牌**（单次使用、有 TTL、
-      绑定首台设备）。旧版共享注册码只作为 0.2.x 兼容回退保留。
+    * 安装凭据只接受**一次性安装令牌**（单次使用、有 TTL、绑定首台设备）；
+      旧版共享注册码已于 0.3.1 随 0.2.x 兼容层一并移除。
 
 .PARAMETER Token
-    一次性安装令牌。由控制台/服务端下发，渲染脚本时会注入；单次使用，
-    过期或已被使用则安装失败。留空时回退到 -Code（旧版共享注册码）。
-
-.PARAMETER Code
-    旧版共享注册码（兼容 0.2.x）。0.3.0 新部署应使用 -Token。
+    一次性安装令牌（必填，控制台「安装令牌」页生成；单次使用、绑定首台设备、
+    过期或已被使用则安装失败）。
 
 .PARAMETER Uninstall
     卸载受控端（需要提权一次）。
@@ -30,7 +27,6 @@
 [CmdletBinding()]
 param(
     [string]$Token = '@@INSTALL_TOKEN@@',
-    [string]$Code = '@@ENROLL_CODE@@',
     [string[]]$BaseUrls = @(@@BASE_URLS@@),
     [switch]$Uninstall,
     [switch]$Insecure,
@@ -41,11 +37,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-# 0.3.0（A18）：先解析凭据。渲染器未注入的占位符（@@...@@）视为“未提供”，
-# 这样同一份模板既支持新的一次性令牌，也兼容旧服务端只注入 Code 的情况。
+# 渲染器未注入的占位符（@@...@@）视为“未提供”。
 $HasToken = [bool]($Token -and $Token -notlike '@@*')
-$HasCode  = [bool]($Code  -and $Code  -notlike '@@*')
-$CredentialKind = if ($HasToken) { 'install-token' } elseif ($HasCode) { 'legacy-enroll-code' } else { '' }
 
 # ----------------------------------------------------------------- constants --
 $ProductName    = 'Observatory'
@@ -89,8 +82,8 @@ function Show-Banner {
     Write-Host "     目标机 : $env:COMPUTERNAME" -ForegroundColor Gray
     Write-Host "     安装到 : $InstallDir" -ForegroundColor Gray
     Write-Host "     服务器 : $($BaseUrls -join '  |  ')" -ForegroundColor Gray
-    if ($CredentialKind) {
-        Write-Host "     凭据   : $(if ($HasToken) { '一次性安装令牌（单次）' } else { '旧版共享注册码（兼容）' })" -ForegroundColor Gray
+    if ($HasToken) {
+        Write-Host "     凭据   : 一次性安装令牌（单次）" -ForegroundColor Gray
     }
     Write-Host '  ==================================================' -ForegroundColor DarkGray
     Write-Host ''
@@ -147,11 +140,7 @@ function Request-Elevation {
         exit 3
     }
     # 提权子进程从服务器重新下载脚本；凭据放在 query 里（令牌单次使用）。
-    if ($HasToken) {
-        $childQuery = "token=$([uri]::EscapeDataString($Token))"
-    } else {
-        $childQuery = "code=$([uri]::EscapeDataString($Code))"
-    }
+    $childQuery = "token=$([uri]::EscapeDataString($Token))"
     $childUrl = "$primary/api/v1/public/install.ps1?$childQuery"
     $arguments = @(
         '-NoProfile',
@@ -222,7 +211,8 @@ function Install-Files {
         }
         New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
         Copy-Item -Path (Join-Path $staging '*') -Destination $InstallDir -Recurse -Force
-        Set-Content -LiteralPath (Join-Path $InstallDir 'VERSION') -Value $AgentVersion -Encoding UTF8 -NoNewline
+        # zip 内已有 build.ps1 写入的正确 VERSION（受控端 --version 优先读它），
+        # 不再用服务器版本覆盖，否则 agent 自报版本与二进制不一致（0.3.1 修复）。
         Write-Step "已安装到 $InstallDir"
     }
     finally {
@@ -235,13 +225,8 @@ function Install-Service {
     if (-not (Test-Path $exe)) { throw "找不到 $exe" }
 
     Write-Step '注册并启动服务'
-    $arguments = @('--install', '--exe', "`"$exe`"")
-    if ($HasToken) {
-        # 0.3.0 协议：一次性安装令牌由受控端在注册时消费（绑定首台设备）。
-        $arguments += @('--install-token', $Token)
-    } else {
-        $arguments += @('--enroll-code', $Code)
-    }
+    # 一次性安装令牌由受控端在注册时消费（绑定首台设备）。
+    $arguments = @('--install', '--exe', "`"$exe`"", '--install-token', $Token)
     foreach ($url in $BaseUrls) { $arguments += @('--base-url', $url) }
 
     $output = & $exe @arguments 2>&1
@@ -300,8 +285,8 @@ if ($Uninstall) {
     exit 0
 }
 
-if (-not $HasToken -and -not $HasCode) {
-    Write-Fail '缺少安装凭据（一次性安装令牌或旧版注册码）。请从控制台复制完整安装命令。'
+if (-not $HasToken) {
+    Write-Fail '缺少安装凭据（一次性安装令牌）。请从控制台复制完整安装命令。'
     exit 2
 }
 if (-not $BaseUrls -or $BaseUrls.Count -eq 0) {

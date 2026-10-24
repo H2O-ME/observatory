@@ -153,7 +153,6 @@ def test_n3_migrates_legacy_schema_with_backup(tmp_dir) -> None:
         data_dir=tmp_dir,
         secret_key="test-secret-key-0123456789abcdef0123456789",
         admin_password="test-admin-password",
-        enroll_code="test-enroll-code",
     )
     database = Database(settings)
 

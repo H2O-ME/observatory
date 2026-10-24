@@ -21,11 +21,11 @@
 | C4 | presence/capabilities **只有一个函数**产出；UI/业务不得直接读通道表 |
 | C5 | 时间**只有一个来源**：服务端时钟；响应带 `server_time_ms`，需要预算的带 `deadline_ms`；设备时间命名 `device_time_ms` |
 | C6 | 破坏性动作（删除/归档/更新/卸载）**成功或可观测失败**，禁止 fire-and-forget |
-| C7 | 旧协议兼容代码**只在 `server/observatory/legacy/`**，新代码不得 import |
+| C7 | 旧协议兼容代码**只在 `server/observatory/legacy/`**，新代码不得 import（0.3.1 起该层已整体删除） |
 | C8 | 配置项**要么生效要么不存在**；`Settings`/`settings_store` 每个键都必须有消费者 |
 
-0.2.x 受控端可以**零重装**升级到 0.3.0：旧端点保留在兼容层（`legacy/agent_v2.py`），
-设备收到更新包后自行替换并以新协议重连；兼容层计划 0.4 删除。
+0.2.x 受控端的零重装升级路径随 0.3.1 的 legacy 层删除一并退役：设备收到更新包后
+自行替换并以 v3 协议重连（sha256 + 预检 + 失败回滚，A3/A7）。
 
 ## 主要能力
 
@@ -73,7 +73,6 @@ server/observatory/
   media/             # ingest / transcode / storage / retention / archive
   console/           # auth devices files control settings audit updates system + dto
   adapters/          # hostsplit（双域名，fail-closed）
-  legacy/            # 0.2.x 协议兼容（只翻译，不被新代码 import）
   templates/         # install.ps1 / install.cmd（服务端渲染）
 ```
 
@@ -182,18 +181,17 @@ python tools/test_server.py           # 对外自检入口（兼容保留）
 python tools/test_agent.py            # 受控端逻辑自检（Windows 组自动跳过）
 python tools/test_e2e_live.py         # 真起服务端+受控端（仅 Windows）
 python tools/check_deployment.py --password <密码> --token <一次性令牌>   # 已部署实例公网体检
-# 省略 --token 时会登录后现场签发；--code 仅用于验证 legacy 共享注册码
+# 省略 --token 时会登录后现场签发
 cd webui && npm run build             # 类型检查 + 生产构建
 ```
 
 受控端解析/帧协议/传输阶梯/更新回滚等纯逻辑在任意平台可跑；真实采集、输入、文件与卸载清理
-只在 Windows 上执行。CI 门禁（A20）：服务端自检、受控端逻辑测试、0.2.10 协议回放、WebUI 类型检查与构建。
+只在 Windows 上执行。CI 门禁（A20）：服务端自检、受控端逻辑测试、协议契约、WebUI 类型检查与构建。
 
-## 与 0.2.x 的兼容性
+## 兼容性
 
-* 0.2.x 受控端**零重装**升级：旧端点 + 协议回放测试（N2）。
 * 数据平滑迁移：启动时版本化迁移，迁移前自动 `SQLite backup` 到 `data/backups/pre-migrate-<version>.db`（N3）。
-* 旧的共享注册码 `OBS_ENROLL_CODE` 仍可用于 0.2.x 设备，但 0.3.0 新安装应使用一次性安装令牌。
+* 安装凭据只有一次性安装令牌（单次使用、TTL、绑定首台设备）；共享注册码已于 0.3.1 移除。
 
 ## 文档
 

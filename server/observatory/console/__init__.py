@@ -17,6 +17,7 @@ from . import (
     backup,
     control,
     devices,
+    enroll,
     events,
     files,
     frames,
@@ -28,6 +29,7 @@ from . import (
 
 console_router = APIRouter()
 console_router.include_router(agent_frames.router)
+console_router.include_router(enroll.router)
 console_router.include_router(auth.router)
 console_router.include_router(backup.router)
 console_router.include_router(devices.router)

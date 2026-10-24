@@ -24,7 +24,6 @@ SECRET_KEYS: frozenset[str] = frozenset(
         "device_token",
         "install_token",
         "totp_secret",
-        "enroll_code",
         "authorization",
         "cookie",
     }

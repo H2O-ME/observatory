@@ -136,6 +136,21 @@ class LinkRegistry:
         with self._lock:
             return self._sessions.get(int(device_id))
 
+    def has_fresh_session(self, device_id: int, *, within_ms: int) -> bool:
+        """True when a live, recently-seen session exists for this device.
+
+        The link layer owns "is this device talking to us right now" (C4);
+        consumers outside link (e.g. the enrolment takeover guard) ask here
+        instead of poking at session internals.
+        """
+
+        session = self.get(device_id)
+        if session is None or bool(getattr(session, "closed", True)):
+            return False
+        from ..core.clock import now_ms  # noqa: PLC0415 - avoids import cycle at module load
+
+        return now_ms() - int(getattr(session, "last_seen_ms", 0) or 0) <= int(within_ms)
+
     async def register(
         self,
         device_id: int,
@@ -168,11 +183,6 @@ class LinkRegistry:
             await _close_session(previous, code=4000, reason="replaced by newer connection")
         log_event(log, logging.DEBUG, "registry.registered", device_id=key, carrier=getattr(session, "carrier", "?"))
         return previous
-
-    async def register_legacy(self, device_id: int, session: SessionProtocol) -> SessionProtocol | None:
-        """Legacy 0.2.x entry point; the adapter must subclass ``AgentSession``."""
-
-        return await self.register(device_id, session)
 
     async def unregister(self, device_id: int, session: Any | None = None) -> bool:
         key = int(device_id)

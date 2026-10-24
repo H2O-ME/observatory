@@ -223,18 +223,6 @@ def _mount_optional(app: FastAPI, module_name: str, label: str) -> None:
     log.info("%s router mounted from %s", label, module_name)
 
 
-def _mount_legacy_agent(app: FastAPI) -> None:
-    """Mount the 0.2.x device protocol translator (N2 zero-reinstall upgrade)."""
-
-    try:
-        from .legacy.agent_v2 import router as legacy_agent_router
-    except ImportError as exc:
-        log.warning("legacy 0.2.x agent adapter unavailable (%s); old agents cannot connect", exc)
-        return
-    app.include_router(legacy_agent_router, prefix="/api/v1")
-    log.info("legacy agent v2 router mounted at /api/v1/agent (enroll/heartbeat/commands/frames/ws)")
-
-
 def _load_agent_config_provider() -> Any | None:
     """Console-backed provider for ``welcome.config`` (same function as its DTO).
 
@@ -375,6 +363,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.media_retention_interval_s = int(SPECS[MEDIA_RETENTION_KEY].default)
     app.state.link_limiter = RateLimiter(settings.link_rate_limit, settings.link_rate_window_s)
     app.state.link_ip_limiter = RateLimiter(settings.link_ip_rate_limit, settings.link_rate_window_s)
+    app.state.enroll_limiter = RateLimiter(settings.enroll_rate_limit, settings.enroll_rate_window_s)
 
     app.add_middleware(
         HostSplit,
@@ -389,8 +378,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(link_ws_router)
     for module_name, label in OPTIONAL_PACKAGES:
         _mount_optional(app, module_name, label)
-    # Must be before the SPA catch-all: 0.2.x agents POST/GET these paths.
-    _mount_legacy_agent(app)
 
     @app.get("/api/v1/health")
     async def health() -> dict:

@@ -70,7 +70,7 @@ def test_outbound_config_paths_use_the_single_projection() -> None:
     for relative in (
         "console/settings.py",
         "console/devices.py",
-        "legacy/agent_v2.py",
+        "console/enroll.py",
     ):
         text = (server / relative).read_text(encoding="utf-8")
         assert "device_safe_config" in text, f"{relative} 未走脱敏投影"

@@ -11,8 +11,7 @@
   * 协议 v3：`POST/WS /api/v1/agent/link` + `server_time_ms`/`ack_id`
   * 错误信封：`{code, message, retryable, server_time_ms}`
   * 一次性安装令牌：签发（含 TTL 边界）、单一使用、绑定首台设备
-  * 渲染后的 install.ps1 / install.cmd：内嵌令牌而不是长期共享码
-  * legacy 兼容层：0.2.x enroll/heartbeat 仍可用
+  * 渲染后的 install.ps1 / install.cmd：内嵌令牌（0.3.1 起不再有共享注册码）
   * 安装包可下载且 sha256 与服务器一致；控制台登录/设备/presence
   * 体检设备的清理（在线设备不能删除，工具会等待离线窗口）
 
@@ -135,7 +134,6 @@ async def main() -> int:
     parser.add_argument("--agent-host", default="observatory.123423.xyz")
     parser.add_argument("--password", required=True, help="控制台管理员密码")
     parser.add_argument("--token", default="", help="可选：已生成的一次性安装令牌；省略则登录后现场签发")
-    parser.add_argument("--code", default="", help="可选：旧版共享注册码，用于验证 legacy 兼容层")
     parser.add_argument("--device-uid", default="", help="体检设备 uid（默认随机，避免冲突）")
     parser.add_argument("--expect-version", default="", help="期望版本；默认不强制")
     parser.add_argument("--min-cert-days", type=int, default=7, help="证书最少剩余天数（默认 7）")
@@ -247,7 +245,7 @@ async def main() -> int:
                 text = script.text
                 check(f"{label}域名可下载安装脚本", script.status_code == 200, str(script.status_code))
                 check(f"{label}域名脚本内嵌令牌", token in text, "未找到令牌")
-                check(f"{label}域名脚本无未渲染占位符", "@@INSTALL_TOKEN@@" not in text and "@@ENROLL_CODE@@" not in text)
+                check(f"{label}域名脚本无未渲染占位符", "@@INSTALL_TOKEN@@" not in text and "@@ENROLL_CODE@@" not in text and "@@BASE_URLS@@" not in text)
                 check(f"{label}域名脚本用 -Token 参数", "$Token" in text and "install-token" in text)
                 wrapper = await client.get(f"{host}/api/v1/public/install.cmd", params={"token": token})
                 cmd = wrapper.text
@@ -256,15 +254,14 @@ async def main() -> int:
                 check(f"{label}域名 .cmd 为附件", "attachment" in disposition and ".cmd" in disposition, disposition)
                 check(f"{label}域名 .cmd 内嵌令牌", token in cmd, "未找到令牌")
                 check(f"{label}域名 .cmd 使用 ?token= 传参", "token=" in cmd)
-                check(f"{label}域名 .cmd 无未渲染占位符", "@@INSTALL_TOKEN@@" not in cmd and "@@ENROLL_CODE@@" not in cmd)
+                check(f"{label}域名 .cmd 无未渲染占位符", "@@INSTALL_TOKEN@@" not in cmd and "@@URL_LINES@@" not in cmd)
                 check(f"{label}域名 .cmd 纯 ASCII", all(ord(ch) < 128 for ch in cmd))
                 check(f"{label}域名 .cmd 含多线路 URL", 'set "URL1=' in cmd)
             bad_script = await client.get(f"{agent}/api/v1/public/install.ps1", params={"token": "wrong-token"})
             check("错误令牌下载脚本被拒（401）", bad_script.status_code == 401, str(bad_script.status_code))
             check("错误令牌错误码 AUTH", envelope_ok(body(bad_script), "AUTH"), bad_script.text[:160])
-            if args.code:
-                legacy_script = await client.get(f"{console}/api/v1/public/install.ps1", params={"code": args.code})
-                check("旧共享注册码仍可下载脚本", legacy_script.status_code == 200, str(legacy_script.status_code))
+            code_script = await client.get(f"{console}/api/v1/public/install.ps1", params={"code": "whatever"})
+            check("注册码路径已拒绝（401）", code_script.status_code == 401, str(code_script.status_code))
 
             group("受控端注册（一次性令牌）")
             enroll_payload = {
@@ -293,15 +290,12 @@ async def main() -> int:
             replayed = await client.post(f"{agent}/api/v1/agent/enroll", json=replay)
             check("同一令牌不能用于第二台设备（401）", replayed.status_code == 401, str(replayed.status_code))
             check("重放错误码 AUTH", envelope_ok(body(replayed), "AUTH"), replayed.text[:160])
-            if args.code:
-                legacy_enroll = dict(enroll_payload)
-                legacy_enroll.pop("install_token", None)
-                legacy_enroll["code"] = args.code
-                legacy_enroll["uid"] = uid + "-LEGACY"
-                legacy_result = await client.post(f"{agent}/api/v1/agent/enroll", json=legacy_enroll)
-                check("legacy 共享注册码仍可注册", legacy_result.status_code == 200, legacy_result.text[:160])
-            else:
-                skip("legacy 共享注册码注册", "未提供 --code")
+            code_enroll = dict(enroll_payload)
+            code_enroll.pop("install_token", None)
+            code_enroll["code"] = "whatever"
+            code_enroll["uid"] = uid + "-CODE"
+            code_result = await client.post(f"{agent}/api/v1/agent/enroll", json=code_enroll)
+            check("注册码注册已拒绝（401）", code_result.status_code == 401, str(code_result.status_code))
 
             device_headers = {"X-Device-Token": device_token}
             group("协议 v3 /agent/link")
@@ -357,16 +351,17 @@ async def main() -> int:
             except Exception as exc:  # noqa: BLE001
                 check("WS 载体 /agent/link 升级成功", False, repr(exc)[:200])
 
-            group("legacy 兼容层")
+            group("0.2.x 端点删除确认")
             legacy_heartbeat = await client.post(
                 f"{agent}/api/v1/agent/heartbeat",
                 headers=device_headers,
                 json={"agent_version": version, "sysinfo": {}, "state": {"transport": "http", "spool": 0}},
             )
-            heartbeat_body = body(legacy_heartbeat)
-            check("legacy /agent/heartbeat 可用", legacy_heartbeat.status_code == 200, str(legacy_heartbeat.status_code))
-            if legacy_heartbeat.status_code == 200:
-                check("heartbeat 含 server_time_ms/心跳间隔", isinstance(heartbeat_body.get("server_time_ms"), int) and isinstance(heartbeat_body.get("heartbeat_interval_s"), int), str(heartbeat_body)[:160])
+            check(
+                "legacy /agent/heartbeat 已删除（404/405）",
+                legacy_heartbeat.status_code in (404, 405),
+                str(legacy_heartbeat.status_code),
+            )
 
             group("安装包")
             latest = body(await client.get(f"{agent}/api/v1/public/agent/latest"))

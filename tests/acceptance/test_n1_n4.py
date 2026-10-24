@@ -25,12 +25,33 @@ def test_n1_all_24_acceptance_tests_pass() -> None:
         assert not unconditional, f"{name} 仍带无条件 skip"
 
 
-def test_n2_legacy_zero_reinstall_upgrade(tmp_dir: Path) -> None:
-    """N2：0.2.10 旧协议注册→收更新→校验→替换→以新协议重连（真跑）。"""
+def test_n2_legacy_surface_removed_enroll_roundtrip(tmp_dir: Path) -> None:
+    """N2（0.3.1 改版）：0.2.x 端点已按 C12 删净；真实安装链路 enroll→token 有效。
 
-    from tests.contract.test_legacy_v2 import test_n2_zero_reinstall_upgrade as n2_replay
+    原语义“0.2.x 零重装升级”随共享注册码一并退役（现网设备已全部 0.3.0）；
+    零重装能力由 v3 更新链路（update_offer + sha256 + 回滚）承接，见 A3/A7。
+    """
 
-    n2_replay(tmp_dir)
+    from tests.helpers import enroll_token, running_app
+
+    with running_app(tmp_dir) as client:
+        legacy_paths = [
+            ("POST", "/api/v1/agent/heartbeat"),
+            ("GET", "/api/v1/agent/commands"),
+            ("POST", "/api/v1/agent/commands/x/result"),
+            ("GET", "/api/v1/agent/state"),
+            ("POST", "/api/v1/agent/uninstall/ack"),
+        ]
+        token = enroll_token(client)
+        for method, path in legacy_paths:
+            response = getattr(client, method.lower())(path, headers={"X-Device-Token": token})
+            assert response.status_code in (404, 405), (
+                f"{method} {path} 应已删除（404/405），实际 {response.status_code}"
+            )
+
+        # 注册码路径拒绝：只有一次性令牌能入网
+        denied = client.post("/api/v1/agent/enroll", json={"uid": "OBS-CODE-TRY", "code": "anything"})
+        assert denied.status_code == 401, denied.text
 
 
 def test_n3_migration_from_real_0_2_10_database(tmp_dir: Path) -> None:

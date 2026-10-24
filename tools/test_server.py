@@ -2,10 +2,10 @@
 """服务端自检（对外入口保留，内部调用 tests/，spec §9）。
 
     python tools/test_server.py
-    python tools/test_server.py -k legacy        # 额外参数透传给 pytest
+    python tools/test_server.py -k enroll        # 额外参数透传给 pytest
 
 0.2.10 的手写端到端断言已迁移为 `tests/` 下的 pytest 用例：
-- 协议兼容/回放 → `tests/contract/test_legacy_v2.py`
+- 协议契约 → `tests/contract/test_protocol_v3.py`
 - 验收 A1–A24 → `tests/acceptance/`
 - 服务端装配/载体 → `tests/integration/`
 原实现保留在安全锚点 tag `pre-rewrite-0.2.10`（spec 头部）。

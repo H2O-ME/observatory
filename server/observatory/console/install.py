@@ -6,10 +6,10 @@ single-use token:
 * an admin mints a token (TTL, one use, bound to the first device that redeems
   it); only the HMAC hash is stored;
 * downloading ``install.ps1`` / ``install.cmd`` only *validates* the token -- it
-  is consumed at enrolment, so a leaked download cannot be replayed after the
-  first machine uses it;
-* the old shared ``OBS_ENROLL_CODE`` path is still accepted by the legacy agent
-  protocol until 0.4, but the generated artifacts embed only the token.
+  is consumed at enrolment (``console/enroll.py``), so a leaked download cannot
+  be replayed after the first machine uses it;
+* the shared ``OBS_ENROLL_CODE`` path was removed in 0.3.1 together with the
+  0.2.x protocol layer; credentials are tokens only.
 """
 
 from __future__ import annotations
@@ -22,15 +22,15 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import FileResponse, PlainTextResponse
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.clock import now_ms
 from ..core.config import resolve_version
-from ..core.crypto import constant_time_compare, device_token_hash
+from ..core.crypto import device_token_hash
 from ..core.db import get_session
 from ..core.errors import AppError
-from ..core.models import Device, InstallToken
+from ..core.models import InstallToken
 from . import audit
 from .deps import client_ip, get_settings, require_admin, store
 from .dto import stamp
@@ -119,7 +119,6 @@ def render_cmd(request: Request, token: str) -> str:
 async def install_info(request: Request, session: AsyncSession) -> dict[str, Any]:
     settings = get_settings(request)
     values = await store().load(session)
-    has_code = bool(settings.enroll_code)
     available = int(
         (
             await session.execute(
@@ -133,9 +132,8 @@ async def install_info(request: Request, session: AsyncSession) -> dict[str, Any
     )
     token_hint = "/api/v1/install/tokens"
     return {
-        "enabled": has_code or available > 0,
+        "enabled": available > 0,
         "enroll_required": True,
-        "legacy_code_enabled": has_code,
         "available_tokens": available,
         "token_ttl_minutes": int(values.get("install_token_ttl_minutes", 1440)),
         "version": resolve_version(),
@@ -179,61 +177,19 @@ async def validate_install_token(session: AsyncSession, token: str, *, settings:
     return row
 
 
-async def consume_install_token(
-    session: AsyncSession,
-    token: str,
-    *,
-    device: Device,
-    settings: Any,
-) -> InstallToken:
-    """Bind a token to the first device and mark it used (one transaction).
-
-    The consume is a single conditional ``UPDATE ... WHERE used_at_ms IS NULL``,
-    so two simultaneous enrollments cannot both win the one-shot token.
-    """
-
-    row = await validate_install_token(session, token, settings=settings)
-    used_device_id = getattr(row, "used_device_id", None)
-    if used_device_id is not None and int(used_device_id) != int(device.id):
-        raise AppError.auth("安装令牌已绑定到其他设备")
-    if row.used_at_ms is not None:
-        if int(getattr(row, "max_uses", 1) or 1) <= 1:
-            raise AppError.auth("安装令牌已被使用")
-        return row
-
-    result = await session.execute(
-        update(InstallToken)
-        .where(InstallToken.id == row.id, InstallToken.used_at_ms.is_(None))
-        .values(used_at_ms=now_ms(), used_device_id=int(device.id))
-    )
-    if result.rowcount != 1:
-        await session.rollback()
-        raise AppError.auth("安装令牌已被使用")
-    await session.commit()
-    await session.refresh(row)
-    return row
-
-
 async def require_install_credential(
     request: Request,
     session: AsyncSession,
     *,
     token: str,
-    code: str,
-) -> tuple[str, str]:
-    """Return ``(mode, credential)`` where mode is ``token`` or ``legacy_code``."""
+) -> str:
+    """Validate the download credential (token only; consumption happens at enrolment)."""
 
     settings = get_settings(request)
-    if token:
-        await validate_install_token(session, token, settings=settings)
-        return "token", token
-    if code:
-        if not settings.enroll_code or not constant_time_compare(code, settings.enroll_code):
-            raise AppError.auth("注册码不正确")
-        # Legacy artifacts keep working until 0.4; the console stops generating
-        # them, so the shared code is not embedded in new downloads.
-        return "legacy_code", code
-    raise AppError.auth("缺少安装令牌")
+    if not token:
+        raise AppError.auth("缺少安装令牌")
+    await validate_install_token(session, token, settings=settings)
+    return token
 
 
 @router.post("/install-tokens")
@@ -354,13 +310,10 @@ async def install_settings(
 async def install_script(
     request: Request,
     token: str = Query(default=""),
-    code: str = Query(default=""),
     download: int = Query(default=0),
 ) -> PlainTextResponse:
     async with request.app.state.db.sessionmaker() as session:
-        _mode, credential = await require_install_credential(
-            request, session, token=token, code=code
-        )
+        credential = await require_install_credential(request, session, token=token)
     script = render_ps1(request, credential)
     headers = {"Cache-Control": "no-store"}
     if download:
@@ -374,12 +327,9 @@ async def install_script(
 async def install_wrapper(
     request: Request,
     token: str = Query(default=""),
-    code: str = Query(default=""),
 ) -> PlainTextResponse:
     async with request.app.state.db.sessionmaker() as session:
-        _mode, credential = await require_install_credential(
-            request, session, token=token, code=code
-        )
+        credential = await require_install_credential(request, session, token=token)
     wrapper = render_cmd(request, credential)
     return PlainTextResponse(
         wrapper,
@@ -401,7 +351,7 @@ async def bootstrap(request: Request) -> dict[str, Any]:
             "version": resolve_version(),
             "base_urls": list(settings.base_urls),
             "console_host": settings.console_hosts[0] if settings.console_hosts else "",
-            "enroll_required": bool(settings.enroll_code),
+            "enroll_required": True,
             "install_token_required": True,
         }
     )
@@ -459,7 +409,6 @@ async def download_agent(
 __all__ = [
     "DEFAULT_TOKEN_TTL_S",
     "MAX_TOKEN_USES",
-    "consume_install_token",
     "install_info",
     "public_router",
     "render_cmd",

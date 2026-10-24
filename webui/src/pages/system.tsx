@@ -147,7 +147,6 @@ export function SystemPage() {
                 <dt className="text-faint">安装</dt>
                 <dd className="text-soft">
                   {system.install.enabled ? `可用 · 待用令牌 ${system.install.available_tokens}` : "未启用"}
-                  {system.install.legacy_code_enabled ? " · 旧注册码仍兼容" : ""}
                 </dd>
               </dl>
             </section>

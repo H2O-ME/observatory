@@ -5,7 +5,7 @@
 
 0.2.10 版本会真起服务端 + 真起受控端（仅 Windows）。0.3.0 的端到端验收在：
 - `tests/integration/`（真起服务端 + 假受控端；W1 后换真受控端）
-- `tests/contract/test_legacy_v2.py::test_n2_zero_reinstall_upgrade`（N2 零重装升级）
+- `tests/acceptance/test_n1_n4.py::test_n2_legacy_surface_removed_enroll_roundtrip`（N2：0.2.x 端点删净 + enroll 链路）
 - `tests/acceptance/`（A1..A24）
 原实现保留在 tag `pre-rewrite-0.2.10`。
 """

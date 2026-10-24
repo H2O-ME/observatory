@@ -1,4 +1,4 @@
-"""集成：真起新服务端（app 装配 + 真 DB 迁移 + media worker + legacy 路由）。"""
+"""集成：真起新服务端（app 装配 + 真 DB 迁移 + media worker + 真实安装链路）。"""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.helpers import legacy_token, running_app
+from tests.helpers import running_app
 
 pytestmark = pytest.mark.integration
 
@@ -183,28 +183,28 @@ def test_link_auth_semantics(tmp_dir: Path) -> None:
         assert gone.json()["code"] == "GONE"
 
 
-def test_registry_has_single_session_type_after_legacy_and_v3(tmp_dir: Path) -> None:
-    """混合载体回归（Lead 要求）：registry 只能有 AgentSession，legacy 端点仍可用。
+def test_registry_has_single_session_type_after_enroll_and_v3(tmp_dir: Path) -> None:
+    """混合载体回归（Lead 要求）：registry 只能有 AgentSession。
 
-    0.2.x enroll 先注册 protocol=2 的 AgentSession；v3 link 用同一 token 升级会话后，
-    旧 heartbeat 端点必须继续工作，且不能再出现第二种会话类型（C1）。
+    真实安装链路 enroll 出的设备令牌走 v3 link 后，registry 里必须是
+    protocol=3 的会话且不存在第二种会话类型（C1）。
     """
 
     from observatory.link.session import AgentSession
-    from tests.contract.fixtures import agent_0_2_10 as legacy
+    from tests.helpers import enroll_token, running_app
 
     with running_app(tmp_dir) as client:
-        token = legacy_token(client)
+        token = enroll_token(client)
         hello = {
             "v": 3,
             "id": "mix-1",
             "t": "hello",
             "ts_ms": 1_730_000_000_000,
             "body": {
-                "agent_version": "0.3.0",
+                "agent_version": "0.3.1",
                 "protocol": 3,
                 "boot_id": "mix-boot",
-                "device_uid": "legacy-uid",
+                "device_uid": "OBS-ENROLL-TEST",
                 "last_ack_id": "",
                 "device_time_ms": 1_730_000_000_000,
             },
@@ -222,63 +222,49 @@ def test_registry_has_single_session_type_after_legacy_and_v3(tmp_dir: Path) -> 
         assert all(isinstance(session, AgentSession) for session in sessions), [
             type(session).__name__ for session in sessions
         ]
-        assert any(int(getattr(session, "protocol", 0)) == 3 for session in sessions), "v3 会话必须标记 protocol=3"
-
-        heartbeat = client.post(
-            "/api/v1/agent/heartbeat",
-            headers={"X-Device-Token": token},
-            json=legacy.HEARTBEAT_REQUEST,
-        )
-        assert heartbeat.status_code == 200, heartbeat.text
-        assert isinstance(heartbeat.json().get("config"), dict)
+        assert all(int(getattr(session, "protocol", 0)) == 3 for session in sessions), "会话必须标记 protocol=3"
 
 
-def test_fake_legacy_agent_roundtrip(tmp_dir: Path) -> None:
-    """N2 的集成形态：0.2.10 真实报文在当前服务端上能完整跑一轮。"""
+def test_enrolled_agent_frame_roundtrip(tmp_dir: Path) -> None:
+    """集成形态：真实安装链路 enroll 出的设备令牌能完整上传一帧。"""
 
     from PIL import Image
 
-    from tests.contract.fixtures import agent_0_2_10 as legacy
+    from tests.helpers import enroll_token, running_app
 
     with running_app(tmp_dir) as client:
-        enroll = client.post("/api/v1/agent/enroll", json=legacy.enroll_request(code="test-enroll-code"))
-        assert enroll.status_code == 200, enroll.text
-        enroll_body = enroll.json()
-        assert set(enroll_body) >= legacy.ENROLL_RESPONSE_REQUIRED_KEYS
-        token = enroll_body["token"]
-        headers = {legacy.DEVICE_TOKEN_HEADER: token}
-
-        heartbeat = client.post("/api/v1/agent/heartbeat", headers=headers, json=legacy.HEARTBEAT_REQUEST)
-        assert heartbeat.status_code == 200, heartbeat.text
-        assert set(heartbeat.json()) >= legacy.HEARTBEAT_RESPONSE_REQUIRED_KEYS
-
-        polled = client.get("/api/v1/agent/commands", params={"wait": 0}, headers=headers)
-        assert polled.status_code == 200
-        assert set(polled.json()) >= legacy.POLL_RESPONSE_REQUIRED_KEYS
+        token = enroll_token(client)
+        headers = {"X-Device-Token": token}
 
         buffer = io.BytesIO()
         Image.new("RGB", (64, 48), (10, 200, 30)).save(buffer, format="WEBP")
         frame = client.post(
             "/api/v1/agent/frames",
-            params=legacy.FRAME_UPLOAD_QUERY,
-            headers={**headers, **legacy.FRAME_UPLOAD_HEADERS},
+            params={"session_id": 1, "kind": "screen"},
+            headers={**headers, "Content-Type": "image/webp", "X-Frame-Id": "boot-frame-1"},
             content=buffer.getvalue(),
         )
         assert frame.status_code == 200, frame.text
-        assert set(frame.json()) >= legacy.FRAME_UPLOAD_RESPONSE_REQUIRED_KEYS
+        body = frame.json()
+        assert body["stored"] is True
+        first_frame_id = body["frame_id"]
 
-        state = client.get("/api/v1/agent/state", headers=headers)
-        assert state.status_code == 200
-        assert {"presence", "server_version", "server_time_ms"} <= set(state.json())
+        # X-Frame-Id 幂等：同一 frame_id 重复上传返回同一行，不产生新帧
+        replay = client.post(
+            "/api/v1/agent/frames",
+            params={"session_id": 1, "kind": "screen"},
+            headers={**headers, "Content-Type": "image/webp", "X-Frame-Id": "boot-frame-1"},
+            content=buffer.getvalue(),
+        )
+        assert replay.status_code == 200, replay.text
+        assert replay.json()["frame_id"] == first_frame_id
 
-        # 401 分支（旧端只依据状态码清 token 重新 enroll；0.3.0 错误体已统一为
-        # {code,message,retryable}，因此这里同时接受新体和旧端夹具里的 {detail}）
+        # 401 分支：错误体统一为 {code,message,retryable}
         denied = client.post(
-            "/api/v1/agent/heartbeat",
-            headers={legacy.DEVICE_TOKEN_HEADER: "invalid"},
-            json=legacy.HEARTBEAT_REQUEST,
+            "/api/v1/agent/frames",
+            params={"kind": "screen"},
+            headers={"X-Device-Token": "invalid", "Content-Type": "image/webp"},
+            content=buffer.getvalue(),
         )
         assert denied.status_code == 401
-        denied_body = denied.json()
-        message = denied_body.get("detail") or denied_body.get("message") or ""
-        assert message == "设备令牌无效", denied_body
+        assert denied.json()["message"] == "设备令牌无效", denied.json()

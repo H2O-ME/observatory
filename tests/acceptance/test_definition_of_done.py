@@ -166,8 +166,7 @@ def test_a04_secrets_never_reach_agent_or_devices_api(tmp_dir: Path) -> None:
 
     from observatory.console.dto import device_safe_config
     from observatory.core.settings_spec import AGENT_VISIBLE_KEYS, SECRET_KEYS
-    from tests.contract.fixtures import agent_0_2_10 as legacy
-    from tests.helpers import TEST_ADMIN_PASSWORD, legacy_token, running_app
+    from tests.helpers import TEST_ADMIN_PASSWORD, enroll_token, running_app
 
     # 1) 单一投影：secret 键被剥离，agent 可见集与 secret 集不相交
     assert not (AGENT_VISIBLE_KEYS & SECRET_KEYS)
@@ -192,14 +191,9 @@ def test_a04_secrets_never_reach_agent_or_devices_api(tmp_dir: Path) -> None:
         )
         assert patched.status_code == 200, patched.text
 
-        token = legacy_token(client)
-        headers = {"X-Device-Token": token}
-        heartbeat = client.post("/api/v1/agent/heartbeat", headers=headers, json=legacy.HEARTBEAT_REQUEST)
-        assert heartbeat.status_code == 200
-        config = heartbeat.json()["config"]
-        assert not (set(config) & SECRET_KEYS), f"下发 config 泄漏 secret: {set(config) & SECRET_KEYS}"
-        assert "ghp_very_secret_token" not in json.dumps(config, ensure_ascii=False)
-
+        token = enroll_token(client)
+        assert token, "enroll 应返回设备令牌"
+        # v3 链路的 config 出口是 enroll 响应与 welcome.config；enroll 响应即投影结果
         devices = client.get("/api/v1/devices").json()["data"]["devices"]
         assert devices, "至少应有一台已注册设备"
         serialized = json.dumps(devices, ensure_ascii=False)
@@ -214,7 +208,7 @@ def test_a04_secrets_never_reach_agent_or_devices_api(tmp_dir: Path) -> None:
 
     # 2) 静态：所有出站 config 路径都走同一个投影函数
     server = REPO_ROOT / "server/observatory"
-    for relative in ("console/settings.py", "console/devices.py", "legacy/agent_v2.py"):
+    for relative in ("console/settings.py", "console/devices.py", "console/enroll.py"):
         assert "device_safe_config" in (server / relative).read_text(encoding="utf-8"), relative
 
 
@@ -462,10 +456,10 @@ def test_a09_no_waiter_leak_after_1000_commands(tmp_dir: Path) -> None:
 
     from observatory.core.clock import now_ms
     from observatory.core.models import Command, Device
-    from tests.helpers import legacy_token, running_app
+    from tests.helpers import enroll_token, running_app
 
     with running_app(tmp_dir) as client:
-        legacy_token(client)
+        enroll_token(client)
         app = client.app
 
         async def first_device_id() -> int:
@@ -687,7 +681,7 @@ def test_a12_single_clock_source(tmp_dir: Path) -> None:
 
     from observatory.console.dto import file_entry_out, stamp
     from observatory.core.clock import now_ms
-    from tests.helpers import TEST_ADMIN_PASSWORD, legacy_token, running_app
+    from tests.helpers import TEST_ADMIN_PASSWORD, enroll_token, running_app
 
     # 1) DTO 层：server_time_ms 由服务端时钟注入；设备时间改名 device_time_ms
     before = now_ms()
@@ -702,7 +696,7 @@ def test_a12_single_clock_source(tmp_dir: Path) -> None:
     with running_app(tmp_dir) as client:
         login = client.post("/api/v1/auth/login", json={"password": TEST_ADMIN_PASSWORD})
         assert login.status_code == 200
-        legacy_token(client)
+        enroll_token(client)
         listed = client.get("/api/v1/devices")
         assert listed.status_code == 200
         body = listed.json()
@@ -862,10 +856,9 @@ def test_a17_pipe_acl_and_401_reregistration(tmp_dir: Path) -> None:
 
 
 def test_a18_install_token_single_use_ttl_bound(tmp_dir: Path) -> None:
-    """A18：安装令牌一次性 + TTL + 绑定首台设备；.cmd 不含长期共享注册码。"""
+    """A18：安装令牌一次性 + TTL + 绑定首台设备；脚本只嵌入一次性令牌。"""
 
-    from tests.contract.fixtures import agent_0_2_10 as legacy
-    from tests.helpers import TEST_ADMIN_PASSWORD, TEST_ENROLL_CODE, running_app
+    from tests.helpers import TEST_ADMIN_PASSWORD, running_app
 
     with running_app(tmp_dir) as client:
         login = client.post("/api/v1/auth/login", json={"password": TEST_ADMIN_PASSWORD})
@@ -885,16 +878,20 @@ def test_a18_install_token_single_use_ttl_bound(tmp_dir: Path) -> None:
         assert too_short.status_code == 422
         assert too_short.json()["code"] == "BAD_REQUEST"
 
-        # 下载脚本只嵌入一次性令牌，不含长期共享注册码
+        # 下载脚本只嵌入一次性令牌（0.3.1 起不再接受共享注册码）
         cmd = client.get("/api/v1/public/install.cmd", params={"token": token})
         assert cmd.status_code == 200, cmd.text
         assert token in cmd.text, "install.cmd 必须携带一次性令牌"
-        assert TEST_ENROLL_CODE not in cmd.text, "install.cmd 不得出现长期共享注册码"
+        assert "@@ENROLL_CODE@@" not in cmd.text
+        code_query = client.get("/api/v1/public/install.cmd", params={"code": "whatever"})
+        assert code_query.status_code == 401, "注册码路径必须被拒绝"
 
         # 一次性：首次 enroll 消耗成功，复用失败（即使换设备）
-        payload = legacy.enroll_request(code="")
-        payload.pop("code", None)
-        payload["install_token"] = token
+        payload = {
+            "uid": "OBS-A18-DEVICE",
+            "hostname": "a18",
+            "install_token": token,
+        }
         first = client.post("/api/v1/agent/enroll", json=payload)
         assert first.status_code == 200, first.text
 
@@ -908,6 +905,12 @@ def test_a18_install_token_single_use_ttl_bound(tmp_dir: Path) -> None:
         listed = client.get("/api/v1/install-tokens").json()["data"]["tokens"]
         assert listed and listed[0]["used"] is True
         assert listed[0]["used_device_id"] is not None
+
+        # 同设备重消费放行（A17 自愈路径：401 后带同一令牌重新入网）
+        again = dict(payload)
+        again["install_token"] = token
+        third = client.post("/api/v1/agent/enroll", json=again)
+        assert third.status_code == 200, third.text
 
 
 def test_a19_docs_and_version_consistency() -> None:

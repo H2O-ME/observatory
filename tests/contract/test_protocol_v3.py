@@ -89,40 +89,37 @@ def test_idempotency_contracts(tmp_dir: Path) -> None:
 
 
 def test_c1_no_second_heartbeat_or_result_implementation() -> None:
-    """C1：除 legacy/ 外，代码里搜不到第二套 heartbeat/result HTTP 端点。"""
+    """C1：代码里搜不到第二套 heartbeat/result HTTP 端点（0.3.1 起 legacy 已删）。"""
 
     offenders = []
     for path in SERVER_SRC.rglob("*.py"):
-        if "legacy" in path.parts:
-            continue
         text = path.read_text(encoding="utf-8")
         if re.search(r'@router\.(get|post)\("/(heartbeat|commands)', text):
             offenders.append(str(path.relative_to(REPO_ROOT)))
-    assert offenders == [], f"C1 违规（旧端点必须在 legacy/ 内）: {offenders}"
+    assert offenders == [], f"C1 违规: {offenders}"
 
 
 def test_c2_frames_have_single_ingress() -> None:
-    """C2：新代码里没有 WS 二进制帧分支（legacy/ 除外）。"""
+    """C2：没有 WS 二进制帧分支（legacy 已删，帧只有 /agent/frames 一条路）。"""
 
     offenders = []
     for path in SERVER_SRC.rglob("*.py"):
-        if "legacy" in path.parts:
-            continue
         text = path.read_text(encoding="utf-8")
         if re.search(r'kind\s*==\s*"frame"', text):
             offenders.append(str(path.relative_to(REPO_ROOT)))
     assert offenders == [], f"C2 违规: {offenders}"
 
 
-def test_c7_legacy_is_imported_only_by_assembly() -> None:
+def test_c7_legacy_layer_is_gone() -> None:
+    """C7（0.3.1 改版）：legacy 兼容层已整体删除，任何代码不得引用。"""
+
+    assert not (SERVER_SRC / "legacy").exists(), "legacy/ 目录应已删除"
     offenders = []
     for path in SERVER_SRC.rglob("*.py"):
-        if "legacy" in path.parts or path.name == "main.py":
-            continue
         text = path.read_text(encoding="utf-8")
-        if re.search(r"from\s+\.+legacy|import\s+observatory\.legacy", text):
+        if re.search(r"from\s+\.+legacy|import\s+observatory\.legacy|agent_v2", text):
             offenders.append(str(path.relative_to(REPO_ROOT)))
-    assert offenders == [], f"C7 违规: {offenders}"
+    assert offenders == [], f"C7 违规（legacy 残留引用）: {offenders}"
 
 
 def test_c4_registry_not_read_outside_presence() -> None:
@@ -131,7 +128,7 @@ def test_c4_registry_not_read_outside_presence() -> None:
     allowed = {"presence.py", "registry.py", "session.py", "carrier_http.py", "carrier_ws.py"}
     offenders = []
     for path in SERVER_SRC.rglob("*.py"):
-        if path.name in allowed or "legacy" in path.parts:
+        if path.name in allowed:
             continue
         text = path.read_text(encoding="utf-8")
         if re.search(r"registry\.(get|attach|detach)\(", text):

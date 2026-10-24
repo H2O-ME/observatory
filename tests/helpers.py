@@ -17,7 +17,6 @@ SERVER_DIR = REPO_ROOT / "server"
 #: 测试用固定环境（全部是测试值，不是生产凭据）
 TEST_SECRET_KEY = "test-secret-key-0123456789abcdef0123456789"
 TEST_ADMIN_PASSWORD = "test-admin-password"
-TEST_ENROLL_CODE = "test-enroll-code"
 TEST_CONSOLE_HOST = "control.example.test"
 TEST_AGENT_HOSTS = "agent.example.test"
 
@@ -36,7 +35,6 @@ def prepare_env(tmp_dir: Path) -> None:
             "OBS_DATA_DIR": str(tmp_dir),
             "OBS_SECRET_KEY": TEST_SECRET_KEY,
             "OBS_ADMIN_PASSWORD": TEST_ADMIN_PASSWORD,
-            "OBS_ENROLL_CODE": TEST_ENROLL_CODE,
             "OBS_CONSOLE_HOST": TEST_CONSOLE_HOST,
             "OBS_AGENT_HOSTS": TEST_AGENT_HOSTS,
         }
@@ -64,12 +62,24 @@ def running_app(tmp_dir: Path) -> Iterator[object]:
         yield client
 
 
-def legacy_token(client: object) -> str:
-    """用 0.2.10 真实 enroll 报文换设备令牌（legacy 路由在 0.4 前一直提供）。"""
+def enroll_token(client: object, *, uid: str = "OBS-ENROLL-TEST") -> str:
+    """走真实安装链路：控制台签发一次性令牌 → v3 enroll → 返回设备令牌。"""
 
-    from tests.contract.fixtures import agent_0_2_10 as legacy  # noqa: PLC0415
-
-    response = client.post("/api/v1/agent/enroll", json=legacy.enroll_request(code=TEST_ENROLL_CODE))
+    login = client.post("/api/v1/auth/login", json={"password": TEST_ADMIN_PASSWORD})
+    assert login.status_code == 200, login.text
+    issued = client.post("/api/v1/install-tokens", json={"ttl_s": 600})
+    assert issued.status_code == 200, issued.text
+    install_token = issued.json()["data"]["token"]
+    payload = {
+        "uid": uid,
+        "hostname": "enroll-test",
+        "os_name": "Windows",
+        "os_version": "11",
+        "arch": "AMD64",
+        "agent_version": "0.3.1",
+        "install_token": install_token,
+    }
+    response = client.post("/api/v1/agent/enroll", json=payload)
     assert response.status_code == 200, response.text
     token = response.json().get("token")
     assert isinstance(token, str) and token
@@ -202,9 +212,8 @@ __all__ = [
     "TEST_ADMIN_PASSWORD",
     "TEST_AGENT_HOSTS",
     "TEST_CONSOLE_HOST",
-    "TEST_ENROLL_CODE",
     "TEST_SECRET_KEY",
-    "legacy_token",
+    "enroll_token",
     "prepare_env",
     "run_win_smoke",
     "running_app",

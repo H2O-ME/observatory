@@ -421,7 +421,6 @@ export interface InstallArtifact {
 export interface InstallInfo {
   enabled: boolean;
   enroll_required: boolean;
-  legacy_code_enabled: boolean;
   /** Unused, unexpired one-shot tokens currently in the database. */
   available_tokens: number;
   token_ttl_minutes: number;

@@ -1,8 +1,7 @@
 """Command line entry point: ``python -m observatory <command>``.
 
-Subcommands are unchanged from 0.2.x (``serve/version/enroll-code/packages/
-package-add``). The CLI reads/writes only core modules; it never imports the
-legacy compatibility layer.
+Subcommands: ``serve/version/packages/package-add``. The CLI reads/writes only
+core modules.
 """
 
 from __future__ import annotations
@@ -17,7 +16,6 @@ from pathlib import Path
 import sqlalchemy
 
 from .core.config import Settings, get_settings, resolve_version
-from .core.crypto import new_device_token
 from .core.db import Database
 from .core.models import Package
 
@@ -54,14 +52,6 @@ def _version(_args: argparse.Namespace) -> int:
     print(f"  agent_hosts  : {settings.agent_host_list}")
     print(f"  base_urls    : {settings.base_urls}")
     print("  bind default : 127.0.0.1:8443")
-    return 0
-
-
-def _enroll_code(_args: argparse.Namespace) -> int:
-    # Device tokens and enrollment codes share one entropy source/format.
-    code = new_device_token()
-    print("把下面这行写入环境（.env）后重启服务：")
-    print(f"OBS_ENROLL_CODE={code}")
     return 0
 
 
@@ -157,9 +147,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     version = sub.add_parser("version", help="显示版本与解析后的配置")
     version.set_defaults(func=_version)
-
-    code = sub.add_parser("enroll-code", help="生成一个注册码")
-    code.set_defaults(func=_enroll_code)
 
     packages = sub.add_parser("packages", help="受控端安装包")
     packages.set_defaults(func=_package_list)
