@@ -102,8 +102,14 @@ MIN_HTTP_ROUND_S: Final[float] = 1.0
 #: 下行信封队列容量：消费端（命令分发）卡住时给回压，不无限攒内存。
 INBOX_MAX: Final[int] = 256
 INBOX_PUT_TIMEOUT_S: Final[float] = 10.0
-#: 401 后拿不到新令牌的等待时间（避免打爆注册端点）。
+#: 401 后拿不到新令牌的首次等待时间（避免打爆注册端点）；F32 起作为指数退避
+#: 的基数（15s→30s→…→3600s 封顶）。
 REAUTH_RETRY_S: Final[float] = 15.0
+#: F32：一次成功的重新注册结果在这么长时间内被并发的 401 直接复用，
+#: 不再重复 enroll（install_token 是一次性的，重复消费会烧掉令牌）。
+REAUTH_RESULT_REUSE_S: Final[float] = 60.0
+#: F32：重新注册连续失败的退避上限。
+REAUTH_BACKOFF_MAX_S: Final[float] = 3600.0
 #: 未知下行类型的日志上限：超过后每个类型只记一次，避免刷屏（仍可观测）。
 UNKNOWN_TYPE_LOG_LIMIT: Final[int] = 32
 
@@ -396,6 +402,15 @@ class Link:
         #: 初值从 outbox 的持久化游标恢复，重启后不会让服务端重发已处理的下行。
         self._last_downlink_id = self._outbox.last_downlink_id
         self._terminated = False
+        #: F32：重新注册单飞（single-flight）。载体循环、帧循环、WS 探测三处
+        #: 都会在 401 时并发调用 ``_reauth_or_wait``，没有互斥的话两次并发
+        #: enroll 会把一次性 install_token 烧掉，设备永久 401。
+        self._reauth_lock = asyncio.Lock()
+        #: 最近一次成功重新注册的失效时刻（``loop.time()`` 基准）；在此之前
+        #: 并发的 401 直接复用结果。
+        self._reauth_ok_until = 0.0
+        #: 重新注册连续失败次数（驱动指数退避）。
+        self._reauth_failures = 0
 
     # -- 只读状态 --------------------------------------------------------
     @property
@@ -1229,13 +1244,14 @@ class Link:
     async def _on_downlink(self, envelope: Envelope) -> None:
         """处理一条下行信封：协议级类型内部消化，其余交给 ``recv()``。
 
-        每一条成功解码并"处理"的下行都会推进下行游标 ``_last_downlink_id``，
-        下次 HTTP 请求/WS hello 用它告诉服务端"这些下行我已经收到"。
+        F32：下行游标 ``_last_downlink_id`` 只在**成功交付/消化**之后才推进
+        （经 :meth:`_advance_downlink`）。此前是"先推进再投递"，``_deliver``
+        队列满 10s 丢弃信封时游标已经宣告"处理到这里了"，服务端不会重发，
+        config/命令就静默丢失；现在交付失败会回滚游标，下一次 HTTP 请求/WS
+        hello 用旧值，服务端按游标重投（信封按 id 幂等）。
         """
 
         previous_downlink = self._last_downlink_id
-        self._last_downlink_id = envelope.id
-        self._outbox.note_downlink(envelope.id)
 
         if not is_known_type(envelope.type):
             self._unknown_messages += 1
@@ -1245,6 +1261,8 @@ class Link:
                 log.warning("收到未知下行信封类型 %r（id=%s），已忽略", envelope.type, envelope.id)
             elif not first_time:
                 log.debug("再次收到未知下行类型 %r，忽略", envelope.type)
+            # 未知类型已"消化"（忽略且可观测）：可以推进游标。
+            self._advance_downlink(envelope.id)
             return
 
         body = envelope.body_dict
@@ -1265,15 +1283,32 @@ class Link:
 
         if envelope.type == "ping":
             await self._reply_pong(envelope)
+            self._advance_downlink(envelope.id)
             return
         if envelope.type == "pong":
             # 心跳回执：只用于 ack_id/时钟校准，不进业务队列。
+            self._advance_downlink(envelope.id)
             return
         if envelope.type == "welcome":
             self._apply_welcome(body)
         elif envelope.type == "config":
             self._apply_config(body)
-        await self._deliver(envelope)
+        if await self._deliver(envelope):
+            self._advance_downlink(envelope.id)
+        else:
+            # 队列满被丢弃：回滚游标，让服务端在下一轮重投（此时不能推进游标）。
+            self._last_downlink_id = previous_downlink
+            log.error(
+                "下行 %s 未交付，游标回滚到 %s（等待服务端重投）",
+                envelope.id,
+                previous_downlink or "(空)",
+            )
+
+    def _advance_downlink(self, msg_id: str) -> None:
+        """成功消化/交付一条下行后推进游标（内存 + 节流落盘，F33）。"""
+
+        self._last_downlink_id = msg_id
+        self._outbox.note_downlink(msg_id)
 
     async def _reply_pong(self, _ping: Envelope) -> None:
         try:
@@ -1309,16 +1344,20 @@ class Link:
                 log.info("心跳间隔更新为 %ss", clamped)
             self._heartbeat_interval_s = clamped
 
-    async def _deliver(self, envelope: Envelope) -> None:
+    async def _deliver(self, envelope: Envelope) -> bool:
+        """把信封放进下行队列；返回是否交付成功（F32：调用方据此推进游标）。"""
+
         try:
             await asyncio.wait_for(self._inbox.put(envelope), timeout=INBOX_PUT_TIMEOUT_S)
+            return True
         except asyncio.TimeoutError:
             log.error(
-                "下行队列已满 %ss，丢弃信封 %s id=%s（服务端会因回执超时重投）",
+                "下行队列已满 %ss，丢弃信封 %s id=%s（游标未推进，服务端会重投）",
                 INBOX_PUT_TIMEOUT_S,
                 envelope.type,
                 envelope.id,
             )
+            return False
 
     def _on_binary(self, blob: bytes) -> None:
         """WS 二进制下行：规格只定义上行控制帧；下行的未知二进制记日志忽略。"""
@@ -1367,30 +1406,64 @@ class Link:
         self._put_sentinel()
 
     async def _reauth_or_wait(self) -> None:
-        """401 之后走一次重新注册（A17）；失败则等待后重试，不做静默重连。"""
+        """401 之后走一次重新注册（A17）；全程单飞（single-flight）+ 指数退避。
 
-        callback = self._on_unauthorized
-        if callback is None:
-            log.error("设备令牌被拒绝，但没有配置重新注册回调；%.0fs 后重试", REAUTH_RETRY_S)
+        F32：载体循环、帧循环、WS 探测三处都会在 401 时调用本方法。注册是
+        **一次性 install_token** 的消费动作，两个循环并发 enroll 会把令牌烧掉、
+        设备永久 401，因此全程持一把 ``asyncio.Lock`` 串行化：
+
+        - 拿到锁后若 ``REAUTH_RESULT_REUSE_S`` 内已有成功结果，直接复用返回，
+          不再重复 enroll；
+        - 连续失败时按 ``REAUTH_RETRY_S`` 为基数指数退避（封顶
+          ``REAUTH_BACKOFF_MAX_S``）；退避在锁内等待，排队的调用方会落到同一次
+          退避之后，不会各自打注册端点。
+        """
+
+        async with self._reauth_lock:
+            loop = asyncio.get_running_loop()
+            now = loop.time()
+            if now < self._reauth_ok_until:
+                log.debug(
+                    "复用 %.0fs 前的重新注册结果，不重复 enroll",
+                    self._reauth_ok_until - now,
+                )
+                return
+            if self._reauth_failures:
+                delay = min(
+                    REAUTH_RETRY_S * (2.0 ** min(self._reauth_failures - 1, 8)),
+                    REAUTH_BACKOFF_MAX_S,
+                )
+                log.warning(
+                    "重新注册连续失败 %s 次，%.0fs 后再试", self._reauth_failures, delay
+                )
+                await asyncio.sleep(delay)
+            callback = self._on_unauthorized
+            if callback is None:
+                log.error("设备令牌被拒绝，但没有配置重新注册回调")
+                self._outbox.replay()
+                self._reauth_failures += 1
+                return
+            log.warning("设备令牌被拒（401），执行重新注册（A17）")
+            try:
+                token = await callback()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - 注册失败要可观测，然后退避重试
+                log.exception("重新注册失败")
+                token = None
+            if token:
+                self._token = str(token)
+                self._reauth_failures = 0
+                self._reauth_ok_until = loop.time() + REAUTH_RESULT_REUSE_S
+                log.info("重新注册成功，链路将继续使用新令牌")
+                self._outbox.replay()
+                return
+            self._reauth_failures += 1
+            log.error(
+                "重新注册没有拿到新令牌（连续失败 %s 次），将按退避重试",
+                self._reauth_failures,
+            )
             self._outbox.replay()
-            await asyncio.sleep(REAUTH_RETRY_S)
-            return
-        log.warning("设备令牌被拒（401），执行重新注册（A17）")
-        try:
-            token = await callback()
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 - 注册失败要可观测，然后退避重试
-            log.exception("重新注册失败")
-            token = None
-        if token:
-            self._token = str(token)
-            log.info("重新注册成功，链路将继续使用新令牌")
-            self._outbox.replay()
-            return
-        log.error("重新注册没有拿到新令牌；%.0fs 后重试", REAUTH_RETRY_S)
-        self._outbox.replay()
-        await asyncio.sleep(REAUTH_RETRY_S)
 
     # --------------------------------------------------- HTTP 细节 ---
     async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:

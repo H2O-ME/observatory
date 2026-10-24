@@ -23,6 +23,17 @@
    采集/控制画面帧的头是 ``{"t": "frame"|"ctrl", ...}`` 的传输头（规格 §5.1 的二进制帧）。
 4. **可单测的读循环**：:func:`read_packet` 只依赖注入的 ``peek/read/sleep/stop``，
    在 Linux CI 上也能跑完整的粘包/半包测试。
+
+0.3.1（F30）的修正：
+
+1. **镜像路径查询**：旧实现用 ``GetModuleFileNameEx`` 查客户端镜像路径，该 API 需要
+   ``PROCESS_QUERY_INFORMATION``，对 ``PROCESS_QUERY_LIMITED_INFORMATION`` 句柄大概率
+   返回拒绝且异常被静默吞成空串 → service 模式下路径比对恒 False，所有 worker 被拒连。
+   改用 LIMITED 权限位可用的 ``QueryFullProcessImageNameW``（pywin32 优先、ctypes 兜底），
+   取不到路径时显式记日志并 fail-closed（:func:`identity_trusted` 返回 False）。
+2. **路径比对**：expected 与客户端镜像路径都 ``resolve()`` 后再比对。
+3. **句柄生命周期**：``_run`` 的 stop 检查移入 ``try``（否则 break 跳过 finally 泄漏
+   FIRST_PIPE_INSTANCE 实例）；关闭句柄与 ``send`` 的写入共用 ``_write_lock``。
 """
 
 from __future__ import annotations
@@ -192,15 +203,25 @@ def identity_trusted(
     expected_user_sid: str,
     expected_image_path: str | Path | None = None,
 ) -> bool:
-    """纯函数：客户端是否就是本会话应有的 worker。"""
+    """纯函数：客户端是否就是本会话应有的 worker。
+
+    0.3.1（F30）：``expected_image_path`` 启用时客户端镜像路径**必须**取到且一致——
+    取不到（空串）直接判 False（fail-closed），否则冒充者只要让路径查询失败即可绕过
+    比对。两侧路径都 ``resolve()`` 后再比对（``Path.resolve`` 对不存在的文件也安全），
+    避免相对/大小写形式差异导致误拒。
+    """
 
     if identity.session_id != expected_session_id:
         return False
     if identity.user_sid.upper() != expected_user_sid.upper():
         return False
     if expected_image_path is not None:
+        if not identity.image_path:
+            # F30 fail-closed：服务端取不到客户端镜像路径时不能放行。
+            return False
         expected = str(Path(expected_image_path).resolve()).lower()
-        if identity.image_path.lower() != expected:
+        actual = str(Path(identity.image_path).resolve()).lower()
+        if actual != expected:
             return False
     return True
 
@@ -208,6 +229,39 @@ def identity_trusted(
 def _require_windows(operation: str) -> None:
     if sys.platform != "win32":
         raise WindowsOnlyOperation(f"{operation} 只能在 Windows 上执行")
+
+
+def _query_image_path(process: Any, win32process: Any) -> str:
+    """读取进程镜像路径；失败抛异常，由调用方决定 fail-closed（F30）。
+
+    0.3.1 前用 ``GetModuleFileNameEx``：它需要 ``PROCESS_QUERY_INFORMATION``，对只有
+    ``PROCESS_QUERY_LIMITED_INFORMATION`` 的句柄大概率返回拒绝，且异常被静默吞掉，
+    等于镜像路径校验在 service 模式下恒为空 → 全部 worker 被拒连。
+    ``QueryFullProcessImageNameW`` 正是 LIMITED 权限位可用的 API；当前部署的 pywin32
+    构建未导出它，故 pywin32 优先、ctypes 兜底。
+    0.3.1 真机验证项：需在真机确认 LIMITED 句柄上 ``QueryFullProcessImageNameW`` 稳定
+    成功、且返回常规盘符路径（而非 ``\\Device\\...`` 设备路径）。
+    """
+
+    getter = getattr(win32process, "QueryFullProcessImageName", None)
+    if getter is not None:
+        return str(getter(process, 0))
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    size = wintypes.DWORD(1024)
+    buffer = ctypes.create_unicode_buffer(size.value)
+    if not kernel32.QueryFullProcessImageNameW(wintypes.HANDLE(int(process)), 0, buffer, ctypes.byref(size)):
+        raise OSError(f"QueryFullProcessImageNameW failed (winerror={ctypes.get_last_error()})")
+    return buffer.value
 
 
 def query_client_identity(handle: Any) -> ClientIdentity:
@@ -249,9 +303,18 @@ def query_client_identity(handle: Any) -> ClientIdentity:
             user_sid = str(win32security.ConvertSidToStringSid(sid))
         except Exception as exc:  # noqa: BLE001
             raise PipeSecurityError(f"读取客户端 SID 失败: {exc}") from exc
-        image_path = ""
-        with contextlib.suppress(Exception):  # 镜像路径仅作附加校验，取不到不影响 SID/会话判定
-            image_path = str(win32process.GetModuleFileNameEx(process, 0))
+        try:
+            image_path = _query_image_path(process, win32process)
+        except Exception as exc:  # noqa: BLE001 - 任何失败都按“取不到路径”处理（fail-closed）
+            # 0.3.1（F30）：不再 suppress 成空串。``expected_image_path`` 启用时空串会让
+            # :func:`identity_trusted` 返回 False（fail-closed）；这条 warning 明确区分
+            # “取路径失败”与 _run 拒连日志里的“路径不匹配”。
+            log.warning(
+                "read client image path failed pid=%s: %s (image check will fail closed)",
+                pid,
+                exc,
+            )
+            image_path = ""
         return ClientIdentity(pid=pid, session_id=session_id, user_sid=user_sid, image_path=image_path)
     finally:
         if token is not None:
@@ -368,6 +431,8 @@ class PipeServer:
             thread.join(timeout=0.2)
         if thread.is_alive():
             log.warning("pipe server thread for session %s did not exit in 10s", self.session_id)
+            # 0.3.1（F30）：兜底强关故意不取 _write_lock——线程多半阻塞在管道 I/O 上，
+            # 关句柄本身会把阻塞的 WriteFile/ConnectNamedPipe 解开；取锁反而可能死锁。
             handle = self._handle
             self._handle = None
             if handle is not None:
@@ -392,6 +457,9 @@ class PipeServer:
 
                 win32file.WriteFile(handle, data)
             except Exception as exc:  # noqa: BLE001 - 写失败意味着连接已死
+                # 0.3.1（F30）：写失败立即弃用句柄；读线程 finally 关句柄时持同一把
+                # _write_lock，避免句柄值被复用后写入新实例。
+                self._handle = None
                 self.connected.clear()
                 raise PipeUnavailable(f"写管道失败: {exc}") from exc
 
@@ -413,9 +481,12 @@ class PipeServer:
                 self._sleep(2.0)
                 continue
             self._handle = handle
-            if self._stop.is_set():
-                break  # stop() 可能在创建实例后才到达；交给 finally 关闭，避免实例泄漏
             try:
+                # 0.3.1（F30）：stop 检查必须在 try 内。放在 try 之前 break 会跳过 finally，
+                # 泄漏管道实例句柄——FILE_FLAG_FIRST_PIPE_INSTANCE 会让该会话的管道此后
+                # 永久创建失败。
+                if self._stop.is_set():
+                    break
                 try:
                     win32pipe.ConnectNamedPipe(handle, None)
                 except pywintypes.error as exc:
@@ -458,16 +529,19 @@ class PipeServer:
                 finally:
                     self.connected.clear()
             finally:
-                self._handle = None
+                # 0.3.1（F30）：关闭句柄必须与 send 的 WriteFile 同一把 _write_lock——
+                # 否则句柄值被系统复用后，迟到的写入可能打到新管道实例上。
                 # 注意：DisconnectNamedPipe 在 win32pipe，不在 win32file；两者分开 suppress，
                 # 否则前半句 AttributeError 会让 CloseHandle 永远不执行 → 管道实例句柄泄漏、
                 # 下一次 FIRST_PIPE_INSTANCE 创建失败（win_smoke 的 pipe_identity 抓到的真实回归）。
-                with contextlib.suppress(Exception):
-                    import win32pipe
+                with self._write_lock:
+                    self._handle = None
+                    with contextlib.suppress(Exception):
+                        import win32pipe
 
-                    win32pipe.DisconnectNamedPipe(handle)
-                with contextlib.suppress(Exception):
-                    win32file.CloseHandle(handle)
+                        win32pipe.DisconnectNamedPipe(handle)
+                    with contextlib.suppress(Exception):
+                        win32file.CloseHandle(handle)
 
     def _create_instance(self, win32pipe: Any) -> Any:
         open_mode = win32pipe.PIPE_ACCESS_DUPLEX | _FILE_FLAG_FIRST_PIPE_INSTANCE

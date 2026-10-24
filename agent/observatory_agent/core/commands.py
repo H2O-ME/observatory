@@ -8,7 +8,8 @@
 - ``CommandDispatcher.dispatch(command)`` 是**唯一**的执行入口，返回
   ``CommandResult``，由链路层包装成 ``result`` 信封；
 - 同一个 ``command.id`` 只真正执行一次，重复投递直接返回**同一份回执**
-  （规格 §5.3：重复执行返回同一回执）；
+  （规格 §5.3：重复执行返回同一回执）；执行中的并发重投返回 IN_FLIGHT 占位
+  回执，不并发执行（F38：回执缓存与 in-flight 集合全程持锁）；
 - 未注册类型/处理器抛异常都产出**可观测的失败回执**，绝不静默（C6）。
 
 纯逻辑：不读时钟、不做 IO、不 import link/win/tasks；时间由调用方注入。
@@ -19,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import threading
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -30,6 +32,9 @@ log = logging.getLogger(__name__)
 ERROR_UNSUPPORTED: Final[str] = "UNSUPPORTED"
 ERROR_BAD_REQUEST: Final[str] = "BAD_REQUEST"
 ERROR_INTERNAL: Final[str] = "INTERNAL"
+#: F38：同 id 命令仍在执行中（并发重投）时的占位回执错误码。它**不会**进
+#: 回执缓存——服务端稍后重投时仍能拿到正式回执。
+ERROR_IN_FLIGHT: Final[str] = "IN_FLIGHT"
 
 DEFAULT_RECEIPT_CACHE: Final[int] = 1024
 
@@ -115,7 +120,11 @@ class CommandDispatcher:
             raise ValueError("max_receipts 必须为正")
         self.handlers: dict[str, CommandHandler] = {}
         self._max_receipts = max_receipts
+        # F38：回执缓存的读写可能来自 3 个 worker 线程（消费下行命令的线程池），
+        # 同一 command_id 重投时无锁的 get/put 会让破坏性命令重复执行。
+        self._lock = threading.Lock()
         self._receipts: OrderedDict[str, CommandResult] = OrderedDict()
+        self._inflight: set[str] = set()
         self._executed = 0
         self._duplicates = 0
         self._failures = 0
@@ -138,30 +147,56 @@ class CommandDispatcher:
 
     # -- 执行 ------------------------------------------------------------
     async def dispatch(self, command: Command) -> CommandResult:
-        """执行一条命令；同 id 重复投递返回第一次的回执，不重复执行。"""
+        """执行一条命令；同 id 重复投递返回第一次的回执，不重复执行。
 
-        cached = self._receipts.get(command.id)
+        F38：``_receipts`` 的读写与 in-flight 标记全程持 ``_lock``——3 个
+        worker 线程并发 dispatch 时，同 id 重投要么命中已缓存回执、要么命中
+        in-flight 占位回执，绝不会并发执行两次破坏性命令。in-flight 占位回执
+        **不写缓存**：执行完成后重投的请求拿到的是正式回执。
+        """
+
+        with self._lock:
+            cached = self._receipts.get(command.id)
+            if cached is None and command.id in self._inflight:
+                busy = True
+            else:
+                busy = False
+                if cached is None:
+                    self._inflight.add(command.id)
         if cached is not None:
             self._duplicates += 1
             log.info("命令 %s 重复投递，返回既有回执（不重复执行）", command.id)
             return cached
-
-        handler = self.handlers.get(command.type)
-        if handler is None:
-            result = CommandResult(
+        if busy:
+            self._duplicates += 1
+            log.warning("命令 %s 正在执行中（并发重投），返回占位回执", command.id)
+            return CommandResult(
                 ok=False,
-                error=f"不支持的命令类型: {command.type}",
-                error_code=ERROR_UNSUPPORTED,
+                error="命令正在执行中，请等待执行完成后重投获取正式回执",
+                error_code=ERROR_IN_FLIGHT,
             )
-            log.warning("命令 %s 类型 %s 无处理器", command.id, command.type)
-        else:
-            self._executed += 1
-            result = await self._invoke(handler, command)
 
-        if not result.ok:
-            self._failures += 1
-        self._remember(command.id, result)
-        return result
+        try:
+            handler = self.handlers.get(command.type)
+            if handler is None:
+                result = CommandResult(
+                    ok=False,
+                    error=f"不支持的命令类型: {command.type}",
+                    error_code=ERROR_UNSUPPORTED,
+                )
+                log.warning("命令 %s 类型 %s 无处理器", command.id, command.type)
+            else:
+                self._executed += 1
+                result = await self._invoke(handler, command)
+
+            with self._lock:
+                if not result.ok:
+                    self._failures += 1
+                self._remember(command.id, result)
+            return result
+        finally:
+            with self._lock:
+                self._inflight.discard(command.id)
 
     async def _invoke(self, handler: CommandHandler, command: Command) -> CommandResult:
         try:
@@ -184,6 +219,7 @@ class CommandDispatcher:
 
     # -- 回执缓存 --------------------------------------------------------
     def _remember(self, command_id: str, result: CommandResult) -> None:
+        # 调用方已持锁（dispatch）；公开的 receipt/clear/stats 各自加锁。
         self._receipts[command_id] = result
         self._receipts.move_to_end(command_id)
         while len(self._receipts) > self._max_receipts:
@@ -191,24 +227,29 @@ class CommandDispatcher:
             log.debug("回执缓存淘汰 %s（上限 %s）", evicted, self._max_receipts)
 
     def receipt(self, command_id: str) -> CommandResult | None:
-        return self._receipts.get(command_id)
+        with self._lock:
+            return self._receipts.get(command_id)
 
     def stats(self) -> dict[str, int]:
-        return {
-            "executed": self._executed,
-            "duplicates": self._duplicates,
-            "failures": self._failures,
-            "receipts": len(self._receipts),
-            "handlers": len(self.handlers),
-        }
+        with self._lock:
+            return {
+                "executed": self._executed,
+                "duplicates": self._duplicates,
+                "failures": self._failures,
+                "receipts": len(self._receipts),
+                "handlers": len(self.handlers),
+            }
 
     def clear(self) -> None:
-        self._receipts.clear()
+        with self._lock:
+            self._receipts.clear()
+            self._inflight.clear()
 
 
 __all__ = [
     "DEFAULT_RECEIPT_CACHE",
     "ERROR_BAD_REQUEST",
+    "ERROR_IN_FLIGHT",
     "ERROR_INTERNAL",
     "ERROR_UNSUPPORTED",
     "Command",

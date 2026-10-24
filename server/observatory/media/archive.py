@@ -655,11 +655,10 @@ class ArchiveService:
     async def _open_session(self) -> AsyncIterator[AsyncSession]:
         scope = self._session_scope
         if scope is None:
-            from observatory.core import db as core_db
-
-            scope = getattr(core_db, "session_scope", None) or getattr(core_db, "get_session", None)
-        if scope is None:
-            raise RuntimeError("core.db.session_scope 未提供，归档 worker 无法独立落库")
+            # 0.3.1（F65）：旧的 fallback 会解析到 core.db.get_session——那是
+            # 需要 Request 参数的 FastAPI 依赖，调用即 TypeError（生产靠装配
+            # 注入掩盖）。session_scope 必须显式注入，缺失就大声失败。
+            raise RuntimeError("archive session_scope 未注入（装配层 media.configure 必须提供）")
         async with scope() as session:
             yield session
 

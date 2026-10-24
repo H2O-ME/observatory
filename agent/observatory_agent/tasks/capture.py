@@ -15,8 +15,9 @@ bug"的来源。0.3.0 只保留这一个 ``CaptureEngine``：
 桌面（给假 source 返回 PIL 图像即可）。
 
 线程模型：一个进程内一个引擎、一个采集线程。mss 的 DXGI/GDI 上下文不是线程
-安全的，``MssSource`` 因此按线程持有实例；引擎本身不做跨线程同步（旧代码的
-两套线程 + 事件已经够复杂了，不再增加）。
+安全的，``MssSource`` 因此按线程持有实例；``CapturePolicy`` 的状态被采集/控制/
+心跳/主循环多个线程读写，0.3.1（F36）起用 ``RLock`` 串行（``_streak += 1`` 是
+读改写，无锁会丢更新）。
 """
 
 from __future__ import annotations
@@ -43,6 +44,13 @@ SIGNATURE_CHANGED: Final[int] = 255
 CHANGE_INTERVALS_S: Final[tuple[int, ...]] = (5, 20, 60)
 #: 静止画面下强制出帧的间隔阶梯（秒）：保证时间线上不会出现大片空白。
 FORCED_INTERVALS_S: Final[tuple[int, ...]] = (60, 240, 300)
+#: 0.3.1（F36）：连续采集失败时的重试退避阶梯（毫秒）：0.5s → 2s → 10s 封顶。
+#: 没有它，锁屏一夜的机器会以 500ms 节奏空转 grab ~7 万次。
+FAILURE_BACKOFF_MS: Final[tuple[int, ...]] = (500, 2_000, 10_000)
+
+#: 0.3.1（F36）：变化判定的 top-k 格数——全桌平均差对局部变化（小弹窗）不敏感，
+#: 取绝对差最大的 32 格平均，一个 ~0.26 分的小弹窗就能被检出。
+SIGNATURE_TOP_K: Final[int] = 32
 
 DEFAULT_JPEG_QUALITY: Final[int] = 80
 MIN_JPEG_QUALITY: Final[int] = 30
@@ -64,20 +72,23 @@ class CaptureError(RuntimeError):
 
 # --------------------------------------------------------------- 纯函数 ---
 def signature_diff(previous: bytes | None, current: bytes) -> int:
-    """两帧 64×36 灰度指纹的平均绝对差（0..255，纯函数）。
+    """两帧 64×36 灰度指纹的差异分（0..255，纯函数）。
 
-    ``previous`` 为空或长度不一致时返回 ``SIGNATURE_CHANGED``（视为变化）：
-    宁可多传一帧，也不要把"换了桌面分辨率"误判成静止。
+    0.3.1（F36）：返回 ``max(top-k 平均, 全桌平均)``——top-k（``SIGNATURE_TOP_K``
+    格）负责局部变化（小弹窗只污染少数格，全桌平均只有 ~0.26 分，远低于阈值 8，
+    ``on_change_only`` 会漏检），全桌平均作为第二条件兜住"大面积缓慢渐变"这类
+    每格都变化但都不大的场景。``previous`` 为空或长度不一致时返回
+    ``SIGNATURE_CHANGED``：宁可多传一帧，也不要把"换了桌面分辨率"误判成静止。
     """
 
     if previous is None or not current:
         return SIGNATURE_CHANGED
     if len(previous) != len(current):
         return SIGNATURE_CHANGED
-    total = 0
-    for left, right in zip(previous, current):
-        total += abs(left - right)
-    return int(total / len(current))
+    diffs = sorted((abs(left - right) for left, right in zip(previous, current)), reverse=True)
+    full_average = sum(diffs) / len(diffs)
+    top_average = sum(diffs[:SIGNATURE_TOP_K]) / min(SIGNATURE_TOP_K, len(diffs))
+    return int(max(top_average, full_average))
 
 
 def is_changed(score: int, threshold: int) -> bool:
@@ -186,9 +197,14 @@ class CapturePolicy:
 
     状态只有三个数：连续静止次数、上次检查时刻、上次出帧时刻。没有计时器、
     没有线程、没有系统时钟，因此可以直接用合成时间轴单测。
+
+    0.3.1（F36）：本对象实际被采集/控制/心跳/主循环等多个线程共享，状态读写
+    都经 :attr:`_lock` 串行（``_streak += 1`` 是读改写，无锁会丢更新）；用
+    ``RLock`` 是因为 ``evaluate`` 内部还要调 ``next_due_in_ms``。
     """
 
     settings: CaptureSettings = field(default_factory=CaptureSettings)
+    _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)
     _streak: int = field(default=0, init=False)
     _last_check_ms: int = field(default=0, init=False)
     _last_capture_ms: int = field(default=0, init=False)
@@ -196,74 +212,86 @@ class CapturePolicy:
 
     # -- 配置/状态 -------------------------------------------------------
     def update_settings(self, settings: CaptureSettings) -> None:
-        self.settings = settings
+        with self._lock:
+            self.settings = settings
 
     def set_control_active(self, active: bool) -> None:
         """实时控制流期间暂停周期采集（两次 DXGI grab 会互相抢带宽）。"""
 
-        self._control_active = bool(active)
+        with self._lock:
+            self._control_active = bool(active)
 
     @property
     def control_active(self) -> bool:
-        return self._control_active
+        with self._lock:
+            return self._control_active
 
     @property
     def streak(self) -> int:
-        return self._streak
+        with self._lock:
+            return self._streak
 
     def reset(self) -> None:
-        self._streak = 0
-        self._last_check_ms = 0
-        self._last_capture_ms = 0
+        with self._lock:
+            self._streak = 0
+            self._last_check_ms = 0
+            self._last_capture_ms = 0
 
     # -- 查询 ------------------------------------------------------------
     def next_due_in_ms(self, now_ms: int) -> int:
         """距离下一次需要动作还有多少毫秒（``0`` 表示现在就该动）。"""
 
-        settings = self.settings
-        if not settings.enabled or self._control_active:
-            return 60_000
-        if settings.on_change_only:
-            next_forced = self._last_capture_ms + next_forced_interval_s(self._streak) * 1000
-            next_check = self._last_check_ms + next_change_interval_s(self._streak) * 1000
-            return max(0, min(next_forced, next_check) - int(now_ms))
-        return max(0, self._last_capture_ms + settings.interval_s * 1000 - int(now_ms))
+        with self._lock:
+            settings = self.settings
+            if not settings.enabled or self._control_active:
+                return 60_000
+            if settings.on_change_only:
+                next_forced = self._last_capture_ms + next_forced_interval_s(self._streak) * 1000
+                next_check = self._last_check_ms + next_change_interval_s(self._streak) * 1000
+                return max(0, min(next_forced, next_check) - int(now_ms))
+            return max(0, self._last_capture_ms + settings.interval_s * 1000 - int(now_ms))
 
     def evaluate(self, now_ms: int) -> CaptureDecision:
         """判断此刻该做什么；纯函数式（只读状态）。"""
 
-        now = int(now_ms)
-        settings = self.settings
-        if not settings.enabled:
-            return CaptureDecision("skip", "disabled")
-        if self._control_active:
-            return CaptureDecision("skip", "control_active")
+        with self._lock:
+            now = int(now_ms)
+            settings = self.settings
+            if not settings.enabled:
+                return CaptureDecision("skip", "disabled")
+            if self._control_active:
+                return CaptureDecision("skip", "control_active")
 
-        if settings.on_change_only:
-            if self._last_capture_ms == 0 or now - self._last_capture_ms >= next_forced_interval_s(self._streak) * 1000:
-                return CaptureDecision("capture", "forced")
-            if self._last_check_ms == 0 or now - self._last_check_ms >= next_change_interval_s(self._streak) * 1000:
-                return CaptureDecision("check", "change_check")
+            if settings.on_change_only:
+                if (
+                    self._last_capture_ms == 0
+                    or now - self._last_capture_ms >= next_forced_interval_s(self._streak) * 1000
+                ):
+                    return CaptureDecision("capture", "forced")
+                if self._last_check_ms == 0 or now - self._last_check_ms >= next_change_interval_s(self._streak) * 1000:
+                    return CaptureDecision("check", "change_check")
+                return CaptureDecision("skip", "waiting", due_in_ms=self.next_due_in_ms(now))
+
+            if self._last_capture_ms == 0 or now - self._last_capture_ms >= settings.interval_s * 1000:
+                return CaptureDecision("capture", "interval")
             return CaptureDecision("skip", "waiting", due_in_ms=self.next_due_in_ms(now))
-
-        if self._last_capture_ms == 0 or now - self._last_capture_ms >= settings.interval_s * 1000:
-            return CaptureDecision("capture", "interval")
-        return CaptureDecision("skip", "waiting", due_in_ms=self.next_due_in_ms(now))
 
     # -- 状态推进 --------------------------------------------------------
     def record_unchanged(self, now_ms: int) -> None:
         """检查过但画面没变：静止次数 +1，下一次检查间隔升档。"""
 
-        self._last_check_ms = int(now_ms)
-        self._streak += 1
+        with self._lock:
+            self._last_check_ms = int(now_ms)
+            self._streak += 1
 
     def record_captured(self, now_ms: int, *, changed: bool) -> None:
         """出了一帧：画面变化时静止次数清零（间隔回落到 5s）。"""
 
-        stamp = int(now_ms)
-        self._last_check_ms = stamp
-        self._last_capture_ms = stamp
-        self._streak = 0 if changed else self._streak + 1
+        with self._lock:
+            stamp = int(now_ms)
+            self._last_check_ms = stamp
+            self._last_capture_ms = stamp
+            self._streak = 0 if changed else self._streak + 1
 
 
 # --------------------------------------------------------------- 帧 ---
@@ -389,6 +417,10 @@ class CaptureEngine:
         self._failures = 0
         self._frames = 0
         self._last_logged_error = ""
+        # 0.3.1（F36）：连续失败退避计数（与 _failures 的健康语义分开维护，
+        # 但两条失败路径都汇入这里，成功抓屏即清零）。
+        self._backoff_failures = 0
+        self._last_failure_ms = 0
 
     # -- 配置 ------------------------------------------------------------
     @property
@@ -521,10 +553,33 @@ class CaptureEngine:
         )
 
     def next_due_in_ms(self, now_ms: int | None = None) -> int:
-        """worker 循环用它决定睡多久，避免固定 1s 空转。"""
+        """worker 循环用它决定睡多久，避免固定 1s 空转。
+
+        0.3.1（F36）：连续失败时叠加退避阶梯（0.5s → 2s → 10s 封顶）——
+        采不到屏（锁屏/无桌面）时策略本身可能给出 0ms，没有退避就会空转 grab。
+        """
 
         stamp = self.now_ms() if now_ms is None else int(now_ms)
-        return self._policy.next_due_in_ms(stamp)
+        due = self._policy.next_due_in_ms(stamp)
+        failures = self._backoff_failures
+        if failures <= 0:
+            return due
+        backoff_ms = FAILURE_BACKOFF_MS[min(failures - 1, len(FAILURE_BACKOFF_MS) - 1)]
+        remaining = backoff_ms - (stamp - self._last_failure_ms)
+        return max(due, max(0, remaining))
+
+    def record_failure(self, error: str = "", *, now_ms: int | None = None) -> None:
+        """0.3.1（F36）：记录一次采集失败（退避阶梯的输入）。
+
+        引擎内部的 ``CaptureError``（经 :meth:`_mark_failure`）与 runtime 采集
+        循环的兜底异常路径都要汇入这里；``error`` 非空时同时计入健康状态。
+        """
+
+        stamp = self.now_ms() if now_ms is None else int(now_ms)
+        if error:
+            self._mark_failure(stamp, error)
+        else:
+            self._record_backoff_failure(stamp)
 
     def monitors(self) -> list[dict[str, Any]]:
         try:
@@ -587,8 +642,15 @@ class CaptureEngine:
             raise CaptureError(f"JPEG 编码失败: {exc}") from exc
         return buffer.getvalue(), width, height
 
+    def _record_backoff_failure(self, stamp: int) -> None:
+        """0.3.1（F36）：推进失败退避计数（不触碰健康状态）。"""
+
+        self._backoff_failures += 1
+        self._last_failure_ms = int(stamp)
+
     def _mark_grab_ok(self) -> None:
         self._failures = 0
+        self._backoff_failures = 0  # 0.3.1（F36）：抓屏成功即清零退避
         self._last_error = ""
 
     def _mark_frame(self, stamp: int) -> None:
@@ -599,6 +661,7 @@ class CaptureEngine:
     def _mark_failure(self, stamp: int, error: str) -> None:
         self._failures += 1
         self._last_error = error
+        self._record_backoff_failure(stamp)  # 0.3.1（F36）：引擎内部失败同样进入退避
         repeated = error == self._last_logged_error
         if not repeated or self._failures % FAILURE_LOG_EVERY == 0:
             log.warning(
@@ -616,9 +679,11 @@ __all__ = [
     "DEFAULT_CONTROL_QUALITY",
     "DEFAULT_JPEG_QUALITY",
     "DEFAULT_MAX_WIDTH",
+    "FAILURE_BACKOFF_MS",
     "FORCED_INTERVALS_S",
     "SIGNATURE_CHANGED",
     "SIGNATURE_HEIGHT",
+    "SIGNATURE_TOP_K",
     "SIGNATURE_WIDTH",
     "CaptureDecision",
     "CaptureEngine",

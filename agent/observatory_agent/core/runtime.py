@@ -172,12 +172,16 @@ class CaptureHealthAggregator:
             if now_ms - int(value.get("updated_ms") or 0) <= CAPTURE_HEALTH_STALE_MS
         }
         workers = sorted(fresh)
+        # at_ms lets the server run its own capture_stale_s check (0.3.1 F3);
+        # without it the server-side threshold was a no-op for v3 devices.
+        at_ms = int(now_ms)
         if not fresh:
             return {
                 "state": "no_session",
                 "reason": "当前没有已登录的交互式桌面（控制台未登录或已注销）",
                 "workers": [],
                 "sessions": 0,
+                "at_ms": at_ms,
             }
         blocked = [value for value in fresh.values() if value.get("state") == "blocked"]
         if blocked:
@@ -186,15 +190,17 @@ class CaptureHealthAggregator:
                 "reason": str(blocked[0].get("reason") or "采集失败"),
                 "workers": workers,
                 "sessions": len(fresh),
+                "at_ms": at_ms,
             }
         healthy = [value for value in fresh.values() if value.get("state") == "ok"]
         if healthy:
-            return {"state": "ok", "reason": "", "workers": workers, "sessions": len(fresh)}
+            return {"state": "ok", "reason": "", "workers": workers, "sessions": len(fresh), "at_ms": at_ms}
         return {
             "state": "starting",
             "reason": str(next(iter(fresh.values())).get("reason") or "正在启动采屏进程"),
             "workers": workers,
             "sessions": len(fresh),
+            "at_ms": at_ms,
         }
 
 
@@ -235,6 +241,8 @@ class ServiceRuntime:
         self._started_at_ms = _now_ms()
         self._sysinfo_cache: dict[str, Any] = {}
         self._last_launch_log_s: dict[int, float] = {}
+        #: 0.3.1（F37）：运行线程存活标志，:meth:`is_alive` 供 win.service 探活轮询。
+        self._thread_alive = False
 
     # -- ServiceApplication 协议 ----------------------------------------
     def start(self) -> None:
@@ -253,8 +261,19 @@ class ServiceRuntime:
             if thread.is_alive():
                 log.warning("服务运行时在 %.0fs 内未退出", timeout_s)
 
+    def is_alive(self) -> bool:
+        """0.3.1（F37/F31）：``win.service`` 的探活契约——运行线程是否还活着。
+
+        返回 ``False`` 时服务宿主以非零码退出，交给 SCM recovery 重启
+        （僵尸服务检测，契约见 ``win/service.py`` 模块 docstring 的 F31 段）。
+        """
+
+        thread = self._thread
+        return thread is not None and thread.is_alive() and self._thread_alive
+
     # -- 线程/事件循环 ---------------------------------------------------
     def _thread_main(self) -> None:
+        self._thread_alive = True
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:
@@ -262,6 +281,7 @@ class ServiceRuntime:
         except Exception:  # noqa: BLE001 - 服务进程必须留下崩溃证据
             log.exception("服务运行时崩溃")
         finally:
+            self._thread_alive = False
             with contextlib.suppress(Exception):  # 关闭线程内事件循环失败无补救手段
                 self._loop.close()
 
@@ -724,6 +744,8 @@ class ServiceRuntime:
             except Exception as exc:  # noqa: BLE001 - worker 已退出/无权限时只记录
                 log.debug("终止前台模式 worker 失败：%s", exc)
         self._launch_failures.pop(session_id, None)
+        self._last_launch_log_s.pop(session_id, None)
+        self._session_state.pop(session_id, None)
         self._health.remove(session_id)
 
     def _shutdown_workers(self) -> None:
@@ -815,7 +837,10 @@ class ServiceRuntime:
             )
             log.info("worker hello session=%s version=%s", session_id, body.get("agent_version"))
             if isinstance(body.get("sessions"), list):
-                self._sessions = body["sessions"]
+                # 0.3.1（F37）：worker 上报的会话列表只留排障日志，不再覆盖
+                # ``self._sessions``——会话表的唯一来源是 _session_loop 的 WTS 枚举，
+                # 用上报覆盖会引入第二个真相源（worker 看到的列表更陈旧）。
+                log.debug("worker hello sessions=%s", body["sessions"])
             return
         if envelope.type == "heartbeat":
             self._health.update(
@@ -862,6 +887,17 @@ class ServiceRuntime:
         kind = envelope.type
         body = envelope.body_dict
         if kind == "command":
+            # 0.3.1（F34g）：更新进行中拒绝重启——重启会把后台更新任务与 helper
+            # 状态一起带走，swap 做到一半的服务进程消失 = 设备下线。
+            if str(body.get("type") or "") == "restart_agent" and self._updating:
+                log.warning("更新进行中，拒绝 restart_agent 命令")
+                command_id = str(body.get("command_id") or "")
+                if command_id:
+                    await self._send_result(
+                        command_id,
+                        CommandResult(ok=False, error="更新进行中，拒绝重启", error_code="BAD_REQUEST"),
+                    )
+                return
             await self._handle_command(body, ts_ms=envelope.ts_ms)
             return
         if kind == "config":
@@ -999,6 +1035,7 @@ class ServiceRuntime:
             install_dir=INSTALL_DIR,
             request_shutdown=self._request_shutdown,
             on_event=self._update_event,
+            on_finished=self._update_finished,
             spawn_task=self._spawn,
             current_pid=os.getpid(),
         )
@@ -1095,6 +1132,17 @@ class ServiceRuntime:
         except (LinkClosed, OutboxFull) as exc:
             log.warning("事件 %s 发送失败：%s", name, exc)
 
+    def _update_finished(self) -> None:
+        """0.3.1（F34a）：handler 后台任务结束（无论成败）时复位 running 标志。
+
+        不能只靠 ``update_failed`` 事件——事件回调链路上任何异常（或旧版本里
+        BadZipFile/OSError 逃逸导致 asyncio task 静默死亡）都会把 ``_update_running``
+        永久卡死，之后所有更新命令都被"已有更新在进行中"拒绝。
+        """
+
+        self._update_running = False
+        self._updating = False
+
     async def _update_event(self, name: str, data: dict[str, Any] | None = None) -> None:
         """更新流程事件回调：维护 ``state.updating`` 并原样上报事件。"""
 
@@ -1103,8 +1151,13 @@ class ServiceRuntime:
             self._updating = True
         elif name in {"update_downloading", "update_extracting", "update_precheck", "update_helper_started"}:
             self._updating = True
-        elif name in {"update_failed", "update_ready"}:
+        elif name == "update_failed":
             self._update_running = False
+            self._updating = False
+        elif name == "update_ready":
+            # 0.3.1（F34b）：update_ready 后进程即将 shutdown，``_update_running``
+            # 由 handler 完成回调/退出路径自然复位；这里提前清掉反而制造
+            # "已 ready 却又接受新更新命令"的窗口。
             self._updating = False
         await self._send_event(name, data)
 
@@ -1148,7 +1201,10 @@ class ServiceRuntime:
         target = self._select_target()
         if target in connected:
             return target
-        return min(connected)
+        fallback = min(connected)
+        # 0.3.1（F37）：回退到非目标会话是可观测的异常路由（命令可能落在错误桌面上）。
+        log.warning("目标会话 %s 没有已连接的 worker，回退到会话 %s", target, fallback)
+        return fallback
 
     async def _forward_control(self, body: dict[str, Any]) -> None:
         # 规格 §5.6（W1 定稿）：{session, action: start|input|stop, fps?, quality?,
@@ -1270,6 +1326,15 @@ class WorkerRuntime:
 
         setup_logging(f"worker-{self.session_id}")
         ensure_dirs()
+        # 0.3.1（F29）：必须在做任何窗口/GDI 调用之前切 PerMonitorV2 DPI 感知——
+        # DPI-unaware 进程在非 100% 缩放机器上 GetSystemMetrics 会被虚拟化，
+        # 控制坐标整体漂移（input.py 的 A16 换算修复要在这里才真正生效）。
+        try:
+            from ..tasks.input import enable_dpi_awareness
+
+            log.info("DPI 感知已启用：%s", enable_dpi_awareness())
+        except Exception as exc:  # noqa: BLE001 - 非 Windows/设置失败不能阻止 worker 启动
+            log.warning("DPI 感知设置失败（高缩放下控制坐标可能漂移）：%s", exc)
         log.info("worker 启动 session=%s version=%s", self.session_id, __version__)
         self._pipe = PipeClient(self.session_id)
         try:
@@ -1479,6 +1544,9 @@ class WorkerRuntime:
                 frame = self._engine.poll()
             except Exception:  # noqa: BLE001 - 引擎内部已降级，这里兜住线程
                 log.exception("采集循环异常")
+                # 0.3.1（F36）：异常路径也要计入失败退避，否则下一轮
+                # next_due_in_ms() 不知道刚失败过，会以 500ms 节奏空转。
+                self._engine.record_failure()
                 self._stop.wait(5.0)
                 continue
             if frame is not None:

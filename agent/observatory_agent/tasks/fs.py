@@ -25,7 +25,9 @@ import hashlib
 import logging
 import os
 import shutil
+import stat as stat_module
 import sys
+import threading
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -39,6 +41,9 @@ MAX_LIST_ENTRIES = 5_000
 MAX_SEARCH_RESULTS = 500
 MAX_READ_BYTES = 1024 * 1024
 MAX_WRITE_BYTES = 4 * 1024 * 1024
+#: 0.3.1（F35）：稀疏文件防护——写入 offset 最多允许超出现有大小这么多字节。
+#: NTFS 会把 offset 之前的空洞填零，没有上界时一条伪造 offset 的命令就能写爆磁盘。
+MAX_WRITE_SPAN_BYTES = 64 * 1024 * 1024
 
 FILE_ATTRIBUTE_HIDDEN = 0x2
 FILE_ATTRIBUTE_SYSTEM = 0x4
@@ -130,6 +135,45 @@ def _is_link_like(path: Path) -> bool:
         return True
     is_junction = getattr(path, "is_junction", None)
     return bool(is_junction()) if callable(is_junction) else False
+
+
+def _is_reparse_point(path: Path) -> bool:
+    """0.3.1（F35）：路径是否为 NTFS reparse point（junction/挂载点）。
+
+    ``path.is_symlink()`` 对 junction 返回 False，``os.walk`` 不剪枝就会踩进
+    环形链接无限递归。``os.path.isjunction`` 要 Python 3.12+；缺省回退到
+    ``st_file_attributes`` 的 REPARSE_POINT 位（非 Windows 上无该属性视为 False）。
+    """
+
+    isjunction = getattr(os.path, "isjunction", None)
+    if callable(isjunction):
+        try:
+            return bool(isjunction(path))
+        except OSError:  # 竞态：目录刚被删，按普通目录处理
+            return False
+    try:
+        info = os.stat(path, follow_symlinks=False)
+    except (OSError, ValueError):
+        return False
+    attributes = getattr(info, "st_file_attributes", 0)
+    return bool(attributes & stat_module.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+#: 0.3.1（F35）：进程内并发写锁（worker 线程池可能同时写同一文件）。
+_WRITE_LOCKS: dict[str, threading.Lock] = {}
+_WRITE_LOCKS_GUARD = threading.Lock()
+
+
+def _write_lock(path: Path) -> threading.Lock:
+    """以规范化路径为 key 取写锁；worker 进程内文件操作频率低，表允许常驻。"""
+
+    key = os.path.normcase(str(path))
+    with _WRITE_LOCKS_GUARD:
+        lock = _WRITE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _WRITE_LOCKS[key] = lock
+        return lock
 
 
 def _mtime_ms(path: Path) -> int:
@@ -379,6 +423,9 @@ def search(path: Path, pattern: str, recursive: bool) -> dict[str, Any]:
     base_depth = len(path.parts)
     try:
         for root, dirnames, filenames in os.walk(path):
+            # 0.3.1（F35）：先剪掉 junction/reparse point 目录（is_symlink() 对
+            # junction 为 False，不剪会在环上无限递归）；被剪的目录也不进入结果。
+            dirnames[:] = [name for name in dirnames if not _is_reparse_point(Path(root) / name)]
             if not recursive and len(Path(root).parts) - base_depth >= 1:
                 dirnames[:] = []
             for name in [*filenames, *dirnames]:
@@ -419,35 +466,48 @@ def read_chunk(path: Path, offset: int, length: int) -> dict[str, Any]:
 def write_chunk(path: Path, offset: int, data: bytes, truncate: bool, allow_write: bool) -> dict[str, Any]:
     """写入一个分片。
 
-    模式选择（修复旧实现的“offset=0 必截断”）：``truncate`` → ``wb``；否则已存在 → ``r+b``；
+    模式选择（修复旧实现的"offset=0 必截断"）：``truncate`` → ``wb``；否则已存在 → ``r+b``；
     否则仅 ``offset==0`` 允许创建；``offset>0`` 且文件不存在 → 报错。
+
+    0.3.1（F35）：``offset`` 超出"现有大小 + :data:`MAX_WRITE_SPAN_BYTES`"且不带
+    ``truncate`` 时拒绝——NTFS 会把中间空洞填零，没有上界一条命令就能写爆磁盘；
+    并发写以规范化路径为 key 串行（进程内锁）。
     """
 
     if not allow_write:
         raise FileOpError("服务器已禁用文件写入")
     if len(data) > MAX_WRITE_BYTES:
         raise FileOpError(f"单个分片超过 {MAX_WRITE_BYTES // (1024 * 1024)}MiB")
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if truncate:
-            mode = "wb"
-        elif path.exists():
-            mode = "r+b"
-        elif int(offset) == 0:
-            mode = "wb"
-        else:
-            raise FileOpError(f"分片续写要求文件已存在：{path}")
-        with open(path, mode) as handle:
-            if int(offset) > 0:
-                handle.seek(int(offset))
-            handle.write(data)
-            handle.flush()
-        size = path.stat().st_size
-    except FileOpError:
-        raise
-    except OSError as exc:
-        raise FileOpError(describe_error(exc), winerror=getattr(exc, "winerror", None)) from exc
-    return {"path": str(path), "offset": int(offset), "written": len(data), "size": size}
+    offset = int(offset)
+    with _write_lock(path):
+        try:
+            current_size = path.stat().st_size if path.exists() else 0
+            if not truncate and offset > current_size + MAX_WRITE_SPAN_BYTES:
+                raise FileOpError(
+                    f"写入 offset {offset} 超过现有大小 {current_size} + "
+                    f"{MAX_WRITE_SPAN_BYTES // (1024 * 1024)}MiB（稀疏文件防护）；"
+                    "如需重建文件请携带 truncate"
+                )
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if truncate:
+                mode = "wb"
+            elif path.exists():
+                mode = "r+b"
+            elif offset == 0:
+                mode = "wb"
+            else:
+                raise FileOpError(f"分片续写要求文件已存在：{path}")
+            with open(path, mode) as handle:
+                if offset > 0:
+                    handle.seek(offset)
+                handle.write(data)
+                handle.flush()
+            size = path.stat().st_size
+        except FileOpError:
+            raise
+        except OSError as exc:
+            raise FileOpError(describe_error(exc), winerror=getattr(exc, "winerror", None)) from exc
+    return {"path": str(path), "offset": offset, "written": len(data), "size": size}
 
 
 def hash_file(path: Path) -> dict[str, Any]:
@@ -573,6 +633,7 @@ __all__ = [
     "MAX_READ_BYTES",
     "MAX_SEARCH_RESULTS",
     "MAX_WRITE_BYTES",
+    "MAX_WRITE_SPAN_BYTES",
     "SUPPORTED_OPS",
     "FileOpError",
     "copy",

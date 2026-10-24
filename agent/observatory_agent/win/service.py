@@ -22,6 +22,19 @@
 * 所有等待/重试的时间都通过构造函数注入（``now``/``sleep``/``process_alive``），
   纯规划函数（:func:`plan_restart` / :func:`restart_task_xml`）无 IO，可直接单测。
 * 失败一律抛 :class:`ServiceError` 或返回 ``False`` 并记录日志；没有静默 except。
+
+0.3.1（F31）应用对象契约
+------------------------
+
+:func:`_make_framework` 生成的服务宿主对应用对象只依赖两个必需方法（``start``/
+``stop(timeout_s)``）和一个**可选**方法 ``is_alive() -> bool``：
+
+* 应用若提供 ``is_alive``，服务主循环每 2s 轮询一次（``WaitForSingleObject`` 的
+  超时节奏）；返回 ``False`` 表示运行线程已死、进程却还活着——继续上报 RUNNING
+  只会变成僵尸服务。此时服务以**非零退出码**直接终止且不向 SCM 上报 STOPPED，
+  让 SCM recovery / 一次性计划任务接管重启（与 A2 重启同一机制）。
+  ``core/runtime.py`` 的 ServiceRuntime 0.3.1 会实现该方法（另一分片接线）。
+* 不提供 ``is_alive`` 的应用行为与 0.3.0 完全一致（探活自动禁用）。
 """
 
 from __future__ import annotations
@@ -31,6 +44,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -75,6 +89,13 @@ DEFAULT_START_ATTEMPTS = 6
 DEFAULT_START_SETTLE_S = 25.0
 DEFAULT_START_CONFIRM_S = 3.0
 DEFAULT_START_BACKOFF_S = 3.0
+
+#: 0.3.1（F31）：停服预算与 SvcStop 上报的 waitHint 必须一致——慢停止超过 waitHint 且
+#: checkpoint 停滞时会被 SCM 强杀。旧值 10s 太短（IO 繁忙时清理超时），统一提到 30s。
+STOP_BUDGET_S = 30.0
+STOP_WAIT_HINT_MS = 30_000
+#: 收尾期间向 SCM 重报 STOP_PENDING（每次调用 checkpoint 自动 +1）的间隔。
+STOP_CHECKPOINT_INTERVAL_S = 5.0
 
 #: 一次性重启计划任务在目标时间之后最多保留一分钟（执行完自删）。
 RESTART_TASK_TTL = "PT2M"
@@ -126,6 +147,9 @@ class ServiceApplication(Protocol):
 
     ``start()`` 必须尽快返回（真正的循环由应用放到自己的线程/task 里）；
     ``stop(timeout_s)`` 必须幂等（SCM 的 stop 路径与 finally 可能各调一次）。
+
+    可选方法 ``is_alive() -> bool``（0.3.1 F31，见模块 docstring 的契约）：服务主循环
+    每 2s 轮询；返回 ``False`` 表示运行线程已死，服务将以非零码退出走 SCM recovery。
     """
 
     def start(self) -> None: ...
@@ -182,7 +206,10 @@ def _make_framework(identity: ServiceIdentity, app_factory: AppFactory, prepare:
         def SvcStop(self) -> None:
             # 控制处理线程只做“置事件 + 报状态”，真正的 stop 在 SvcDoRun 的 finally 里做；
             # 这样即使 stop 很慢也不会让 SCM 的 control handler 超时。
-            self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
+            # 0.3.1（F31）：必须带 waitHint 上报，否则慢停止（> 默认的隐式窗口）会被 SCM
+            # 强杀。pywin32 的 ReportServiceStatus 没有 checkpoint 参数，但每次调用会把
+            # 内部计数 +1，所以收尾循环周期性重报即等于递增 checkpoint。
+            self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING, waitHint=STOP_WAIT_HINT_MS)
             log.info("service stop requested")
             win32event.SetEvent(self._stop_event)
 
@@ -202,17 +229,72 @@ def _make_framework(identity: ServiceIdentity, app_factory: AppFactory, prepare:
             try:
                 self._application.start()
                 while win32event.WaitForSingleObject(self._stop_event, 2_000) != win32event.WAIT_OBJECT_0:
-                    pass
+                    # 0.3.1（F31）：借 2s 超时节奏轮询应用探活；返回 False 时进程以非零码
+                    # 退出（不报 STOPPED），SCM recovery 会把服务拉起来。
+                    self._check_application_alive()
             finally:
                 log.info("service stopping")
-                application = self._application
-                if application is not None:
-                    application.stop(timeout_s=10.0)
+                self._stop_application()
                 servicemanager.LogMsg(
                     servicemanager.EVENTLOG_INFORMATION_TYPE,
                     servicemanager.PYS_SERVICE_STOPPED,
                     (self._svc_name_, ""),
                 )
+
+        def _check_application_alive(self) -> None:
+            """0.3.1（F31）僵尸服务检测：应用 ``is_alive()`` 返回 False 则故障退出。
+
+            契约见模块 docstring。探活调用本身失败按“还活着”处理——宁可误报活着，
+            也不能把健康服务误杀重启。
+            """
+
+            application = self._application
+            if application is None:
+                return
+            is_alive = getattr(application, "is_alive", None)
+            if not callable(is_alive):
+                return
+            try:
+                alive = bool(is_alive())
+            except Exception:  # noqa: BLE001 - 探活失败按存活处理
+                log.exception("application is_alive() probe failed; treating as alive")
+                return
+            if alive:
+                return
+            log.error("application reports dead; exiting nonzero so SCM recovery restarts the service")
+            self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING, waitHint=STOP_WAIT_HINT_MS)
+            logging.shutdown()
+            os._exit(1)
+
+        def _stop_application(self) -> None:
+            """0.3.1（F31）：停应用，期间周期向 SCM 重报 STOP_PENDING 递增 checkpoint。
+
+            ``application.stop`` 可能阻塞到 ``STOP_BUDGET_S``；放到独立线程执行，本线程按
+            :data:`STOP_CHECKPOINT_INTERVAL_S` 轮询，checkpoint 不会在 waitHint 内停滞，
+            SCM 不会因“无进展”强杀慢停止。
+            """
+
+            application = self._application
+            if application is None:
+                return
+            self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING, waitHint=STOP_WAIT_HINT_MS)
+            done = threading.Event()
+            error: list[BaseException] = []
+
+            def _do_stop() -> None:
+                try:
+                    application.stop(timeout_s=STOP_BUDGET_S)
+                except BaseException as exc:  # noqa: BLE001 - 停服失败也要走完收尾、上报 STOPPED
+                    error.append(exc)
+                finally:
+                    done.set()
+
+            worker = threading.Thread(target=_do_stop, name="service-stop", daemon=True)
+            worker.start()
+            while not done.wait(STOP_CHECKPOINT_INTERVAL_S):
+                self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING, waitHint=STOP_WAIT_HINT_MS)
+            if error:
+                log.error("application.stop failed: %s", error[0])
 
         def _request_shutdown(self, reason: str) -> None:
             log.info("application asked to stop the service: %s", reason)

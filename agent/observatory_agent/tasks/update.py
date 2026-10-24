@@ -144,21 +144,95 @@ def verify_package(path: Path, expected_sha256: str) -> str:
     return actual
 
 
+def _pid_alive(pid: int) -> bool:
+    """0.3.1（F34d）：进程是否存活（psutil 优先，缺依赖时 ctypes/OpenProcess 兜底）。"""
+
+    if pid <= 0:
+        return False
+    try:
+        import psutil  # noqa: PLC0415 - 按需导入，缺依赖走 ctypes 路径
+    except ImportError:
+        pass
+    else:
+        try:
+            return bool(psutil.pid_exists(int(pid)))
+        except Exception:  # noqa: BLE001 - psutil 查询失败按不存活处理
+            return False
+    if os.name != "nt":
+        try:
+            os.kill(int(pid), 0)
+        except OSError:
+            return False
+        return True
+    try:
+        import ctypes  # noqa: PLC0415
+
+        process_query_limited_information = 0x1000
+        still_active = 259
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(process_query_limited_information, False, int(pid))
+        if not handle:
+            return False
+        exit_code = ctypes.c_ulong()
+        try:
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return int(exit_code.value) == still_active
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:  # noqa: BLE001 - 探测失败按不存活处理（宁误删不误留）
+        return False
+
+
+def _live_helper_pids(directory: Path) -> list[int]:
+    """0.3.1（F34d）：staging 里仍在运行的 update helper pid 列表。
+
+    ``spawn_helper`` 会为每个 helper 写 ``apply-<ts>.pid``；pid 文件缺失/损坏按
+    已退出处理（旧版本没有 pid 文件，不影响清理）。
+    """
+
+    live: list[int] = []
+    for pid_file in sorted(directory.glob("apply-*.pid")):
+        try:
+            pid = int(pid_file.read_text(encoding="ascii", errors="ignore").strip())
+        except (OSError, ValueError):
+            continue
+        if _pid_alive(pid):
+            live.append(pid)
+    return live
+
+
 def cleanup_staging(staging_dir: Path, *, keep_archive: bool = False) -> None:
-    """清理上一次更新留下的 payload/apply/part/zip/日志。"""
+    """清理上一次更新留下的 payload/apply/part/zip/日志。
+
+    0.3.1（F34d）：删除前检查 ``apply-*.pid``，仍有存活的 helper 时跳过
+    ``payload-*``/``apply-*`` 目录（helper 正从 payload 复制、往安装目录 swap，
+    半路删掉它的源/工作目录会让 swap 断在中间）；无存活 helper 时顺带清掉
+    过期的 pid 文件。
+    """
 
     directory = Path(staging_dir)
     if not directory.is_dir():
         return
+    live_pids = _live_helper_pids(directory)
+    if live_pids:
+        log.warning(
+            "staging 仍有存活的 update helper（pid=%s），本次跳过 payload/apply 目录清理",
+            live_pids,
+        )
     for path in directory.iterdir():
         try:
             if path.is_dir() and path.name.startswith(("payload-", "apply-")):
+                if live_pids:
+                    continue
                 shutil.rmtree(path, ignore_errors=True)
             elif path.suffix == ".part":
                 path.unlink(missing_ok=True)
             elif path.suffix == ".zip" and not keep_archive:
                 path.unlink(missing_ok=True)
             elif path.name.endswith(".log") and path.name.startswith("apply-"):
+                path.unlink(missing_ok=True)
+            elif path.suffix == ".pid" and path.name.startswith("apply-") and not live_pids:
                 path.unlink(missing_ok=True)
         except OSError as exc:  # 清理是 best-effort，但失败要留痕
             log.warning("could not clean staging entry %s: %s", path, exc)
@@ -248,8 +322,14 @@ async def stage_update(
     staging_dir: Path,
     now_ms: Callable[[], int] = default_now_ms,
     on_event: EventCallback | None = None,
+    package_size: int | None = None,
 ) -> Path:
-    """下载 → 校验 → 解压 → 写入 VERSION，返回 payload 目录。"""
+    """下载 → 校验 → 解压 → 写入 VERSION，返回 payload 目录。
+
+    0.3.1（F34e）：下载前做磁盘预检——``free < 3×包大小`` 直接拒绝（下载 + 解压
+    + 目录备份都要空间）。``size_bytes`` 由服务端 update_offer 携带；缺失时跳过
+    比例预检，解压阶段仍有 :data:`MAX_EXTRACTED_BYTES` 上限兜底。
+    """
 
     checksum = validate_sha256(sha256)
     if not version:
@@ -257,6 +337,20 @@ async def stage_update(
     staging = Path(staging_dir)
     staging.mkdir(parents=True, exist_ok=True)
     cleanup_staging(staging)
+    if package_size and int(package_size) > 0:
+        try:
+            free = shutil.disk_usage(staging).free
+        except OSError as exc:  # 读不到容量不阻塞更新，由解压上限兜底
+            log.warning("无法读取磁盘剩余空间，跳过更新空间预检：%s", exc)
+        else:
+            required = 3 * int(package_size)
+            if free < required:
+                raise UpdateRejected(
+                    f"磁盘剩余空间不足：更新需要约 {required} 字节（3× 包大小），仅剩 {free}",
+                    step="stage_update",
+                )
+    else:
+        log.debug("update offer 没有 size_bytes，跳过下载前的磁盘空间预检")
     archive = staging / f"observatory-agent-{version}.zip"
     if on_event is not None:
         await on_event("update_downloading", {"version": version})
@@ -433,6 +527,13 @@ def spawn_helper(
     except OSError as exc:
         raise UpdateFailed(f"无法启动 update helper: {exc}", step="spawn_helper") from exc
     log.info("update helper started pid=%s for %s (log %s)", process.pid, version, log_path)
+    # 0.3.1（F34d）：落 pid 文件，cleanup_staging 据此识别"仍在运行的 helper"，
+    # 避免把正在做 swap 的 helper 的源/工作目录删掉。
+    pid_path = staging / f"{workdir.name}.pid"
+    try:
+        pid_path.write_text(f"{int(process.pid)}\n", encoding="ascii")
+    except OSError as exc:  # 写不进 pid 文件只影响下次清理的存活判断
+        log.warning("could not write helper pid file %s: %s", pid_path, exc)
     return HelperHandle(pid=int(process.pid), executable=helper, workdir=workdir, log_path=log_path)
 
 
@@ -505,6 +606,7 @@ async def apply_update(
     spawn: Callable[..., subprocess.Popen] = subprocess.Popen,
     on_event: EventCallback | None = None,
     now_ms: Callable[[], int] = default_now_ms,
+    package_size: int | None = None,
 ) -> HelperHandle:
     """**唯一**更新入口（自动更新与强制更新共用）。
 
@@ -521,6 +623,7 @@ async def apply_update(
         staging_dir=staging_dir,
         now_ms=now_ms,
         on_event=on_event,
+        package_size=package_size,
     )
     if on_event is not None:
         await on_event("update_precheck", {"version": version})
@@ -602,16 +705,58 @@ def apply_now(
         return RC_ROLLED_BACK if rollback_ok else RC_ROLLBACK_FAILED
 
     _remove_tree_with_retries(plan.backup_dir, sleep=sleep)
+    _cleanup_failed_dirs(target)  # 0.3.1（F34f）：成功后清掉历史失败目录，保留最近 1 个取证
     log.info("update to %s finished", version)
     return RC_OK
 
 
+def _replace_with_retries(
+    source: Path,
+    destination: Path,
+    *,
+    attempts: int = 3,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """0.3.1（F34c）：``os.replace`` 带重试（默认 3 次，每次间隔 1s）。
+
+    新版本启动失败后的目录可能仍被杀毒扫描/残留句柄短暂占用，立即重试往往
+    就能成功；最后一次仍失败才把 OSError 抛给调用方。
+    """
+
+    attempts = max(1, int(attempts))
+    for attempt in range(1, attempts + 1):
+        try:
+            os.replace(source, destination)
+            return
+        except OSError as exc:
+            if attempt >= attempts:
+                raise
+            log.warning(
+                "os.replace %s -> %s failed (attempt %s/%s): %s",
+                source,
+                destination,
+                attempt,
+                attempts,
+                exc,
+            )
+            sleep(1.0)
+
+
 def _rollback(plan: SwapPlan, service: ServiceController, *, sleep: Callable[[float], None]) -> bool:
+    # 0.3.1（F34c）：先尽力停一次服务——新版本启动失败后服务可能仍在运行并占着
+    # 安装目录句柄，不停服 os.replace 大概率失败。
+    try:
+        if service.stop():
+            log.info("service stopped before rollback")
+        else:
+            log.warning("service.stop() reported failure before rollback; continuing")
+    except ServiceError as exc:
+        log.warning("service.stop() raised before rollback; continuing: %s", exc)
     try:
         if plan.install_dir.exists():
-            os.replace(plan.install_dir, plan.failed_dir)
+            _replace_with_retries(plan.install_dir, plan.failed_dir, sleep=sleep)
         if plan.backup_dir.exists():
-            os.replace(plan.backup_dir, plan.install_dir)
+            _replace_with_retries(plan.backup_dir, plan.install_dir, sleep=sleep)
     except OSError:
         log.exception("rollback after failed start did not work")
         return False
@@ -623,6 +768,23 @@ def _rollback(plan: SwapPlan, service: ServiceController, *, sleep: Callable[[fl
     return started
 
 
+def _cleanup_failed_dirs(install_dir: Path, *, keep: int = 1) -> None:
+    """0.3.1（F34f）：更新成功后清理旧的 ``<install>.failed-*`` 目录（保留最近 ``keep`` 个取证）。
+
+    目录名内嵌毫秒时间戳（见 :func:`plan_swap`），按名字排序即时间序。
+    """
+
+    prefix = f"{install_dir.name}.failed-"
+    try:
+        failed = sorted(item for item in install_dir.parent.glob(f"{prefix}*") if item.is_dir())
+    except OSError as exc:  # 枚举失败不影响更新成功的结论
+        log.warning("could not list failed dirs under %s: %s", install_dir.parent, exc)
+        return
+    for path in failed[: max(0, len(failed) - max(0, keep))]:
+        shutil.rmtree(path, ignore_errors=True)
+        log.info("removed old failed dir %s", path)
+
+
 # ---------------------------------------------------------------- handlers ---
 def make_update_handler(
     *,
@@ -631,6 +793,7 @@ def make_update_handler(
     install_dir: Path,
     request_shutdown: Callable[[str], None],
     on_event: EventCallback | None = None,
+    on_finished: Callable[[], None] | None = None,
     spawn_task: Callable[[Awaitable[Any]], Any] | None = None,
     current_pid: int | None = None,
     now_ms: Callable[[], int] = default_now_ms,
@@ -640,6 +803,10 @@ def make_update_handler(
     处理器**立即**返回 ``started`` 回执，真正的下载/校验/替换在后台任务里跑：先回执后
     动服务，保证回执能经链路送出去；后台任务确认 helper 存活后再 ``request_shutdown``。
     缺 sha256 / 版本为空 → ``BAD_REQUEST`` 回执，绝不开始下载（A3）。
+
+    0.3.1（F34a）：后台任务**任何**异常都归一成 ``update_failed`` 事件并上报；
+    任务结束时（无论成败）调用 ``on_finished``——调用方据此复位 running 标志，
+    不再依赖"异常一定会被事件路径覆盖"。
     """
 
     state = {"running": False}
@@ -667,6 +834,10 @@ def make_update_handler(
                 error_code=ERROR_BAD_REQUEST,
             )
         state["running"] = True
+        try:
+            package_size = max(0, int(command.payload.get("size_bytes") or 0)) or None
+        except (TypeError, ValueError):
+            package_size = None
 
         async def run() -> None:
             try:
@@ -681,6 +852,7 @@ def make_update_handler(
                     current_pid=current_pid,
                     on_event=on_event,
                     now_ms=now_ms,
+                    package_size=package_size,
                 )
                 log.info("update helper confirmed pid=%s version=%s", helper.pid, version)
                 if on_event is not None:
@@ -690,8 +862,19 @@ def make_update_handler(
                 log.error("update to %s failed: %s", version, exc.reason)
                 if on_event is not None:
                     await on_event("update_failed", {"version": version, "error": exc.reason})
+            except Exception as exc:  # noqa: BLE001 - 0.3.1（F34a）：逃逸异常必须归一上报，
+                # 否则 asyncio task 静默死亡，调用方的 running 标志只能靠 on_finished 兜底。
+                log.exception("update to %s failed with unexpected error", version)
+                if on_event is not None:
+                    await on_event(
+                        "update_failed",
+                        {"version": version, "error": f"{type(exc).__name__}: {exc}"},
+                    )
             finally:
                 state["running"] = False
+                if on_finished is not None:
+                    with contextlib.suppress(Exception):  # 复位回调失败不能再炸一次 task
+                        on_finished()
 
         launcher = spawn_task or asyncio.create_task
         launcher(run())

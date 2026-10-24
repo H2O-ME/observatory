@@ -296,6 +296,77 @@ def outbox_limits_from_env() -> OutboxLimits:
 
 
 # ----------------------------------------------------------------- config ---
+def _load_config_json(target: Path) -> dict[str, Any]:
+    """读取配置 JSON；损坏时隔离坏文件并尝试 ``.bak`` 恢复（F38）。
+
+    配置损坏静默清零 token 会让设备永久离线，所以这里不允许"仅 warning 后
+    继续跑"：坏文件改名隔离为 ``config.json.corrupt-<时间戳>``（保留取证），
+    再尝试从 ``config.json.bak`` 恢复；两者都不可用才落到默认值（此时 token
+    为空，链路会走重新注册，而不是拿着空令牌反复 401）。
+    """
+
+    try:
+        text = target.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        log.error("读取配置失败（使用默认值）%s: %s", target, exc)
+        return {}
+    try:
+        raw: Any = json.loads(text)
+    except ValueError as exc:
+        quarantined = _quarantine_config(target)
+        log.error("配置文件 JSON 解析失败（%s）: %s；坏文件已隔离为 %s", exc, target, quarantined)
+        if _restore_config_backup(target):
+            return _load_config_json(target)
+        return {}
+    if not isinstance(raw, dict):
+        quarantined = _quarantine_config(target)
+        log.error("配置文件不是 JSON 对象: %s；坏文件已隔离为 %s", target, quarantined)
+        if _restore_config_backup(target):
+            return _load_config_json(target)
+        return {}
+    return raw
+
+
+def _quarantine_config(target: Path) -> Path | None:
+    """把损坏的配置文件改名隔离（保留现场取证）；失败返回 None 并记日志。"""
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    quarantined = target.with_name(f"{target.name}.corrupt-{stamp}")
+    try:
+        target.replace(quarantined)
+    except OSError as exc:
+        log.error("隔离损坏的配置文件 %s 失败: %s", target, exc)
+        return None
+    return quarantined
+
+
+def _restore_config_backup(target: Path) -> bool:
+    """从 ``<name>.bak`` 恢复配置；成功返回 True。"""
+
+    backup = target.with_name(target.name + ".bak")
+    if not backup.is_file():
+        log.error("配置损坏且没有可用的备份 %s，只能使用默认值（token 会丢失）", backup)
+        return False
+    try:
+        text = backup.read_text(encoding="utf-8")
+        raw = json.loads(text)
+    except (OSError, ValueError) as exc:
+        log.error("备份配置 %s 也不可用（%s），放弃恢复", backup, exc)
+        return False
+    if not isinstance(raw, dict):
+        log.error("备份配置 %s 不是 JSON 对象，放弃恢复", backup)
+        return False
+    try:
+        target.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        log.error("从备份恢复配置 %s 失败: %s", target, exc)
+        return False
+    log.warning("配置已从备份 %s 恢复", backup)
+    return True
+
+
 @dataclass
 class AgentConfig:
     """落盘配置；``boot_id`` 是**运行时**字段，每次加载都重新生成。"""
@@ -317,16 +388,7 @@ class AgentConfig:
     @classmethod
     def load(cls, path: Path | None = None) -> "AgentConfig":
         target = path or CONFIG_PATH
-        try:
-            raw = json.loads(target.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            raw = {}
-        except (OSError, ValueError) as exc:
-            log.warning("读取配置失败（使用默认值）%s: %s", target, exc)
-            raw = {}
-        if not isinstance(raw, dict):
-            log.warning("配置文件不是对象（使用默认值）: %s", target)
-            raw = {}
+        raw = _load_config_json(target)
 
         urls = _split_urls(",".join(str(item) for item in raw.get("base_urls") or []))
         settings = raw.get("settings")
@@ -351,6 +413,8 @@ class AgentConfig:
         return config
 
     def save(self, path: Path | None = None) -> None:
+        """原子写配置；成功后轮转一份 ``.bak``（F38：load 侧损坏恢复的数据源）。"""
+
         target = path or CONFIG_PATH
         target.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -365,9 +429,21 @@ class AgentConfig:
             "device_time_offset_ms": int(self.device_time_offset_ms),
             "protocol": 3,
         }
-        temporary = target.with_suffix(target.suffix + ".part")
-        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
+        # F38：临时名带 pid——两个进程（服务 + CLI 诊断）同时 save 时，旧的
+        # 固定名 ".part" 会互相覆盖，产生"原子替换出来却是损坏文件"的竞态。
+        temporary = target.with_name(f"{target.name}.{os.getpid()}.part")
+        temporary.write_text(text, encoding="utf-8")
         os.replace(temporary, target)
+        # F38：成功后轮转一份 .bak（load 阶段配置损坏时从这里恢复）。同样走
+        # ".part + os.replace" 保证备份文件本身也是原子的。
+        backup = target.with_name(target.name + ".bak")
+        backup_part = target.with_name(f"{target.name}.{os.getpid()}.bak.part")
+        try:
+            backup_part.write_text(text, encoding="utf-8")
+            os.replace(backup_part, backup)
+        except OSError as exc:
+            log.warning("写入配置备份 %s 失败: %s", backup, exc)
 
     # -- helpers ---------------------------------------------------------
     def setting(self, key: str, default: Any = None) -> Any:

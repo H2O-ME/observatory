@@ -66,8 +66,13 @@ STATE_NAMES: dict[int, str] = {
     WTS_INIT: "init",
 }
 
-#: 只有这两种状态可能有真实登录用户与可采集桌面。
-CAPTURABLE_STATES = frozenset({"active", "connected"})
+#: 可采集的会话状态。
+#:
+#: 0.3.1（F36）：加入 ``disconnected``——RDP 断开后（mstsc 直接关窗）会话进入该状态，
+#: 其桌面栈仍在、``CreateProcessAsUser`` 仍可用，不收录会导致无人值守形态失联；
+#: 移除 ``connected``——``WTS_CONNECTQUERY``（正在接入中）桌面未就绪，在该状态下
+#: 拉起 worker 常失败且白耗重试。
+CAPTURABLE_STATES = frozenset({"active", "disconnected"})
 
 
 class SessionError(RuntimeError):
@@ -197,8 +202,8 @@ def select_capturable(sessions: Iterable[SessionInfo]) -> int | None:
     """选定需要拉 worker 的会话：控制台优先，否则第一个有登录名的可用会话。
 
     纯函数（无 Win32 依赖），可直接单测。没有真实用户名（``WTSQueryUserToken`` 必回
-    1008）或状态不是 active/connected 的会话一律跳过——旧实现在这类“残留会话”上每
-    30 秒重试一次，白耗 CPU 并刷日志。
+    1008）或状态不在 :data:`CAPTURABLE_STATES`（active/disconnected，见 F36）的会话
+    一律跳过——旧实现在这类“残留会话”上每 30 秒重试一次，白耗 CPU 并刷日志。
     """
 
     candidates = [

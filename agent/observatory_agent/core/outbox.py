@@ -45,6 +45,12 @@ log = logging.getLogger(__name__)
 #: outbox 里"帧上传单元"的 kind；与信封类型名不冲突。
 FRAME_KIND: Final[str] = "frame"
 
+#: 下行游标 meta 的落盘节流：每 N 条下行落一次盘（F33）。``note_downlink``
+#: 在事件循环线程上执行 ``synchronous=FULL`` 的 fsync，每条都落会拖慢载体
+#: 循环；节流期间崩溃丢游标的最坏结果是服务端重发最近几条下行，消费端按
+#: 信封 id 幂等，代价可接受（至少一次语义本来就允许重投）。
+DOWNLINK_META_FLUSH_EVERY: Final[int] = 32
+
 OVERFLOW_DROP_OLDEST: Final[str] = "drop_oldest"
 OVERFLOW_REJECT: Final[str] = "reject"
 #: ``drop_newest`` 是"拒收新条目"的别名：保留这个拼写是因为配置文件/文档里
@@ -343,6 +349,8 @@ class Outbox:
         self._bytes = 0
         self._last_ack_id = ""
         self._last_downlink_id = ""
+        #: 尚未落盘的下行游标计数（F33 节流；见 ``note_downlink``）。
+        self._downlink_unflushed = 0
         self._acked = 0
         self._dropped = 0
         self._last_drop_reason = ""
@@ -412,13 +420,29 @@ class Outbox:
         return self._last_downlink_id
 
     def note_downlink(self, msg_id: str) -> None:
-        """记录已处理的下行信封 id，并落盘（重启后不会让服务端重发旧下行）。"""
+        """记录已处理的下行信封 id；内存立即生效，落盘按 ``DOWNLINK_META_FLUSH_EVERY`` 节流。
+
+        F33：这里原本每条下行都 ``set_meta``（sqlite ``synchronous=FULL`` 等价
+        于一次 fsync），而且跑在事件循环线程上，下行密集时会把载体循环拖慢。
+        改为每 N 条落一次盘；要立即落盘（关闭前、关键节点）调 :meth:`flush_meta`。
+        """
 
         if not msg_id or msg_id == self._last_downlink_id:
             return
         self._last_downlink_id = msg_id
+        self._downlink_unflushed += 1
+        if self._downlink_unflushed >= DOWNLINK_META_FLUSH_EVERY:
+            self.flush_meta()
+
+    def flush_meta(self) -> None:
+        """把内存中的下行游标强制落盘（节流周期的收口；关闭前也应调用）。"""
+
+        self._downlink_unflushed = 0
+        if self._store is None or not self._last_downlink_id:
+            return
         self._store_call(
-            "meta:last_downlink_id", lambda: self._store.set_meta("last_downlink_id", msg_id)
+            "meta:last_downlink_id",
+            lambda: self._store.set_meta("last_downlink_id", self._last_downlink_id),
         )
 
     @property
@@ -521,8 +545,27 @@ class Outbox:
 
     def _insert(self, entry: OutboxEntry) -> None:
         size = entry.size_bytes
+        # F33：单条超过 max_bytes 时任何淘汰都无济于事——必须在进入淘汰循环前
+        # 判掉，否则 drop_oldest 会先把整个队列清空、然后才发现还是装不下，
+        # 既白丢了旧数据又拒收了新条目（两次违反"不悄悄丢"）。
+        if size > self._limits.max_bytes:
+            self._overflow_events += 1
+            self._dropped += 1
+            self._last_drop_reason = f"overflow_oversize:{entry.kind}"
+            self._log.warning(
+                "outbox 单条超限（%s 字节 > max_bytes=%s），不做任何淘汰直接拒收"
+                " %s id=%s（队列保持 %s 条不动）",
+                size,
+                self._limits.max_bytes,
+                entry.kind,
+                entry.msg_id,
+                len(self._entries),
+            )
+            raise OutboxFull(
+                f"outbox 单条超限（size={size}, max_bytes={self._limits.max_bytes}）"
+            )
         # 先腾出空间再插入：drop_oldest 会从最老的条目开始逐条淘汰；队列已空仍
-        # 装不下（单条超过 max_bytes）时不能死循环，直接按"拒收"处理。
+        # 装不下时不能死循环，直接按"拒收"处理（单条超限已在上面拦截）。
         while self._over_capacity(adding=size):
             if self._limits.overflow == OVERFLOW_DROP_OLDEST and self._entries:
                 self._evict_oldest(reason="overflow_drop_oldest")
@@ -639,18 +682,26 @@ class Outbox:
         return False
 
     def ack_through(self, msg_id: str) -> int:
-        """确认到 ``msg_id`` 为止（含）的所有条目；返回删除条数。
+        """确认到 ``msg_id`` 为止（含）的**信封**条目；返回删除条数。
 
-        服务端返回的 ``ack_id`` 可能指向本进程更早的一条（HTTP 批次丢响应后
-        客户端重发，服务端按幂等直接确认老 id）。此时只记录锚点，不误删更老的
-        未确认条目——那些条目若仍在队列里，序号都 ≤ 该 id，会被一并清掉；
-        若已不在队列，删 0 条也是正确结果。
+        F33：服务端 ack 游标只覆盖上行**信封**——帧走独立的 frame_done/discard
+        确认路径，不在本游标覆盖范围内。队列顺序为 ``[帧F1, 心跳H1]`` 时，
+        ``ack_through(H1)`` 若不区分条目类型会把尚未上传的 F1 一并删掉
+        （离线补传场景静默丢帧，违反至少一次语义），因此遍历时跳过帧条目，
+        锚点仍按信封 id 前移。
+
+        另：服务端返回的 ``ack_id`` 可能指向本进程更早的一条（HTTP 批次丢响应
+        后客户端重发，服务端按幂等直接确认老 id）。此时按游标前移清掉它之前的
+        信封是正确结果；若 id 已不在队列，只记录锚点、删 0 条。
         """
 
         if not msg_id:
             return 0
         target_index: int | None = None
         for index, entry in enumerate(self._entries):
+            if entry.is_frame:
+                # 帧条目不在 ack 游标覆盖范围内：跳过，不参与匹配也不被删除。
+                continue
             if entry.msg_id == msg_id:
                 target_index = index
                 break
@@ -658,15 +709,17 @@ class Outbox:
             self._last_ack_id = msg_id
             self._store_call("meta:last_ack_id", lambda: self._store.set_meta("last_ack_id", msg_id))
             return 0
-        removed = target_index + 1
-        removed_ids = [self._entries[index].msg_id for index in range(removed)]
-        for _ in range(removed):
-            self._remove_at(0)
-        self._acked += removed
+        doomed = [index for index in range(target_index + 1) if not self._entries[index].is_frame]
+        removed_ids = [self._entries[index].msg_id for index in doomed]
+        # 从后往前删，避免前移影响后续下标；被跳过的帧条目原地保留，等待
+        # frame_done / discard。
+        for index in reversed(doomed):
+            self._remove_at(index)
+        self._acked += len(doomed)
         self._last_ack_id = msg_id
         self._store_call("ack_many", lambda: self._store.delete_many(removed_ids))
         self._store_call("meta:last_ack_id", lambda: self._store.set_meta("last_ack_id", msg_id))
-        return removed
+        return len(doomed)
 
     def frame_done(self, frame_id: str) -> bool:
         """帧上传成功（HTTP 200）；返回是否删掉了一条。"""
@@ -697,6 +750,11 @@ class Outbox:
             self._dropped += 1
             self._last_drop_reason = f"discard:{reason}"
             self._store_call("discard", lambda: self._store.delete(removed.msg_id))
+            if self._last_ack_id == removed.msg_id:
+                # F33：与 _evict_oldest 的锚点清理对齐——被丢弃的恰是续传锚点时
+                # 必须清空它，不能继续声称"已确认到 X"却再也拿不出 X 之后的消息。
+                self._last_ack_id = ""
+                self._store_call("meta:last_ack_id", lambda: self._store.set_meta("last_ack_id", ""))
             self._log.error(
                 "outbox 丢弃不可重试条目 kind=%s id=%s 原因=%s",
                 removed.kind,
@@ -738,6 +796,8 @@ class Outbox:
     def close(self) -> None:
         """关闭持久化后端（幂等）；关闭后对象不应再被使用。"""
 
+        # F33：节流期间可能还有未落盘的下行游标，关闭是最后一次落盘机会。
+        self.flush_meta()
         self._store_call("close", lambda: self._store.close())
         self._store = None
 
@@ -758,6 +818,7 @@ class Outbox:
 
 
 __all__ = [
+    "DOWNLINK_META_FLUSH_EVERY",
     "FRAME_KIND",
     "OVERFLOW_DROP_NEWEST",
     "OVERFLOW_DROP_OLDEST",
