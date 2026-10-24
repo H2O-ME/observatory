@@ -275,6 +275,16 @@ render_site() {
   chmod 0644 "$target"
 }
 
+reload_nginx() {
+  # Debian/Ubuntu 用 systemd；宝塔等面板可能只通过 init.d 启动（systemd 显示
+  # inactive）。两种都尝试，全部失败才返回非 0，避免“证书换了但 nginx 没加载”。
+  if systemctl is-active --quiet nginx 2>/dev/null; then
+    systemctl reload nginx
+    return $?
+  fi
+  nginx -s reload
+}
+
 install_nginx_sites() {
   log "渲染并安装 nginx 站点（模板 → sites-available）"
   # WebSocket map 只能定义一次：放到 conf.d，两个 vhost 共用。
@@ -292,7 +302,7 @@ install_nginx_sites() {
   # 迁移：移除旧版以域名命名的站点软链（文件本身留在 sites-available）。
   rm -f "/etc/nginx/sites-enabled/$CONSOLE_HOST.conf" "/etc/nginx/sites-enabled/$AGENT_HOST.conf"
   nginx -t || die "nginx 配置校验失败（证书路径或站点模板）；未 reload"
-  systemctl reload nginx
+  reload_nginx || die "nginx reload 失败（systemd 与 nginx -s reload 都不可用）"
   log "nginx 已 reload"
 }
 
