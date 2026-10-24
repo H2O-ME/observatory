@@ -81,3 +81,48 @@ def test_setup_renders_templates_instead_of_copying_static_confs() -> None:
     # ACME bootstrap 也必须用实体 vhost + nginx -t 校验
     assert "nginx -t" in setup
     assert "observatory-acme.conf" in setup
+
+
+def test_update_preflights_non_root_ownership_and_fails_closed() -> None:
+    """521 回归：非 root 镜像启动前必须校正数据卷/证书属主，失败即回滚，禁止并发升级。"""
+
+    update = _read("update.sh")
+
+    # 并发升级会把同一容器反复重建（2026-10-24 的 20 分钟 521 由多次重试叠加）。
+    assert "flock -n 9" in update
+    assert "OBS_UPDATE_LOCK_HELD" in update
+
+    # 非 root 容器需要 /data 与 /certs 都属于容器 UID。
+    assert "ensure_volume_owner" in update
+    assert "ensure_cert_owner" in update
+    assert "chown \"$uid:$uid\" \"$crt\" \"$key\"" in update
+
+    # chown 失败不能只是 warn 后继续：否则脚本报成功、容器 crash loop。
+    assert "数据卷 chown 失败" in update
+    assert "|| warn \"数据卷 chown" not in update
+    assert "rollback \"数据卷属主校正失败" in update
+    assert "rollback \"证书属主/文件校正失败" in update
+
+    # 启动后先看容器是否在 restarting/exited，再等 health，缩短 521 窗口。
+    assert "wait_started 20" in update
+    assert "新容器启动后进入 restarting/exited" in update
+
+
+def test_nginx_templates_log_origin_traffic_for_521_diagnosis() -> None:
+    """521 是 CDN→源站断链；源站没有 access/error log 就无法判断请求是否到达。"""
+
+    for name in ("nginx/console.conf.template", "nginx/agent.conf.template"):
+        text = _read(name)
+        assert "access_log " in text, name
+        assert "error_log " in text, name
+
+
+def test_nginx_reload_works_without_systemd_panel() -> None:
+    """宝塔面板用 init.d 启停 nginx（systemd 显示 inactive），必须回退 nginx -s reload。"""
+
+    setup = _read("setup.sh")
+    renew = _read("renew-certs.sh")
+    assert "reload_nginx" in setup
+    assert "nginx -s reload" in setup
+    assert "nginx -s reload" in renew
+
