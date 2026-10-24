@@ -452,6 +452,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.runtime_settings_provider = _load_runtime_settings_provider()
     app.state.update_offer_provider = _make_update_offer_provider(app)
     app.state.agent_event_sink = _make_agent_event_sink(app)
+    async with database.sessionmaker() as session:
+        from .console.auth import load_credential_version
+
+        app.state.credential_version = await load_credential_version(session)
     app.state.retention_task = None
     app.state.media_retention_interval_s = int(SPECS[MEDIA_RETENTION_KEY].default)
     directory_name = type(app.state.device_directory).__name__
@@ -531,6 +535,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.link_limiter = RateLimiter(settings.link_rate_limit, settings.link_rate_window_s)
     app.state.link_ip_limiter = RateLimiter(settings.link_ip_rate_limit, settings.link_rate_window_s)
     app.state.enroll_limiter = RateLimiter(settings.enroll_rate_limit, settings.enroll_rate_window_s)
+    app.state.install_limiter = RateLimiter(settings.enroll_rate_limit, settings.enroll_rate_window_s)
 
     app.add_middleware(
         HostSplit,

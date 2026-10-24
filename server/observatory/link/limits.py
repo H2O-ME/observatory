@@ -23,12 +23,16 @@ RATE_MESSAGE = "链路请求过于频繁，请稍后再试"
 
 
 def client_ip(headers: Any, client: Any, settings: Settings) -> str:
-    """Client IP, honouring ``X-Forwarded-For`` only when explicitly trusted (A11)."""
+    """Client IP, honouring ``X-Forwarded-For`` only when explicitly trusted (A11).
+
+    Rightmost entry (F16): the value our trusted proxy appended — clients cannot
+    forge it by adding their own leftmost entries.
+    """
 
     if getattr(settings, "trust_forwarded_for", False):
         forwarded = headers.get("x-forwarded-for") or headers.get("X-Forwarded-For")
         if forwarded:
-            return str(forwarded).split(",", 1)[0].strip() or "unknown"
+            return str(forwarded).split(",")[-1].strip() or "unknown"
     host = getattr(client, "host", None) if client is not None else None
     return str(host or "unknown")
 

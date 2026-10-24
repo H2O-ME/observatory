@@ -73,6 +73,22 @@ def _token_hash(token: str, settings: Any) -> str:
     return device_token_hash(token, settings.secret_key)
 
 
+def _throttle_public(request: Request, kind: str) -> None:
+    """F19: per-IP limiter for credential-bearing public endpoints.
+
+    The install token is one-shot, but the legacy `?code=` guessability is gone
+    and the endpoints still hand out credential-embedding scripts — they must
+    not be scrapeable at line rate.
+    """
+
+    limiter = getattr(request.app.state, "install_limiter", None)
+    if limiter is None:
+        return
+    key = f"public-install:{kind}:{client_ip(request)}"
+    if not limiter.allow(key):
+        raise AppError.rate(f"请求过于频繁，请 {limiter.retry_after(key)} 秒后再试")
+
+
 def _substitute(template: str, replacements: dict[str, str]) -> str:
     rendered = template
     for token, value in replacements.items():
@@ -312,6 +328,7 @@ async def install_script(
     token: str = Query(default=""),
     download: int = Query(default=0),
 ) -> PlainTextResponse:
+    _throttle_public(request, "ps1")
     async with request.app.state.db.sessionmaker() as session:
         credential = await require_install_credential(request, session, token=token)
     script = render_ps1(request, credential)
@@ -328,6 +345,7 @@ async def install_wrapper(
     request: Request,
     token: str = Query(default=""),
 ) -> PlainTextResponse:
+    _throttle_public(request, "cmd")
     async with request.app.state.db.sessionmaker() as session:
         credential = await require_install_credential(request, session, token=token)
     wrapper = render_cmd(request, credential)

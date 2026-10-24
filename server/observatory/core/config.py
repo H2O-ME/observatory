@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     # ---- identity / secrets -------------------------------------------------
     secret_key: str = "change-me-in-production"
     admin_password: str = "change-me-in-production"
-    session_ttl_minutes: int = Field(default=720, ge=5, le=60 * 24 * 30)
+    session_ttl_minutes: int = Field(default=720, ge=5, le=60 * 24 * 7)
 
     # ---- storage ------------------------------------------------------------
     data_dir: Path = Field(default_factory=_default_data_dir)

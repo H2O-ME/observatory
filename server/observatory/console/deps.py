@@ -58,13 +58,18 @@ def store() -> Any:
 
 
 def client_ip(request: Request) -> str:
-    """Client IP, honouring ``trust_forwarded_for`` (default false, A11)."""
+    """Client IP, honouring ``trust_forwarded_for`` (default false, A11).
+
+    Uses the **rightmost** X-Forwarded-For entry (0.3.1 F16): that value was
+    appended by the proxy we trust, so a client cannot forge it by sending its
+    own leftmost entries — the leftmost pick made per-IP rate limiting pointless.
+    """
 
     settings = get_settings(request)
     if getattr(settings, "trust_forwarded_for", False):
         forwarded = request.headers.get("x-forwarded-for")
         if forwarded:
-            return forwarded.split(",", 1)[0].strip()
+            return forwarded.split(",")[-1].strip()
     return request.client.host if request.client else ""
 
 
@@ -82,4 +87,9 @@ async def require_admin(request: Request) -> dict:
     payload = decode_session(extract_session_token(request), secret_key=settings.secret_key)
     if payload is None:
         raise AppError.auth("未登录或会话已过期")
+    # F15: a password/TOTP change bumps the credential version; sessions issued
+    # before that are revoked even though their JWT signature is still valid.
+    current_pwv = int(getattr(request.app.state, "credential_version", 0) or 0)
+    if int(payload.get("pwv", 0) or 0) != current_pwv:
+        raise AppError.auth("凭据已变更，请重新登录")
     return payload

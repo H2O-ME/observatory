@@ -28,7 +28,7 @@ from ..core.crypto import device_token_hash, new_device_token
 from ..core.db import get_session
 from ..core.errors import AppError
 from ..core.log import log_event
-from ..core.models import Device, InstallToken
+from ..core.models import DeletedDevice, Device, InstallToken
 from . import audit
 from .deps import client_ip, store
 from .dto import device_safe_config
@@ -95,6 +95,18 @@ async def enroll(
         raise AppError.auth("缺少安装令牌")
 
     token_row = await _load_token_row(session, install_token, settings=settings)
+    # F9: a deleted uid stays deleted — do not resurrect it under a new token.
+    tombstone = (
+        await session.execute(select(DeletedDevice).where(DeletedDevice.uid == uid))
+    ).scalars().first()
+    if tombstone is not None:
+        await audit.record(
+            session,
+            action=audit.ACTION_ENROLL,
+            ip=ip,
+            detail={"ok": False, "uid": uid, "reason": "tombstoned"},
+        )
+        raise AppError.auth("该设备记录已被管理员删除；如需重新接入请先清除墓碑记录")
     device = (await session.execute(select(Device).where(Device.uid == uid))).scalars().first()
 
     # --- claim the token (or verify the same-device re-redeem) ---------------

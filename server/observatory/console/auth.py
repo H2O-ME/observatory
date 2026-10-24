@@ -42,6 +42,9 @@ router = APIRouter(prefix="/auth", tags=["auth"], route_class=ConsoleRoute)
 
 KEY_PASSWORD_HASH = "auth.password_hash"
 KEY_TOTP_SECRET = "auth.totp_secret"
+#: F15: every password/TOTP change bumps this; sessions with a smaller ``pwv``
+#: are rejected by ``require_admin`` (process-local copy in app.state).
+KEY_CRED_VERSION = "auth.cred_version"
 
 _LOGIN_LIMITER: RateLimiter | None = None
 
@@ -51,6 +54,25 @@ def _login_limiter(settings: Any) -> RateLimiter:
     if _LOGIN_LIMITER is None:
         _LOGIN_LIMITER = RateLimiter(settings.login_rate_limit, settings.login_rate_window_s)
     return _LOGIN_LIMITER
+
+
+async def load_credential_version(session: AsyncSession) -> int:
+    """Read the persisted credential version (0 when no credential change yet)."""
+
+    raw = await _get_auth_setting(session, KEY_CRED_VERSION)
+    try:
+        return max(0, int(raw or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+async def bump_credential_version(request: Request, session: AsyncSession) -> int:
+    """Persist +1 and refresh the process-local copy used by ``require_admin``."""
+
+    version = await load_credential_version(session) + 1
+    await _put_auth_setting(session, KEY_CRED_VERSION, str(version))
+    request.app.state.credential_version = version
+    return version
 
 
 async def _get_auth_setting(session: AsyncSession, key: str) -> str | None:
@@ -129,6 +151,7 @@ async def login(
         secret_key=settings.secret_key,
         ttl_minutes=settings.session_ttl_minutes,
         version=resolve_version(),
+        pwv=await load_credential_version(session),
     )
     await audit.record(session, action=audit.ACTION_LOGIN, ip=ip, detail={"totp": bool(secret)})
     secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "") == "https"
@@ -201,6 +224,9 @@ async def totp_enable(
     code = str(payload.get("code") or "")
     if not verify_totp(secret, code):
         raise AppError.bad_request("验证码不正确，请检查手机时间")
+    # M2 hardening: enabling TOTP must not be possible with a stolen session
+    # alone — it revokes other sessions and locks the account to this factor.
+    await bump_credential_version(request, session)
     await _put_auth_setting(session, KEY_TOTP_SECRET, secret)
     await audit.record(
         session,
@@ -230,6 +256,7 @@ async def totp_disable(
             detail={"ok": False},
         )
         raise AppError.bad_request("验证码不正确，已拒绝关闭")
+    await bump_credential_version(request, session)
     await _put_auth_setting(session, KEY_TOTP_SECRET, None)
     await audit.record(
         session,
@@ -257,15 +284,20 @@ async def change_password(
     if new == current:
         raise AppError.bad_request("新密码不能与当前密码相同")
     await _put_auth_setting(session, KEY_PASSWORD_HASH, hash_password(new))
+    # F15: revoke every session issued before this change.
+    await bump_credential_version(request, session)
     await audit.record(session, action=audit.ACTION_PASSWORD_CHANGE, ip=client_ip(request))
-    return stamp({"ok": True, "message": "密码已更新"})
+    return stamp({"ok": True, "message": "密码已更新，所有旧会话已失效"})
 
 
 # ``require_admin`` is imported from ``deps`` above; keep this module free of a
 # second session/token decoder so the console has one auth path.
 __all__ = [
+    "KEY_CRED_VERSION",
     "KEY_PASSWORD_HASH",
     "KEY_TOTP_SECRET",
+    "bump_credential_version",
+    "load_credential_version",
     "router",
     "session_state",
 ]

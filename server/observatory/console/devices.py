@@ -19,7 +19,8 @@ from .. import presence
 from ..core.settings_spec import SettingsError, normalize
 from ..core.db import get_session
 from ..core.errors import AppError
-from ..core.models import Command, Device, Frame
+from ..core.clock import now_ms as clock_ms
+from ..core.models import Command, DeletedDevice, Device, Frame
 from . import audit
 from .deps import client_ip, get_journal, get_links, get_settings, require_admin, store
 from .dto import budget_ms, command_out, device_out, device_state, stamp
@@ -289,6 +290,15 @@ async def delete_device(
     except ImportError as exc:  # pragma: no cover - W0 skeleton guard
         raise AppError.internal("媒体层未就绪，拒绝在未清理画面数据的情况下删除设备") from exc
     media_result = await media_ingest.delete_device_data(session, device, await store().load(session))
+    # F9: leave a tombstone so the running agent gets 410 GONE (terminal) instead
+    # of 401 (infinite re-enroll loop), and enrolment cannot resurrect the uid.
+    session.add(
+        DeletedDevice(
+            uid=device.uid,
+            token_hash=device.token_hash or "",
+            deleted_at_ms=clock_ms(),
+        )
+    )
     await session.delete(device)
     await session.commit()
     from .events import EVENT_DEVICE_REMOVED, emit

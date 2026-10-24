@@ -165,8 +165,8 @@ def test_n3_migrates_legacy_schema_with_backup(tmp_dir) -> None:
     first, second = asyncio.run(migrate_twice())
     assert first.from_version == 1, "0.2.10 库应被识别为 v1"
     assert first.legacy_detected is True
-    assert first.to_version == SCHEMA_VERSION == 3
-    assert first.applied == (2, 3)
+    assert first.to_version == SCHEMA_VERSION
+    assert first.applied == tuple(range(2, SCHEMA_VERSION + 1))
     assert first.backup_path is not None and first.backup_path.exists(), "迁移前必须备份"
     assert first.backup_path.stat().st_size > 0
 
@@ -201,5 +201,9 @@ def test_n3_migrates_legacy_schema_with_backup(tmp_dir) -> None:
         indexes = {row[0] for row in connection.execute("select name from sqlite_master where type='index'")}
         assert "ux_devices_token_hash" in indexes, "v3 迁移必须建 token_hash partial unique 索引"
         assert "ix_frames_device_ts" in indexes
+        assert "ux_frame_archives_device_remote_path" in indexes, "v4 归档唯一索引（F26）"
+        assert "ix_audit_actor" in indexes, "v4 审计 actor 索引（F27）"
+        tombstone_columns = {row[1] for row in connection.execute("PRAGMA table_info(deleted_devices)")}
+        assert {"uid", "token_hash", "deleted_at_ms"} <= tombstone_columns, "v4 删除墓碑表（F9）"
     finally:
         connection.close()

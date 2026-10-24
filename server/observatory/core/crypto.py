@@ -88,8 +88,14 @@ def issue_session(
     ttl_minutes: int,
     version: str | None = None,
     actor: str = "admin",
+    pwv: int = 0,
 ) -> tuple[str, int]:
-    """Return ``(token, expires_at_ms)`` for a console session."""
+    """Return ``(token, expires_at_ms)`` for a console session.
+
+    ``pwv`` is the credential version (0.3.1 F15): bumping it on password or
+    TOTP changes invalidates every previously issued session, so a stolen token
+    does not outlive the credential it was issued for.
+    """
 
     now = int(time.time())
     expires_at_s = now + ttl_minutes * 60
@@ -99,6 +105,7 @@ def issue_session(
         "iat": now,
         "exp": expires_at_s,
         "ver": version or resolve_version(),
+        "pwv": int(pwv),
     }
     token = jwt.encode(payload, secret_key, algorithm=JWT_ALGORITHM)
     return token, expires_at_s * 1000

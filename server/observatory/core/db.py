@@ -36,7 +36,7 @@ from .log import log_event
 log = logging.getLogger(__name__)
 
 #: Bump this and append a migration function when the schema changes.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 PRAGMAS = (
     "PRAGMA journal_mode=WAL",
@@ -287,10 +287,57 @@ async def _migration_v3_device_token_index(conn: AsyncConnection) -> None:
     )
 
 
+async def _migration_v4_tombstones_and_indexes(conn: AsyncConnection) -> None:
+    """0.3.1: delete tombstones (F9) + archive/audit indexes (F26/F27).
+
+    The archive unique index first removes duplicate ``(device_id, remote_path)``
+    rows (concurrent registration could create them before the constraint
+    existed), keeping the oldest row of each group.
+    """
+
+    await conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS deleted_devices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                uid VARCHAR(64) NOT NULL,
+                token_hash VARCHAR(128) NOT NULL,
+                deleted_at_ms BIGINT NOT NULL
+            )
+            """
+        )
+    )
+    await conn.execute(
+        text("CREATE UNIQUE INDEX IF NOT EXISTS ux_deleted_devices_token ON deleted_devices (token_hash)")
+    )
+    await conn.execute(
+        text("CREATE INDEX IF NOT EXISTS ix_deleted_devices_uid ON deleted_devices (uid)")
+    )
+
+    await conn.execute(
+        text(
+            """
+            DELETE FROM frame_archives
+            WHERE id NOT IN (
+                SELECT MIN(id) FROM frame_archives GROUP BY device_id, remote_path
+            )
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_frame_archives_device_remote_path "
+            "ON frame_archives (device_id, remote_path)"
+        )
+    )
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_actor ON audit (actor)"))
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline_0_2_10", _migration_v1_baseline),
     Migration(2, "link_v3_0_3_0", _migration_v2_link_v3),
     Migration(3, "device_token_index", _migration_v3_device_token_index),
+    Migration(4, "tombstones_and_indexes", _migration_v4_tombstones_and_indexes),
 )
 
 

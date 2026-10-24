@@ -23,7 +23,7 @@ from ..core.config import Settings
 from ..core.crypto import device_token_hash
 from ..core.errors import AppError
 from ..core.log import log_event
-from ..core.models import Device
+from ..core.models import DeletedDevice, Device
 from .session import AgentSession, SessionProtocol
 
 log = logging.getLogger(__name__)
@@ -101,6 +101,19 @@ class DatabaseDeviceDirectory:
                     )
                 )
             ).scalars().first()
+            if device is None:
+                # F9: a deleted device leaves a tombstone. Answer GONE (not 401)
+                # so the agent treats this as terminal and stops retrying —
+                # without it a deleted fleet member spins on 401→enroll forever.
+                tombstone = (
+                    await session.execute(
+                        select(DeletedDevice).where(DeletedDevice.token_hash == digest)
+                    )
+                ).scalars().first()
+            else:
+                tombstone = None
+        if tombstone is not None:
+            raise AppError.gone("该设备记录已被删除")
         if device is None:
             return None
         if device.uninstalled_at_ms:

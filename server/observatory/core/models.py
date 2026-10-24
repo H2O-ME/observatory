@@ -180,7 +180,7 @@ class FrameArchive(Base):
 
 
 class InstallToken(Base):
-    """One-shot installer credential (A18); business logic lives in console/legacy."""
+    """One-shot installer credential (A18); business logic lives in console/install."""
 
     __tablename__ = "install_tokens"
 
@@ -198,10 +198,28 @@ class InstallToken(Base):
         return max(0, int(self.max_uses or 1) - (1 if self.used_at_ms else 0))
 
 
+class DeletedDevice(Base):
+    """Delete tombstone (0.3.1 F9).
+
+    A deleted device's token hash lives on here so the link directory can answer
+    ``410 GONE`` instead of ``401`` — the agent treats GONE as terminal and stops
+    retrying, and enrolment refuses to resurrect the uid. Kept forever: rows are
+    tiny, and the guarantee "this device was deliberately removed" must not expire.
+    """
+
+    __tablename__ = "deleted_devices"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    uid: Mapped[str] = mapped_column(String(64), index=True)
+    token_hash: Mapped[str] = mapped_column(String(128), unique=True)
+    deleted_at_ms: Mapped[int] = mapped_column(BigInteger, default=now_ms)
+
+
 __all__ = [
     "AuditEntry",
     "Base",
     "Command",
+    "DeletedDevice",
     "Device",
     "Frame",
     "FrameArchive",

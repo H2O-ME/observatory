@@ -151,7 +151,7 @@ async def _send_to_agent(request: Request, grant: Grant, body: dict[str, Any]) -
         await agent_session.send("control", body, deadline_ms=CONTROL_SEND_DEADLINE_MS)
         return True
     except Exception as exc:  # noqa: BLE001 - carrier errors are logged, not ignored
-        log.warning("control send failed device=%s token=%s: %s", grant.device_id, grant.token, exc)
+        log.warning("control send failed device=%s token_hint=%s: %s", grant.device_id, grant.token[:8], exc)
         return False
 
 
@@ -165,7 +165,7 @@ async def _close_viewer(grant: Grant, code: int, reason: str) -> None:
             await viewer.close(code=code, reason=reason)
         except (RuntimeError, WebSocketDisconnect) as exc:
             # The peer is already gone; log it instead of swallowing silently (A22).
-            log.debug("control viewer close failed token=%s code=%s: %s", grant.token, code, exc)
+            log.debug("control viewer close failed token_hint=%s code=%s: %s", grant.token[:8], code, exc)
 
 
 async def stop_grant(request: Request, grant: Grant, *, code: int = CLOSE_REVOKED, reason: str = "revoked") -> None:
@@ -191,7 +191,7 @@ async def _expire_after(request: Request, grant: Grant) -> None:
         raise
     if grant.revoked:
         return
-    log.info("control TTL expired device=%s token=%s", grant.device_id, grant.token)
+    log.info("control TTL expired device=%s token_hint=%s", grant.device_id, grant.token[:8])
     await stop_grant(request, grant, code=CLOSE_TTL, reason="ttl expired")
 
 
@@ -227,7 +227,7 @@ async def revoke_device_grants(
                     deadline_ms=CONTROL_SEND_DEADLINE_MS,
                 )
             except Exception as exc:  # noqa: BLE001 - the link may already be gone
-                log.warning("ctrl_stop on revoke failed device=%s token=%s: %s", device_id, grant.token, exc)
+                log.warning("ctrl_stop on revoke failed device=%s token_hint=%s: %s", device_id, grant.token[:8], exc)
         await _close_viewer(grant, code, reason)
         for task in list(grant.tasks):
             if task is not asyncio.current_task():
@@ -287,7 +287,9 @@ async def create_control_grant(
         action=audit.ACTION_CONTROL_GRANT,
         device=device,
         ip=client_ip(request),
-        detail={"ttl_s": ttl_s, "fps": grant.fps, "quality": grant.quality, "token": grant.token},
+        # F17: only a short fingerprint — the audit table lives up to 10 years
+        # and anyone who can read it must not be able to replay the live token.
+        detail={"ttl_s": ttl_s, "fps": grant.fps, "quality": grant.quality, "token_hint": grant.token[:8]},
     )
     return stamp(
         {
@@ -446,7 +448,7 @@ async def control_socket(websocket: WebSocket, uid: str) -> None:
         await pump_input()
     except WebSocketDisconnect as exc:
         # Normal browser disconnect: still leave a debug trace for A22.
-        log.debug("control viewer disconnected token=%s code=%s: %s", grant.token, exc.code, exc)
+        log.debug("control viewer disconnected token_hint=%s code=%s: %s", grant.token[:8], exc.code, exc)
     except AppError as exc:
         log.info("control closed: %s", exc.message)
     finally:
@@ -456,7 +458,7 @@ async def control_socket(websocket: WebSocket, uid: str) -> None:
         if callable(close_control):
             close_control(grant.token)
         else:
-            log.warning("session has no close_control(); legacy stream may leak token=%s", grant.token)
+            log.warning("session has no close_control(); legacy stream may leak token_hint=%s", grant.token[:8])
         grant.viewer = None
         if not grant.revoked:
             await _send_to_agent(websocket, grant, {"session": grant.token, "action": "stop"})
