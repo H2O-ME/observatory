@@ -34,6 +34,17 @@ log = logging.getLogger(__name__)
 CONTROL_QUEUE_MAX = 4
 
 CloseHook = Callable[[int, str], Awaitable[None]]
+#: ``(device_id, agent_version) -> offer dict | None`` — injected by the assembly
+#: so link never imports console (A4). The provider owns the package table read.
+UpdateOfferProvider = Callable[[int, str], Awaitable[dict[str, Any] | None]]
+#: ``(kind, device_id, uid, body) -> None`` — uplink events the link cannot
+#: persist itself (uninstall ack, agent events); the assembly routes them to
+#: audit + console state. Failures are logged, never fatal to the link.
+AgentEventSink = Callable[[str, int, str, dict[str, Any]], Awaitable[None]]
+
+#: How often a session may ask the update-offer provider (heartbeat is 5-300s;
+#: one small SELECT per minute per device is plenty for update propagation).
+OFFER_RECHECK_MS = 60_000
 
 
 @runtime_checkable
@@ -131,6 +142,8 @@ class AgentSession:
         protocol: int = PROTOCOL_VERSION,
         agent_config: Mapping[str, Any] | None = None,
         device_reporter: DeviceReporter | None = None,
+        update_offer_provider: UpdateOfferProvider | None = None,
+        event_sink: AgentEventSink | None = None,
     ) -> None:
         self.device_id = int(device_id)
         self.uid = str(uid)
@@ -146,6 +159,10 @@ class AgentSession:
         #: One DB write path for hello/heartbeat (agent_version/boot_id/protocol/
         #: last_seen_ms); carriers inject it, session never talks to the DB itself.
         self.device_reporter = device_reporter
+        #: v3 update loop (F1): the provider turns agent_version into an offer.
+        self._update_offer_provider = update_offer_provider
+        self._event_sink = event_sink
+        self._last_offer_check_ms = 0
         self.last_seen_ms = self.clock.now_ms()
         self.connected_at_ms = self.last_seen_ms
         self.agent_version = ""
@@ -360,13 +377,16 @@ class AgentSession:
             self.protocol = envelope.v
             await self._persist_device_report(envelope.body, envelope.v)
             self._ack_from_body(envelope.body)
-            return [self._welcome()]
+            return [await self._welcome()]
 
         if kind == "heartbeat":
             self._apply_agent_info(envelope.body)
             await self._persist_device_report(envelope.body, envelope.v)
             self._ack_from_body(envelope.body)
-            return []
+            # F1: the only automatic update loop for v3 devices. The agent picks
+            # the offer up from the reply batch on either carrier.
+            offer = await self._maybe_update_offer()
+            return [offer] if offer is not None else []
 
         if kind == "result":
             await self._handle_result(envelope.body)
@@ -380,6 +400,7 @@ class AgentSession:
                 device_id=self.device_id,
                 payload=redact({str(envelope.body.get("event") or "agent_event"): envelope.body}),
             )
+            await self._emit("agent_event", envelope.body)
             return []
 
         if kind == "control_frame":
@@ -388,6 +409,9 @@ class AgentSession:
 
         if kind == "uninstall_ack":
             log_event(log, logging.INFO, "session.uninstall_ack", device_id=self.device_id)
+            # F2: persist uninstalled_at_ms + audit + revoke grants via the
+            # injected sink (same facts the removed legacy endpoint wrote).
+            await self._emit("uninstall_ack", envelope.body)
             return []
 
         if kind == "pong":
@@ -463,19 +487,79 @@ class AgentSession:
         log_event(log, logging.INFO, "session.closed", device_id=self.device_id, code=code, reason=reason)
 
     # -- internals ---------------------------------------------------------
-    def _welcome(self) -> Envelope:
-        return new_envelope(
-            "welcome",
-            {
-                "server_version": resolve_version(),
-                "heartbeat_interval_s": self.settings.heartbeat_interval_s,
-                "server_time_ms": self.clock.now_ms(),
-                # Agent-safe projection built by the carrier via
-                # core.settings_spec.agent_view (same function as console DTO).
-                "config": dict(self.agent_config),
-            },
-            clock=self.clock,
+    async def _emit(self, kind: str, body: dict[str, Any]) -> None:
+        """Forward an uplink event to the assembly-provided sink (fail-open)."""
+
+        sink = self._event_sink
+        if sink is None:
+            return
+        try:
+            await sink(kind, self.device_id, self.uid, dict(body or {}))
+        except Exception as exc:  # noqa: BLE001 - a sink failure must not drop the link
+            log_event(
+                log,
+                logging.WARNING,
+                "session.event_sink_failed",
+                device_id=self.device_id,
+                kind=kind,
+                error=str(exc),
+            )
+
+    async def _maybe_update_offer(self) -> Envelope | None:
+        """Build an ``update_offer`` envelope when a newer package exists (F1).
+
+        Gated by the device's effective ``auto_update`` setting (C9: the setting
+        must have a real consumer) and throttled to one provider call per minute.
+        Any provider failure degrades to "no offer" without touching the link.
+        """
+
+        provider = self._update_offer_provider
+        if provider is None or self.closed:
+            return None
+        if not self.agent_config.get("auto_update", True):
+            return None
+        now = self.clock.now_ms()
+        if now - self._last_offer_check_ms < OFFER_RECHECK_MS:
+            return None
+        self._last_offer_check_ms = now
+        try:
+            offer = await provider(self.device_id, self.agent_version)
+        except Exception as exc:  # noqa: BLE001 - offer is best-effort
+            log_event(
+                log,
+                logging.WARNING,
+                "session.update_offer_failed",
+                device_id=self.device_id,
+                error=str(exc),
+            )
+            return None
+        if not offer:
+            return None
+        log_event(
+            log,
+            logging.INFO,
+            "session.update_offered",
+            device_id=self.device_id,
+            version=str(offer.get("version") or ""),
         )
+        return new_envelope("update_offer", dict(offer), clock=self.clock)
+
+    async def _welcome(self) -> Envelope:
+        payload: dict[str, Any] = {
+            "server_version": resolve_version(),
+            "heartbeat_interval_s": self.settings.heartbeat_interval_s,
+            "server_time_ms": self.clock.now_ms(),
+            # Agent-safe projection built by the carrier via
+            # core.settings_spec.agent_view (same function as console DTO).
+            "config": dict(self.agent_config),
+        }
+        # Reset the throttle so a fresh connection always checks for an offer —
+        # this is what pushes a fleet onto a newly uploaded package.
+        self._last_offer_check_ms = 0
+        offer = await self._maybe_update_offer()
+        if offer is not None:
+            payload["update_offer"] = offer.body
+        return new_envelope("welcome", payload, clock=self.clock)
 
     def _apply_agent_info(self, body: dict[str, Any]) -> None:
         version = body.get("agent_version")
@@ -551,6 +635,8 @@ class AgentSession:
         # A result proves delivery; stop redelivering that command. A late
         # duplicate result is idempotent in the journal (first result wins).
         self.outbox.ack(command_id)
+        # F4: command status changed — tell the console hub (best-effort).
+        await self._emit("command_updated", {"command_id": command_id, "ok": ok})
 
     def _handle_control_envelope(self, body: dict[str, Any]) -> None:
         token = body.get("session")

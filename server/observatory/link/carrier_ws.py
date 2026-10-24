@@ -114,6 +114,8 @@ async def link_ws(websocket: WebSocket) -> None:
         protocol=PROTOCOL_VERSION,
         agent_config=await build_agent_config(websocket.app, identity.settings),
         device_reporter=make_agent_report_reporter(websocket.app),
+        update_offer_provider=getattr(websocket.app.state, "update_offer_provider", None),
+        event_sink=getattr(websocket.app.state, "agent_event_sink", None),
     )
     await registry.register(identity.device_id, session)
     session.note_carrier("ws", PROTOCOL_VERSION)

@@ -21,7 +21,7 @@ from ..core.db import get_session
 from ..core.errors import AppError
 from ..core.models import Command, Device, Frame
 from . import audit
-from .deps import client_ip, get_journal, get_links, require_admin, store
+from .deps import client_ip, get_journal, get_links, get_settings, require_admin, store
 from .dto import budget_ms, command_out, device_out, device_state, stamp
 from .envelope import ConsoleRoute
 from .settings import push_config
@@ -253,6 +253,9 @@ async def patch_device(
         ip=client_ip(request),
         detail=changes,
     )
+    from .events import EVENT_DEVICE_UPDATED, emit
+
+    await emit(EVENT_DEVICE_UPDATED, device_uid=device.uid, data={"changes": list(changes)})
     await push_config(session, links=get_links(request), device=device)
 
     frame_ids = await latest_frame_ids(session, [device.id])
@@ -288,6 +291,9 @@ async def delete_device(
     media_result = await media_ingest.delete_device_data(session, device, await store().load(session))
     await session.delete(device)
     await session.commit()
+    from .events import EVENT_DEVICE_REMOVED, emit
+
+    await emit(EVENT_DEVICE_REMOVED, device_uid=uid, data={"purge_remote": bool(purge_remote)})
     archive_error = str(media_result.get("archive_error") or "")
     if archive_error:
         # The local tree and frame rows are gone, but the remote copy is not;
@@ -358,6 +364,11 @@ async def create_device_command(
     command_payload = payload.get("payload")
     if command_payload is not None and not isinstance(command_payload, dict):
         raise AppError.bad_request("payload 必须是对象")
+    command_payload = validate_command_payload(command_type, command_payload)
+    if command_type == "update":
+        # F5: never dispatch an update that references a missing/mismatched
+        # package or a version below the self-update floor.
+        await _validate_update_target(request, session, command_payload)
     record = await create_command(
         request,
         session,
@@ -373,7 +384,38 @@ async def create_device_command(
         ip=client_ip(request),
         detail={"type": command_type, "command_id": record.id},
     )
-    return command_out(record)
+    from .events import EVENT_COMMAND_CREATED, emit
+
+    await emit(EVENT_COMMAND_CREATED, device_uid=device.uid, data={"command_id": record.id, "type": command_type})
+    # F7: the envelope must carry the command budget so the browser never
+    # times out earlier than the server when the global ceiling is raised.
+    return {**command_out(record), "deadline_ms": budget_ms(command_type)}
+
+
+async def _validate_update_target(request: Request, session: AsyncSession, body: dict[str, Any]) -> None:
+    """F5: a manual update must reference a real, hash-matched, updatable package."""
+
+    from ..core.config import MIN_SELF_UPDATE_VERSION, parse_version
+    from .updates import PackageService
+
+    version = str(body.get("version") or "")
+    sha256 = str(body.get("sha256") or "").strip().lower()
+    if not version:
+        raise AppError.bad_request("update 命令缺少 version")
+    try:
+        parse_version(version)
+    except ValueError as exc:
+        raise AppError.bad_request("version 格式错误") from exc
+    if parse_version(version) < parse_version(MIN_SELF_UPDATE_VERSION):
+        raise AppError.bad_request(f"目标版本低于最低可自更新版本 {MIN_SELF_UPDATE_VERSION}")
+    package = next(
+        (item for item in await PackageService(get_settings(request)).list(session, "agent") if item.version == version),
+        None,
+    )
+    if package is None:
+        raise AppError.bad_request(f"没有 {version} 版本的安装包，请先在「更新」页上传")
+    if not package.sha256 or sha256 != str(package.sha256).lower():
+        raise AppError.bad_request("sha256 与该安装包不一致")
 
 
 @router.get("/{uid}/commands")

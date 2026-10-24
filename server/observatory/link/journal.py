@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -144,6 +144,10 @@ class WaiterSlot:
         return self._result
 
 
+#: ``(record, late_status, late_result, late_error) -> None`` — F6 hook.
+LateResultListener = Callable[["CommandRecord", str, dict[str, Any] | None, str | None], Awaitable[None]]
+
+
 class CommandJournal:
     """Persist commands and correlate the agent result with the waiting caller."""
 
@@ -153,11 +157,16 @@ class CommandJournal:
         *,
         settings: Settings | None = None,
         clock: Clock | None = None,
+        late_result_listener: LateResultListener | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._settings = settings or get_settings()
         self._clock = clock or SYSTEM_CLOCK
         self._waiters: dict[str, WaiterSlot] = {}
+        #: F6: notified when a real result arrives after the caller already saw
+        #: ``timeout`` — the console's view and the row disagree, which must be
+        #: observable instead of a DEBUG-only log line.
+        self._late_result_listener = late_result_listener
 
     # -- creation / reads --------------------------------------------------
     async def create(
@@ -393,6 +402,11 @@ class CommandJournal:
                     command_id=command_id,
                     status=record.status,
                 )
+                if record.status == "timeout" and status in {"ok", "error"} and self._late_result_listener:
+                    try:
+                        await self._late_result_listener(record, status, result, error)
+                    except Exception as exc:  # noqa: BLE001 - observability must not fail settlement
+                        log_event(log, logging.WARNING, "journal.late_result_listener_failed", error=str(exc))
                 return record
             row.status = status
             row.result = dict(result) if isinstance(result, dict) else None

@@ -109,13 +109,13 @@ def test_a02_restart_agent_actually_restarts(tmp_dir: Path, caplog) -> None:
 
 
 def test_a03_update_requires_sha256_and_aborts_on_mismatch(tmp_dir: Path) -> None:
-    """A3：无摘要的 update 命令被拒（422）；摘要不符时中止且不替换。"""
+    """A3：无摘要/错摘要/不存在的包的 update 命令被拒（422）；摘要不符时中止且不替换。"""
 
     import sys as _sys
 
-    from tests.helpers import TEST_ADMIN_PASSWORD, running_app, seed_device
+    from tests.helpers import TEST_ADMIN_PASSWORD, running_app, seed_agent_package, seed_device
 
-    # 1) 服务端：update 命令必须在到达受控端前就有合法 64 位 sha256
+    # 1) 服务端：update 命令必须有合法 sha256、且与包库中该版本一致（0.3.1 F5）
     with running_app(tmp_dir) as client:
         assert client.post("/api/v1/auth/login", json={"password": TEST_ADMIN_PASSWORD}).status_code == 200
         seed_device(client, uid="OBS-A3", token="a3-token")
@@ -130,11 +130,28 @@ def test_a03_update_requires_sha256_and_aborts_on_mismatch(tmp_dir: Path) -> Non
             json={"type": "update", "payload": {"version": "0.3.0", "sha256": "not-a-digest"}},
         )
         assert invalid.status_code == 422
-        ok = client.post(
+        # 包不存在：即使 sha256 格式合法也拒绝（F5）
+        unknown = client.post(
             "/api/v1/devices/OBS-A3/commands",
             json={"type": "update", "payload": {"version": "0.3.0", "sha256": "a" * 64}},
         )
+        assert unknown.status_code == 422, unknown.text
+        assert "安装包" in unknown.json()["message"]
+        # 包存在但 sha256 与包不符：拒绝
+        real_sha = seed_agent_package(client, version="0.3.0")
+        mismatch = client.post(
+            "/api/v1/devices/OBS-A3/commands",
+            json={"type": "update", "payload": {"version": "0.3.0", "sha256": "a" * 64}},
+        )
+        assert mismatch.status_code == 422, mismatch.text
+        assert "sha256" in mismatch.json()["message"]
+        ok = client.post(
+            "/api/v1/devices/OBS-A3/commands",
+            json={"type": "update", "payload": {"version": "0.3.0", "sha256": real_sha}},
+        )
         assert ok.status_code == 200, ok.text
+        # F7：响应带 deadline_ms
+        assert isinstance(ok.json().get("deadline_ms"), int) and ok.json()["deadline_ms"] > 0
 
     # 2) 受控端：空/非法摘要直接拒绝；摘要不符时中止（不进入替换步骤）
     _sys.path.insert(0, str(REPO_ROOT / "agent"))

@@ -103,6 +103,8 @@ async def link_http(
             protocol=batch.protocol,
             agent_config=await build_agent_config(request.app, identity.settings),
             device_reporter=make_agent_report_reporter(request.app),
+            update_offer_provider=getattr(request.app.state, "update_offer_provider", None),
+            event_sink=getattr(request.app.state, "agent_event_sink", None),
         )
         await registry.register(identity.device_id, session)
         replayed = await session.replay_pending()

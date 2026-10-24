@@ -125,6 +125,12 @@ class ControlSessions:
             tokens = [token for token, grant in self._grants.items() if grant.device_id == device_id]
         return [token for token in tokens if self.remove(token) is not None]
 
+    def grants_for(self, device_id: int) -> list[Grant]:
+        """Live grant objects for a device (the caller decides how to stop them)."""
+
+        with self._lock:
+            return [grant for grant in self._grants.values() if grant.device_id == device_id]
+
     def active_count(self) -> int:
         with self._lock:
             return sum(1 for grant in self._grants.values() if not grant.expired and not grant.revoked)
@@ -187,6 +193,47 @@ async def _expire_after(request: Request, grant: Grant) -> None:
         return
     log.info("control TTL expired device=%s token=%s", grant.device_id, grant.token)
     await stop_grant(request, grant, code=CLOSE_TTL, reason="ttl expired")
+
+
+async def revoke_device_grants(
+    app: Any,
+    device_id: int,
+    *,
+    code: int = CLOSE_REVOKED,
+    reason: str = "revoked",
+) -> int:
+    """Stop every live grant for a device (uninstall ack, delete, session swap).
+
+    ``stop_grant`` needs a ``Request`` for the agent session lookup; this variant
+    reads the registry straight from ``app.state`` so assembly/background code
+    can revoke without a request context. Returns the number of grants stopped.
+    """
+
+    stopped = 0
+    agent_session = None
+    links = getattr(app.state, "links", None)
+    if links is not None:
+        agent_session = links.get(int(device_id))
+    for grant in SESSIONS.grants_for(int(device_id)):
+        if grant.revoked:
+            continue
+        grant.revoked = True
+        SESSIONS.remove(grant.token)
+        if agent_session is not None:
+            try:
+                await agent_session.send(
+                    "control",
+                    {"session": grant.token, "action": "stop"},
+                    deadline_ms=CONTROL_SEND_DEADLINE_MS,
+                )
+            except Exception as exc:  # noqa: BLE001 - the link may already be gone
+                log.warning("ctrl_stop on revoke failed device=%s token=%s: %s", device_id, grant.token, exc)
+        await _close_viewer(grant, code, reason)
+        for task in list(grant.tasks):
+            if task is not asyncio.current_task():
+                task.cancel()
+        stopped += 1
+    return stopped
 
 
 async def _load_device(session: AsyncSession, uid: str) -> Device:

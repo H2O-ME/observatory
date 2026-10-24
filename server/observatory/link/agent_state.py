@@ -72,8 +72,35 @@ def apply_agent_report(
             )
     if protocol is not None:
         update("protocol", int(protocol))
+    _merge_sysinfo_report(device, body)
     update("last_seen_ms", moment)
     return changed
+
+
+def _merge_sysinfo_report(device: Device, body: AgentReport) -> None:
+    """Merge ``sysinfo`` and ``state.capture`` from hello/heartbeat into the row.
+
+    0.3.0 dropped this for v3 (only the legacy adapter merged), which froze the
+    dashboard and made capture-degraded capabilities unreachable for v3 devices
+    (F3). Both protocols now land the same facts here.
+    """
+
+    sysinfo = body.get("sysinfo")
+    if isinstance(sysinfo, dict) and sysinfo:
+        device.sysinfo = {**(device.sysinfo or {}), **sysinfo}
+    state = body.get("state")
+    capture = state.get("capture") if isinstance(state, dict) else None
+    if isinstance(capture, dict):
+        device.sysinfo = {
+            **(device.sysinfo or {}),
+            "capture": {
+                "state": str(capture.get("state") or "")[:30],
+                "reason": str(capture.get("reason") or "")[:200],
+                "workers": capture.get("workers") if isinstance(capture.get("workers"), list) else [],
+                "sessions": int(capture.get("sessions") or 0),
+                "at_ms": now_ms(),
+            },
+        }
 
 
 async def record_agent_report(

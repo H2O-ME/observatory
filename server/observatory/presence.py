@@ -85,7 +85,9 @@ def _effective_capture(capture: Mapping[str, Any] | None, settings: Settings, no
     if not isinstance(capture, Mapping):
         return None
     reported = int(capture.get("at_ms") or 0)
-    if reported and now - reported > settings.capture_stale_ms:
+    # Missing/zero at_ms is stale by definition: an untimestamped health report
+    # must never keep capabilities alive forever.
+    if not reported or now - reported > settings.capture_stale_ms:
         return None
     return {
         "state": str(capture.get("state") or ""),

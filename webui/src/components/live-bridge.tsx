@@ -64,6 +64,10 @@ export function LiveBridge() {
       const uid = event.device_uid;
       if (uid) {
         void queryClient.invalidateQueries({ queryKey: ["device", uid] });
+        // 0.3.1 F4: per-device effective settings have no refetchInterval of
+        // their own — without this invalidation two operators never see each
+        // other's device overrides.
+        void queryClient.invalidateQueries({ queryKey: ["device-settings", uid] });
       }
       if (event.type === "device_updated" || event.type === "device_removed" || event.type === "uninstall_progress") {
         void queryClient.invalidateQueries({ queryKey: ["devices"] });
@@ -90,6 +94,7 @@ export function LiveBridge() {
         void queryClient.invalidateQueries({ queryKey: ["updates"] });
         void queryClient.invalidateQueries({ queryKey: ["system"] });
         void queryClient.invalidateQueries({ queryKey: ["settings"] });
+        void queryClient.invalidateQueries({ queryKey: ["install-tokens"] });
       }
     };
 

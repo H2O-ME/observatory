@@ -30,6 +30,9 @@ log = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = 3
 MAX_HEADER_BYTES = 64 * 1024
+#: One HTTP carrier request carries at most this many uplink envelopes; the
+#: agent batches ≤64 itself, so anything larger is hostile or broken (F8).
+MAX_UPLINK_ITEMS = 64
 _HEADER_STRUCT = struct.Struct(">I")
 
 #: Envelope types the server may send to an agent.
@@ -77,13 +80,15 @@ class Envelope:
                 code=ErrorCode.UNSUPPORTED,
             )
         msg_id = raw.get("id")
-        if not isinstance(msg_id, str) or not msg_id:
-            raise EnvelopeError("信封缺少 id")
+        if not isinstance(msg_id, str) or not msg_id or len(msg_id) > 64:
+            # ids are echoed into ack cursors and LRU dedup caches; bound them (F8).
+            raise EnvelopeError("信封 id 非法（须为 1..64 字符字符串）")
         kind = raw.get("t")
-        if not isinstance(kind, str) or not kind:
-            raise EnvelopeError("信封缺少 t")
+        if not isinstance(kind, str) or not kind or len(kind) > 32:
+            raise EnvelopeError("信封 t 非法（须为 1..32 字符字符串）")
         ts_ms = raw.get("ts_ms", 0)
-        if not isinstance(ts_ms, int):
+        # bool is an int subclass; `true` must not pass as a timestamp (F8).
+        if not isinstance(ts_ms, int) or isinstance(ts_ms, bool):
             raise EnvelopeError("信封 ts_ms 必须是整数毫秒")
         body = raw.get("body", {})
         if body is None:
@@ -255,17 +260,15 @@ def decode_uplink_batch(payload: Any) -> UplinkBatch:
         )
     if "items" in payload:
         raw_items = payload.get("items")
-    elif "messages" in payload:
-        # Transitional tolerance for the W0 draft name; the wire contract is
-        # `items` (spec §5.6) and the warning makes the drift visible.
-        log.warning("uplink batch used deprecated `messages` field; expected `items`")
-        raw_items = payload.get("messages")
     elif "t" in payload:
         raw_items = [payload]
     else:
         raise EnvelopeError("上行批次缺少 items")
     if not isinstance(raw_items, list):
         raise EnvelopeError("items 必须是数组")
+    if len(raw_items) > MAX_UPLINK_ITEMS:
+        # F8: one request must not amplify into unbounded per-item DB writes.
+        raise EnvelopeError(f"单批最多 {MAX_UPLINK_ITEMS} 条上行")
     last_ack_id = payload.get("last_ack_id")
     if last_ack_id is not None and not isinstance(last_ack_id, str):
         raise EnvelopeError("last_ack_id 必须是字符串或 null")

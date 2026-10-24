@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib
 import logging
 import os
 import time
@@ -36,10 +35,6 @@ from .link.journal import CommandJournal
 from .link.registry import DatabaseDeviceDirectory, registry
 
 log = logging.getLogger(__name__)
-
-#: Optional feature packages: mounted when present, warning when not. Temporary
-#: W0 mechanism — W3 turns this into a hard import (see tmp_w0/server-core.md).
-OPTIONAL_PACKAGES = (("observatory.console", "console"),)
 
 #: Media has no HTTP router (its API lives in console); it is wired via
 #: ``media.configure/start/stop`` below. Retention is expensive (unlink per frame),
@@ -209,20 +204,6 @@ async def _housekeeping(app: FastAPI) -> None:
             log_event(log, logging.ERROR, "housekeeping.failed", error=str(exc))
 
 
-def _mount_optional(app: FastAPI, module_name: str, label: str) -> None:
-    try:
-        module = importlib.import_module(module_name)
-    except ImportError as exc:
-        log.warning("optional %s package not available yet (%s): %s", label, module_name, exc)
-        return
-    router = getattr(module, "router", None)
-    if router is None:
-        log.warning("optional %s package %s exposes no `router`; feature disabled", label, module_name)
-        return
-    app.include_router(router, prefix="/api/v1")
-    log.info("%s router mounted from %s", label, module_name)
-
-
 def _load_agent_config_provider() -> Any | None:
     """Console-backed provider for ``welcome.config`` (same function as its DTO).
 
@@ -258,6 +239,160 @@ def _load_runtime_settings_provider() -> Any | None:
     return provider
 
 
+def _make_update_offer_provider(app: FastAPI) -> Any | None:
+    """v3 update loop (F1): turn ``agent_version`` into a package offer.
+
+    Reads the package table per call (throttled to 1/min/device by the session)
+    and keeps presence's ``update`` capability in step with CLI-registered
+    packages, which cannot notify the running process themselves.
+    """
+
+    def provider(device_id: int, agent_version: str) -> Any:
+        return _update_offer(app, int(device_id), str(agent_version or ""))
+
+    return provider
+
+
+async def _update_offer(app: FastAPI, device_id: int, agent_version: str) -> dict[str, Any] | None:
+    from .console.updates import PackageService
+    from .core.config import can_self_update, is_newer
+    from .core.models import Device
+
+    if not can_self_update(agent_version):
+        return None
+    database = getattr(app.state, "db", None)
+    if database is None:
+        return None
+    async with database.sessionmaker() as session:
+        device = await session.get(Device, device_id)
+        if device is None:
+            return None
+        offer = await PackageService(app.state.settings).update_offer(session, device)
+    if offer and is_newer(str(offer.get("version") or ""), agent_version or "0.0.0"):
+        with contextlib.suppress(Exception):
+            presence.set_latest_agent_version(str(offer.get("version") or ""))
+    return offer
+
+
+def _make_agent_event_sink(app: FastAPI) -> Any:
+    """Route uplink events the link cannot persist itself (F2/F4)."""
+
+    async def sink(kind: str, device_id: int, uid: str, body: dict[str, Any]) -> None:
+        database = getattr(app.state, "db", None)
+        if kind == "uninstall_ack":
+            await _handle_uninstall_ack(app, int(device_id), uid)
+        elif kind == "command_updated":
+            from .console.events import EVENT_COMMAND_UPDATED, emit
+
+            await emit(EVENT_COMMAND_UPDATED, device_uid=uid, data=body)
+        elif kind == "agent_event":
+            if database is None:
+                return
+            from .console import audit as console_audit
+
+            name = str(body.get("event") or "agent_event")[:64]
+            data = body.get("data") if isinstance(body.get("data"), dict) else {}
+            async with database.sessionmaker() as session:
+                await console_audit.record(
+                    session,
+                    action=f"agent.{name}"[:64],
+                    actor="agent",
+                    device_uid=uid,
+                    detail=console_audit.redact(data) if hasattr(console_audit, "redact") else data,
+                )
+
+    return sink
+
+
+async def _handle_uninstall_ack(app: FastAPI, device_id: int, uid: str) -> None:
+    """Persist ``uninstalled_at_ms``, audit, drop the session and revoke grants."""
+
+    from .console import audit as console_audit
+    from .console.control import revoke_device_grants
+    from .core.models import Device
+
+    database = getattr(app.state, "db", None)
+    if database is not None:
+        async with database.sessionmaker() as session:
+            device = await session.get(Device, device_id)
+            if device is not None and not device.uninstalled_at_ms:
+                device.uninstalled_at_ms = clock.now_ms()
+                await session.commit()
+            await console_audit.record(
+                session,
+                action=console_audit.ACTION_DEVICE_UNINSTALL,
+                device=device,
+                device_uid=uid,
+                detail={"stage": "acked", "protocol": 3},
+            )
+    links = getattr(app.state, "links", None)
+    if links is not None:
+        await links.unregister(device_id)
+    await revoke_device_grants(app, device_id, reason="device uninstalled")
+
+
+def _wire_frame_events(app: FastAPI) -> None:
+    """Frame listener → console event hub (F4): make ``frame_added`` real."""
+
+    media = getattr(app.state, "media", None)
+    if media is None:
+        return
+
+    def on_frame(device: Any, frame: Any) -> None:
+        async def push() -> None:
+            try:
+                from .console.events import EVENT_FRAME_ADDED, emit
+
+                await emit(
+                    EVENT_FRAME_ADDED,
+                    device_uid=str(getattr(device, "uid", "") or ""),
+                    data={
+                        "frame_id": str(getattr(frame, "id", "") or ""),
+                        "ts_ms": int(getattr(frame, "ts_ms", 0) or 0),
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 - events are best-effort
+                log.debug("frame event emit failed: %s", exc)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(push(), name="frame-event")
+
+    try:
+        media.add_frame_listener(on_frame)
+    except Exception as exc:  # noqa: BLE001 - event wiring must not break media start
+        log.warning("frame event listener not registered (%s)", exc)
+
+
+def _make_late_result_listener(app: FastAPI) -> Any:
+    """F6: audit when a real result arrives after the console already saw timeout."""
+
+    async def listener(record: Any, status: str, result: Any, error: Any) -> None:
+        database = getattr(app.state, "db", None)
+        if database is None:
+            return
+        from .console import audit as console_audit
+
+        async with database.sessionmaker() as session:
+            await console_audit.record(
+                session,
+                action="command.late_result",
+                actor="agent",
+                device_uid="",
+                detail={
+                    "command_id": str(getattr(record, "id", "") or ""),
+                    "type": str(getattr(record, "kind", "") or ""),
+                    "row_status": "timeout",
+                    "late_status": status,
+                    "error": str(error or "")[:200] or None,
+                },
+            )
+
+    return listener
+
+
 def _uptime_s(app: FastAPI) -> int:
     started = getattr(app.state, "started_at_ms", 0)
     return max(0, (clock.now_ms() - started) // 1000) if started else 0
@@ -274,18 +409,49 @@ async def _latest_agent_version(database: Database) -> str | None:
     return max(versions, key=parse_version) if versions else None
 
 
+def _ensure_production_credentials(settings: Settings) -> None:
+    """F14: refuse to boot with the documented default credentials (fail-closed).
+
+    Only a non-dev environment is rejected: ``OBS_ENV=dev`` keeps the README
+    quick-start working, everything else must set real values in ``server/.env``.
+    """
+
+    env = os.environ.get("OBS_ENV", "").strip().lower()
+    if env in WEBUI_DEV_ENVS:
+        return
+    defaults = []
+    if settings.secret_key == "change-me-in-production":
+        defaults.append("OBS_SECRET_KEY")
+    if settings.admin_password == "change-me-in-production":
+        defaults.append("OBS_ADMIN_PASSWORD")
+    if defaults:
+        raise RuntimeError(
+            "拒绝启动：以下凭据仍是文档默认值 "
+            f"{', '.join(defaults)}。请在 server/.env 设置随机密钥后重启"
+            "（开发环境可设 OBS_ENV=dev 跳过此检查）。"
+        )
+
+
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
+    _ensure_production_credentials(settings)
     database = Database(settings)
     report = await database.migrate()
     app.state.db = database
-    app.state.journal = CommandJournal(database.sessionmaker, settings=settings, clock=clock.SYSTEM_CLOCK)
+    app.state.journal = CommandJournal(
+        database.sessionmaker,
+        settings=settings,
+        clock=clock.SYSTEM_CLOCK,
+        late_result_listener=_make_late_result_listener(app),
+    )
     app.state.links = registry
     app.state.clock = clock.SYSTEM_CLOCK
     app.state.device_directory = DatabaseDeviceDirectory(database.sessionmaker, settings)
     app.state.started_at_ms = clock.now_ms()
     app.state.agent_config_provider = _load_agent_config_provider()
     app.state.runtime_settings_provider = _load_runtime_settings_provider()
+    app.state.update_offer_provider = _make_update_offer_provider(app)
+    app.state.agent_event_sink = _make_agent_event_sink(app)
     app.state.retention_task = None
     app.state.media_retention_interval_s = int(SPECS[MEDIA_RETENTION_KEY].default)
     directory_name = type(app.state.device_directory).__name__
@@ -308,6 +474,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         agent_config_provider="console" if app.state.agent_config_provider else "defaults",
     )
     await _start_media(app, database)
+    _wire_frame_events(app)
     task = asyncio.create_task(_housekeeping(app), name="observatory-housekeeping")
     log_event(
         log,
@@ -376,8 +543,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(link_http_router)
     app.include_router(link_ws_router)
-    for module_name, label in OPTIONAL_PACKAGES:
-        _mount_optional(app, module_name, label)
+    from .console import console_router  # noqa: PLC0415 - hard dependency since W3
+
+    app.include_router(console_router, prefix="/api/v1")
 
     @app.get("/api/v1/health")
     async def health() -> dict:

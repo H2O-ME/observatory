@@ -86,7 +86,13 @@ def enroll_token(client: object, *, uid: str = "OBS-ENROLL-TEST") -> str:
     return token
 
 
-def seed_device(client: object, *, uid: str = "OBS-V3-TEST", token: str = "v3-test-token") -> int:
+def seed_device(
+    client: object,
+    *,
+    uid: str = "OBS-V3-TEST",
+    token: str = "v3-test-token",
+    agent_version: str = "0.3.0",
+) -> int:
     """直接造一行 devices（v3 /agent/link 只认 DB 里的 token_hash，不再接受任意 token）。
 
     返回 device_id；token_hash 与 console/install.py 使用同一个
@@ -107,6 +113,7 @@ def seed_device(client: object, *, uid: str = "OBS-V3-TEST", token: str = "v3-te
             existing = (await session.execute(select(Device).where(Device.uid == uid))).scalars().first()
             if existing is not None:
                 existing.token_hash = digest
+                existing.agent_version = agent_version
                 existing.uninstalled_at_ms = None
                 await session.commit()
                 return int(existing.id)
@@ -117,7 +124,7 @@ def seed_device(client: object, *, uid: str = "OBS-V3-TEST", token: str = "v3-te
                 os_name="Windows",
                 os_version="11",
                 arch="AMD64",
-                agent_version="0.3.0",
+                agent_version=agent_version,
                 token_hash=digest,
                 enrolled_at_ms=now_ms(),
                 last_seen_ms=now_ms(),

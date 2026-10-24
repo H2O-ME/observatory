@@ -3,12 +3,12 @@ setlocal EnableExtensions EnableDelayedExpansion
 chcp 65001 >nul 2>&1
 title Observatory 受控端安装
 
-rem 离线/现场安装向导（Observatory 0.3.0）。
+rem 离线/现场安装向导（Observatory）。
 rem
 rem 这里不内置任何凭据：
-rem   * 0.3.0 推荐用「一次性安装令牌」——控制台生成，默认 30 分钟有效、
+rem   * 使用「一次性安装令牌」——控制台生成，默认 30 分钟有效、
 rem     单次使用、绑定首台设备；撤销方式见 README。
-rem   * 旧版共享注册码仅用于兼容 0.2.x 受控端。
+rem   * 旧版共享注册码已于 0.3.1 移除，服务端只接受一次性安装令牌。
 rem 令牌一旦写死在 U 盘里就失去“单次/可撤销”的意义，所以现场输入。
 
 echo.
@@ -23,26 +23,17 @@ set /p BASE_URL=服务器地址 [%DEFAULT_URL%]:
 if "%BASE_URL%"=="" set "BASE_URL=%DEFAULT_URL%"
 
 set "INSTALL_TOKEN="
-set /p INSTALL_TOKEN=一次性安装令牌（控制台生成；留空改用旧版注册码）:
+set /p INSTALL_TOKEN=一次性安装令牌（控制台「设置 → 安装程序」生成）:
 
-set "ENROLL_CODE="
 if not defined INSTALL_TOKEN (
-  set /p ENROLL_CODE=旧版共享注册码:
-  if not defined ENROLL_CODE (
-    echo.
-    echo   缺少安装凭据，无法继续。
-    echo   请在控制台「设置 → 安装程序」生成一次性安装令牌。
-    pause
-    exit /b 2
-  )
+  echo.
+  echo   缺少安装凭据，无法继续。
+  echo   请在控制台「设置 → 安装程序」生成一次性安装令牌。
+  pause
+  exit /b 2
 )
 
-set "CRED_Q="
-if defined INSTALL_TOKEN (
-  set "CRED_Q=token=%INSTALL_TOKEN%"
-) else (
-  set "CRED_Q=code=%ENROLL_CODE%"
-)
+set "CRED_Q=token=%INSTALL_TOKEN%"
 
 echo.
 echo   正在从 %BASE_URL% 安装...

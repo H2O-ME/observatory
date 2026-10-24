@@ -23,7 +23,9 @@ FALLBACK_VERSION = "0.3.0"
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 #: Lowest agent build that may replace itself through the v3 update path (A3/A18).
-MIN_SELF_UPDATE_VERSION = "0.2.5"
+#: 0.3.0 is the first protocol-v3 build with sha256-verified, prechecked,
+#: rollback-capable self-update; older updaters are reached only by reinstall.
+MIN_SELF_UPDATE_VERSION = "0.3.0"
 
 DEFAULT_CONSOLE_HOST = "control.tianhw.top"
 DEFAULT_AGENT_HOSTS = "observatory.123423.xyz,control.tianhw.top"
