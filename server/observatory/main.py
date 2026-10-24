@@ -10,6 +10,7 @@ import contextlib
 import importlib
 import logging
 import os
+import shutil
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -54,21 +55,104 @@ REPO_WEBUI_DIST = Path(__file__).resolve().parents[2] / "webui" / "dist"
 WEBUI_DEV_ENVS = frozenset({"dev", "development", "local"})
 
 
+def _webui_version(path: Path) -> str:
+    """Read the ``.version`` marker written next to a published console build."""
+
+    try:
+        return (path / ".version").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _bundled_webui() -> Path | None:
+    """The frontend baked into the image (or the repo build during development)."""
+
+    if (BUNDLED_WEBUI / "index.html").is_file():
+        return BUNDLED_WEBUI
+    env = os.environ.get("OBS_ENV", "").strip().lower()
+    if env in WEBUI_DEV_ENVS and (REPO_WEBUI_DIST / "index.html").is_file():
+        return REPO_WEBUI_DIST
+    return None
+
+
+def _publish_webui(settings: Settings, *, source: Path | None = None) -> bool:
+    """Copy the bundled console into the data volume when its version changed.
+
+    The data volume wins in :func:`_resolve_webui_dir` (operators may keep a
+    custom build there). Without this publish step an upgraded container kept
+    serving the **old** SPA from the volume against the new API: login succeeded
+    (200) but the old bundle did not understand the v3 envelope/`authenticated`
+    field, so the console bounced back to the login page and showed no version
+    (production incident on 2026-10-25, `/data/webui/.version` was `0.2.10`).
+
+    Runs before the route table is built, is idempotent, and never deletes the
+    previous build until the new one is in place.
+    """
+
+    if os.environ.get("OBS_WEBUI_DIR", "").strip():
+        return False
+    bundled = source or _bundled_webui()
+    if bundled is None or not (bundled / "index.html").is_file():
+        return False
+    target = Path(settings.webui_dir)
+    try:
+        if target.resolve() == bundled.resolve():
+            return False
+    except OSError:
+        return False
+
+    version = resolve_version()
+    if _webui_version(target) == version and (target / "index.html").is_file():
+        return False
+
+    staging = settings.tmp_dir / f"webui-{os.getpid()}-{int(time.time() * 1000)}"
+    backup = settings.data_dir / "webui.old"
+    try:
+        with contextlib.suppress(OSError):
+            shutil.rmtree(staging)
+        shutil.copytree(bundled, staging)
+        (staging / ".version").write_text(version + "\n", encoding="utf-8")
+        with contextlib.suppress(OSError):
+            shutil.rmtree(backup)
+        if target.exists():
+            target.rename(backup)
+        staging.rename(target)
+        shutil.rmtree(backup, ignore_errors=True)
+    except OSError as exc:
+        # Keep the previous console rather than serving a half-copied build.
+        if backup.exists() and not target.exists():
+            with contextlib.suppress(OSError):
+                backup.rename(target)
+        with contextlib.suppress(OSError):
+            shutil.rmtree(staging, ignore_errors=True)
+        log.warning("webui.publish failed source=%s target=%s: %s", bundled, target, exc)
+        return False
+    log.info("webui.published source=%s target=%s version=%s", bundled, target, version)
+    return True
+
+
 def _resolve_webui_dir(settings: Settings) -> tuple[Path, str]:
-    """Return ``(directory, source)`` for the console assets (startup log uses it)."""
+    """Return ``(directory, source)`` for the console assets (startup log uses it).
+
+    A data-volume copy is used only when its ``.version`` matches the running
+    build. A stale copy is ignored in favour of the bundled frontend, so an
+    upgrade can never pair an old SPA with a new API (the 2026-10-25 login loop).
+    """
 
     override = os.environ.get("OBS_WEBUI_DIR", "").strip()
     if override:
         return Path(override).expanduser(), "OBS_WEBUI_DIR"
     configured = Path(settings.webui_dir)
-    if (configured / "index.html").is_file():
+    current = resolve_version()
+    if (configured / "index.html").is_file() and _webui_version(configured) in {"", current}:
         return configured, "data"
-    if (BUNDLED_WEBUI / "index.html").is_file():
-        return BUNDLED_WEBUI, "bundled"
-    env = os.environ.get("OBS_ENV", "").strip().lower()
-    if env in WEBUI_DEV_ENVS and (REPO_WEBUI_DIST / "index.html").is_file():
-        return REPO_WEBUI_DIST, "dev-repo"
+    bundled = _bundled_webui()
+    if bundled is not None:
+        return bundled, "bundled"
+    if (configured / "index.html").is_file():
+        return configured, "stale"
     return configured, "missing"
+
 
 
 def _load_media() -> Any | None:
@@ -355,6 +439,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     settings.ensure_dirs()
     configure_logging(settings.log_level)
+    # Before resolving/serving: replace a stale data-volume SPA with the build
+    # baked into this image. Must be before `_resolve_webui_dir` below.
+    _publish_webui(settings)
 
     app = FastAPI(
         title=PRODUCT,
@@ -419,6 +506,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "or OBS_WEBUI_DIR, otherwise / returns 404",
             webui_dir,
             BUNDLED_WEBUI,
+        )
+    elif webui_source == "stale":
+        log.warning(
+            "webui.serving stale data-volume build path=%s (version=%s, expected=%s); "
+            "bundled frontend unavailable, upgrade may pair an old SPA with a new API",
+            webui_dir,
+            _webui_version(webui_dir) or "?",
+            resolve_version(),
         )
     else:
         log.info("webui.serving dir=%s source=%s", webui_dir, webui_source)
