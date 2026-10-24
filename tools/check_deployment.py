@@ -154,7 +154,7 @@ async def main() -> int:
     console = f"https://{args.console_host}"
     agent = f"https://{args.agent_host}"
 
-    async with httpx.AsyncClient(verify=not args.insecure, timeout=30, follow_redirects=True) as client:
+    async with httpx.AsyncClient(verify=not args.insecure, timeout=httpx.Timeout(30.0, read=120.0), follow_redirects=True) as client:
         try:
             group("公共接口 / 版本")
             health = body(await client.get(f"{console}/api/v1/health"))
@@ -327,6 +327,26 @@ async def main() -> int:
                 async with websockets.connect(
                     ws_url, additional_headers=device_headers, ssl=ssl_ctx, open_timeout=15, close_timeout=5
                 ) as socket_ws:
+                    # spec §5.6: the server sends `welcome` only as the reply to the
+                    # first `hello`; connecting alone produces no downlink.
+                    await socket_ws.send(
+                        json.dumps(
+                            {
+                                "v": 3,
+                                "id": str(uuid.uuid4()),
+                                "t": "hello",
+                                "ts_ms": 1730000000000,
+                                "body": {
+                                    "agent_version": version,
+                                    "protocol": 3,
+                                    "boot_id": "deploy-check",
+                                    "device_uid": uid,
+                                    "last_ack_id": "",
+                                    "device_time_ms": 1730000000000,
+                                },
+                            }
+                        )
+                    )
                     welcome_raw = await asyncio.wait_for(socket_ws.recv(), 15)
                     welcome = json.loads(welcome_raw)
                     check("WS 载体 /agent/link 升级成功", welcome.get("t") == "welcome", str(welcome)[:160])
