@@ -134,11 +134,17 @@ ensure_repo() {
   fi
   if [[ -z "$REPO_URL" ]]; then
     if [[ -d "$REPO_ROOT/.git" ]]; then
-      log "使用当前目录作为部署源：$REPO_ROOT"
-      if [[ "$REPO_ROOT" != "$APP_DIR" ]]; then
-        mkdir -p "$(dirname "$APP_DIR")"
-        cp -a "$REPO_ROOT" "$APP_DIR"
-      fi
+      # 0.3.1（F50）：导出干净工作树而不是 cp -a 整个开发目录——
+      # 后者会把 .venv/node_modules/.pytest-tmp（约 1GB）和本地调试数据
+      # 一起带上生产机。
+      log "从当前目录导出干净工作树：$REPO_ROOT → $APP_DIR"
+      mkdir -p "$(dirname "$APP_DIR")"
+      mkdir -p "$APP_DIR"
+      git -C "$REPO_ROOT" archive HEAD | tar -x -C "$APP_DIR"
+      mkdir -p "$APP_DIR/.git"
+      git -C "$APP_DIR" init -q
+      git -C "$APP_DIR" remote add origin "$REPO_ROOT" 2>/dev/null || true
+      git -C "$APP_DIR" fetch -q "$REPO_ROOT" HEAD 2>/dev/null || true
       return
     fi
     die "请设置 REPO_URL=git@github.com:you/observatory.git 后重试"
@@ -353,10 +359,21 @@ summary() {
 下一步：
   1. 上传受控端安装包（控制台 → 更新 → 上传），或 sudo bash deploy/build-agent.sh
   2. 在目标机器运行安装程序（只会弹一次 UAC）
-  3. 证书续期（每天一次，失败退出非 0，可用于监控告警）：
-      0 4 * * * root bash $APP_DIR/deploy/renew-certs.sh >/dev/null 2>&1
-  4. 上线体检：python tools/check_deployment.py --password '<密码>' --code '<注册码或安装令牌>'
+  3. 证书续期已自动安装到 /etc/cron.d/observatory-renew-certs（每天 04:00，失败退出非 0）
+  4. 上线体检：python tools/check_deployment.py --password '<控制台密码>'
 EOF
+}
+
+install_renew_cron() {
+  # 0.3.1（F48）：证书链路防错做了整套，最后一步却依赖人工抄 cron——
+  # 90 天后证书过期全站失效。直接落 /etc/cron.d。
+  local cron_file="/etc/cron.d/observatory-renew-certs"
+  cat >"$cron_file" <<EOF
+# Observatory certificate renewal (installed by deploy/setup.sh)
+0 4 * * * root bash $APP_DIR/deploy/renew-certs.sh >>/var/log/observatory-renew-certs.log 2>&1
+EOF
+  chmod 0644 "$cron_file"
+  log "已安装证书续期 cron：$cron_file"
 }
 
 main() {
@@ -371,6 +388,7 @@ main() {
   ensure_certs
   install_nginx_sites
   start_stack
+  install_renew_cron
   summary
 }
 

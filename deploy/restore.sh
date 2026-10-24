@@ -129,6 +129,13 @@ docker run --rm \
   sh -c 'find /data -mindepth 1 -maxdepth 1 -exec rm -rf {} + && cp -a /restore/. /data/ && chown -R "$RESTORE_UID:$RESTORE_UID" /data' \
   || die "写入数据卷失败；数据卷可能处于部分写入状态，请用恢复前备份重试"
 
+# 0.3.1（F51）：清掉归档里可能带来的陈旧 -wal/-shm——靠 SQLite 的 salt 不匹配
+# 来丢弃旧 WAL 是兜底行为，显式删除才是确定性的。
+docker run --rm -v observatory-data:/data alpine:3 \
+  sh -c 'rm -f /data/observatory.db-wal /data/observatory.db-shm' || true
+
+warn "提醒：备份之后注册/轮换过令牌的设备，其凭据不在这份备份里——恢复后这些设备会 401 且一次性令牌已过期，需要在目标机重装受控端。"
+
 # 4) 启动并等待健康
 log "启动容器"
 compose up -d --no-build || die "容器启动失败"
@@ -137,6 +144,31 @@ if ! wait_health 60; then
   die "恢复后 120 秒内未通过健康检查；恢复前备份在 $APP_DIR/backups/pre-restore-$STAMP"
 fi
 log "恢复完成，服务健康"
+
+# 0.3.1（F13）：作废全部未使用的一次性安装令牌——旧备份恢复后它们会"复活"，
+# 而明文令牌还留在此前下载的 install.ps1/.cmd 与浏览器历史里。
+if docker exec observatory-api python -c "
+import asyncio, os, sys
+sys.path.insert(0, '/srv')
+os.environ.setdefault('OBS_DATA_DIR', '/data')
+async def main():
+    from sqlalchemy import update
+    from observatory.core.db import Database
+    from observatory.core.config import Settings
+    from observatory.core.clock import now_ms
+    from observatory.core.models import InstallToken
+    settings = Settings(data_dir='/data', secret_key=os.environ['OBS_SECRET_KEY'], admin_password=os.environ.get('OBS_ADMIN_PASSWORD', 'x') or 'x')
+    database = Database(settings)
+    async with database.sessionmaker() as session:
+        await session.execute(update(InstallToken).where(InstallToken.used_at_ms.is_(None)).values(expires_at_ms=now_ms() - 1))
+        await session.commit()
+    await database.close()
+asyncio.run(main())
+" >/dev/null 2>&1; then
+  log "未使用的一次性安装令牌已全部作废（F13）"
+else
+  warn "安装令牌作废失败；请登录控制台手动撤销全部安装令牌"
+fi
 
 rm -rf "$RESTORE_DIR"
 log "如需恢复证书：tar xzf <certs.tar.gz> -C /etc && sudo bash deploy/setup.sh"

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { KeyRound, Loader2, ShieldCheck } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -25,6 +25,7 @@ export function LoginPage({ version }: Props) {
   const totpEnabled = useAuth((state) => state.totpEnabled);
   const consoleHost = useAuth((state) => state.consoleHost);
   const navigate = useNavigate();
+  const location = useLocation();
 
   const [password, setPassword] = useState("");
   const [totp, setTotp] = useState("");
@@ -41,7 +42,10 @@ export function LoginPage({ version }: Props) {
     setError("");
     try {
       await login(password, showTotp ? totp : undefined);
-      navigate("/wall", { replace: true });
+      // F40: 会话过期被踢到登录页时 URL 未变（App 匿名态不走路由），登录后
+      // 回跳原深链接；直登 /login 才去设备墙。
+      const target = location.pathname !== "/login" ? `${location.pathname}${location.search}` : "/wall";
+      navigate(target, { replace: true });
     } catch (failure) {
       const message = isApiError(failure) ? failure.message : "登录失败";
       setError(message);
@@ -52,7 +56,7 @@ export function LoginPage({ version }: Props) {
   };
 
   return (
-    <div className="flex min-h-[100dvh] items-center justify-center px-4 py-8">
+    <div className="flex app-vh-min items-center justify-center px-4 py-8">
       <div className="w-full max-w-sm">
         <div className="mb-5 text-center">
           <h1 className="text-xl font-semibold tracking-tight text-ink">Observatory</h1>

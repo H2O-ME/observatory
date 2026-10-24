@@ -123,7 +123,13 @@ function validationMessage(detail: unknown): string | null {
 
 function errorMessage(payload: unknown, fallback: string): string {
   if (!payload || typeof payload !== "object") {
-    return typeof payload === "string" && payload.trim() ? payload.trim().slice(0, 240) : fallback;
+    if (typeof payload === "string" && payload.trim()) {
+      // F43: a reverse-proxy 502/504 returns an HTML error page; showing raw
+      // markup to the operator is noise.
+      const text = payload.trim();
+      return text.startsWith("<") ? fallback : text.slice(0, 240);
+    }
+    return fallback;
   }
   const record = payload as ApiErrorBody & { detail?: unknown };
   if (typeof record.message === "string" && record.message.trim()) return record.message;
@@ -162,15 +168,42 @@ export function writeToken(token: string): void {
 
 // ------------------------------------------------------------------ 401 handling --
 
-let unauthorizedHandler: (() => void) | null = null;
+let unauthorizedHandler: ((requestEpoch: number) => void) | null = null;
+/**
+ * F40: request epoch. The store bumps it on login/logout; a 401 stamps the
+ * epoch it happened in so the handler can tell "401 from the current session"
+ * apart from "401 from a request already in flight before a fresh login"
+ * (observed as "登录后闪回登录页"). api.ts owns the counter — importing the
+ * store here would be circular.
+ */
+let sessionEpoch = 0;
+let unauthorizedEpoch = -1;
+
+export function currentSessionEpoch(): number {
+  return sessionEpoch;
+}
+
+/** Called by the auth store on login (and by its 401 handler on logout). */
+export function bumpSessionEpoch(): void {
+  sessionEpoch += 1;
+}
 
 /** Registered once by `store/auth.ts`; api.ts must not import the store. */
-export function setUnauthorizedHandler(handler: (() => void) | null): void {
+export function setUnauthorizedHandler(handler: ((requestEpoch: number) => void) | null): void {
   unauthorizedHandler = handler;
 }
 
-function notifyUnauthorized(): void {
-  unauthorizedHandler?.();
+function notifyUnauthorized(requestEpoch: number): void {
+  unauthorizedEpoch = requestEpoch;
+  unauthorizedHandler?.(requestEpoch);
+}
+
+/**
+ * True when this 401 belongs to a superseded request (pre-login in-flight or
+ * a stale retry) and must not tear the current session down.
+ */
+export function isStaleUnauthorized(): boolean {
+  return unauthorizedEpoch !== sessionEpoch;
 }
 
 // -------------------------------------------------------------- deadline budget ---
@@ -254,6 +287,7 @@ async function parseBody(response: Response): Promise<unknown> {
 }
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const requestEpoch = sessionEpoch;
   const timeoutMs = options.timeoutMs ?? timeoutFor(options.opKey);
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -280,7 +314,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     });
     const payload = await parseBody(response);
     if (!response.ok) {
-      if (response.status === 401) notifyUnauthorized();
+      if (response.status === 401) notifyUnauthorized(requestEpoch);
       throw toApiError(response.status, payload);
     }
     return unwrap<T>(payload, options.opKey);
@@ -313,6 +347,7 @@ async function requestBinary(
   path: string,
   options: { opKey: string; signal?: AbortSignal; timeoutMs?: number },
 ): Promise<BinaryResponse> {
+  const requestEpoch = sessionEpoch;
   const timeoutMs = options.timeoutMs ?? timeoutFor(options.opKey);
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -336,7 +371,7 @@ async function requestBinary(
     rememberDeadline(options.opKey, Number.isFinite(deadlineHeader) ? deadlineHeader : null);
     if (!response.ok) {
       const payload = await parseBody(response);
-      if (response.status === 401) notifyUnauthorized();
+      if (response.status === 401) notifyUnauthorized(requestEpoch);
       throw toApiError(response.status, payload);
     }
     return { blob: await response.blob(), headers: response.headers };
@@ -368,6 +403,7 @@ interface UploadOptions {
  */
 function upload<T>(path: string, form: FormData, options: UploadOptions): Promise<T> {
   return new Promise<T>((resolve, reject) => {
+    const requestEpoch = sessionEpoch;
     const xhr = new XMLHttpRequest();
     const token = readToken();
     xhr.open("POST", path, true);
@@ -401,7 +437,7 @@ function upload<T>(path: string, form: FormData, options: UploadOptions): Promis
       } catch {
         payload = xhr.responseText;
       }
-      if (xhr.status === 401) notifyUnauthorized();
+      if (xhr.status === 401) notifyUnauthorized(requestEpoch);
       if (xhr.status < 200 || xhr.status >= 300) {
         reject(toApiError(xhr.status, payload));
         return;

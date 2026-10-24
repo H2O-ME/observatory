@@ -31,6 +31,8 @@ DeviceReporter = Callable[[int, AgentReport, int], Awaitable[None]]
 
 _AGENT_VERSION_LEN = 32
 _BOOT_ID_LEN = 64
+#: F57: 距上次落库不足该间隔且报告无实质变化时，跳过 last_seen 写事务。
+_LAST_SEEN_WRITE_MIN_MS = 5_000
 
 
 def _clean(value: Any, limit: int) -> str:
@@ -111,16 +113,31 @@ async def record_agent_report(
     protocol: int | None = None,
     now: int | None = None,
 ) -> dict[str, Any]:
-    """Load the device, apply the report and commit in its own transaction."""
+    """Load the device, apply the report and commit in its own transaction.
+
+    W7（F57）：心跳每 5-300s 一次，唯一变化的往往只有 ``last_seen_ms``——
+    距上次落库 <5s 时跳过这次纯 last_seen 写事务（presence 取
+    ``max(db, session.last_seen)``，session 内存侧已由 touch() 更新，语义不变），
+    SQLite 单写者的写锁让给帧上传/命令回执。
+    """
 
     async with sessionmaker() as session:
         device = await session.get(Device, int(device_id))
         if device is None:
             log_event(log, logging.WARNING, "agent.report_unknown_device", device_id=device_id)
             return {}
+        previous_seen = int(getattr(device, "last_seen_ms", 0) or 0)
         changed = apply_agent_report(device, body, protocol=protocol, now=now)
-        if changed:
-            await session.commit()
+        if not changed:
+            return {}
+        if (
+            set(changed) == {"last_seen_ms"}
+            and now is None  # 只对真实心跳路径生效（测试显式传 now 时保持精确）
+            and int(changed["last_seen_ms"]) - previous_seen < _LAST_SEEN_WRITE_MIN_MS
+        ):
+            await session.rollback()
+            return {}
+        await session.commit()
     return changed
 
 

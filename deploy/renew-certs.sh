@@ -3,8 +3,8 @@
 #
 #   sudo bash deploy/renew-certs.sh
 #
-# 由 cron 每天运行一次：
-#   0 4 * * * root bash /opt/observatory/deploy/renew-certs.sh >/dev/null 2>&1
+# 由 cron 每天运行一次（setup.sh 会自动安装；输出落日志文件，勿丢弃）：
+#   0 4 * * * root bash /opt/observatory/deploy/renew-certs.sh >>/var/log/observatory-renew-certs.log 2>&1
 #
 # A6 契约：
 #   * 与首次申请使用同一种方式：certbot --webroot（nginx 常驻 80，不停止）；
@@ -57,7 +57,20 @@ if [[ "$BEFORE" != "$AFTER" ]]; then
   cd "$APP_DIR"
   docker compose -f deploy/docker-compose.yml --env-file server/.env restart api \
     || die "容器重启失败，请检查 docker compose logs"
-  log "容器已重启加载新证书"
+  # 0.3.1（F48）：重启后必须验证健康——cron 在凌晨 4 点跑，容器起不来时
+  # 这里不拦住就会静默宕到有人看监控为止。
+  local_ok=1
+  for _ in $(seq 1 30); do
+    if docker exec observatory-api python -c "import ssl,urllib.request;ctx=ssl._create_unverified_context();urllib.request.urlopen('https://127.0.0.1:8443/api/v1/health',context=ctx,timeout=5)" >/dev/null 2>&1; then
+      local_ok=0
+      break
+    fi
+    sleep 4
+  done
+  if [[ "$local_ok" -ne 0 ]]; then
+    die "容器重启后 120 秒内未通过健康检查，请立即检查 docker compose logs"
+  fi
+  log "容器已重启加载新证书并通过健康检查"
 else
   log "证书未变化（未到续期时间）"
   # 若 certs/ 下的实体副本丢失（例如误删），仍补齐，避免下次重启 TLS 失败。

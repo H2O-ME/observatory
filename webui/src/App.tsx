@@ -33,7 +33,7 @@ export function App() {
 
   if (status === "boot") {
     return (
-      <div className="flex h-[100dvh] flex-col items-center justify-center gap-3">
+      <div className="flex app-vh flex-col items-center justify-center gap-3">
         <Spinner className="size-5 text-brand" />
         <p className="text-xs text-soft">正在连接 Observatory…</p>
       </div>
@@ -42,7 +42,7 @@ export function App() {
 
   if (status === "error") {
     return (
-      <div className="flex h-[100dvh] items-center justify-center px-4">
+      <div className="flex app-vh items-center justify-center px-4">
         <div className="glass w-full max-w-sm rounded-panel border border-line p-6 text-center shadow-card">
           <p className="text-sm font-medium text-ink">{error}</p>
           <p className="mt-1.5 text-xs leading-relaxed text-soft">

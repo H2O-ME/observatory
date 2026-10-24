@@ -64,7 +64,9 @@ class Settings(BaseSettings):
     # ---- domains (A11/A23) --------------------------------------------------
     console_host: str = DEFAULT_CONSOLE_HOST
     agent_hosts: str = DEFAULT_AGENT_HOSTS
-    public_base_urls: str = f"https://{DEFAULT_CONSOLE_HOST},https://observatory.123423.xyz"
+    # F52: agent 域在首位——设备的 WS/长轮询/帧/包下载全走列表第一个可达地址，
+    # console 域排前面会把设备流量全部压到控制台域，分域减压失效。
+    public_base_urls: str = f"https://observatory.123423.xyz,https://{DEFAULT_CONSOLE_HOST}"
     trust_forwarded_for: bool = False
     allow_loopback_console: bool = True
 

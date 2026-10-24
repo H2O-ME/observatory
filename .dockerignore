@@ -36,13 +36,27 @@ agent
 *.zip
 
 # 与镜像无关的目录（减少上下文与误拷贝）
+# 0.3.1（F46）：补齐全部本地工作目录——.pytest-tmp 实测 736MB，漏一条规则
+# 就意味着每次 compose build 都把它打包传给 dockerd。
 deploy
 docs
 tests
 tools
 usb-installer
 tmp_w0
+tmp_w1
 tmp_analysis
+.pytest-tmp
+.pytest_cache
+.ruff_cache
+.win-smoke
+.w0probe
+.tmp_pip
+.zcode
+pytest-cache-files-*
+await_deploy.sh
+await_deploy.status
+agent/observatory_agent/__pycache__
 
 # WebUI 依赖与产物：由镜像内 npm ci / npm run build 重新生成
 webui/node_modules

@@ -38,13 +38,17 @@ log = logging.getLogger(__name__)
 #: Bump this and append a migration function when the schema changes.
 SCHEMA_VERSION = 4
 
+#: 每个连接都执行的 PRAGMA（W7/F56：journal_mode 需要短暂拿写锁且只需设一次，
+#: 移到迁移路径；NullPool 下每会话新建连接，这里只留真正 per-connection 的项）。
 PRAGMAS = (
-    "PRAGMA journal_mode=WAL",
     "PRAGMA synchronous=NORMAL",
     "PRAGMA busy_timeout=8000",
     "PRAGMA foreign_keys=ON",
     "PRAGMA temp_store=MEMORY",
     "PRAGMA cache_size=-16000",
+    # WAL 峰值治理：批量删除/归档并发写时 WAL 可膨胀数百 MB，之后的
+    # autocheckpoint 会造成秒级写停顿；64MB 封顶让 checkpoint 平摊。
+    "PRAGMA journal_size_limit=67108864",
 )
 
 MigrationFn = Callable[[AsyncConnection], Awaitable[None]]
@@ -447,6 +451,9 @@ class Database:
     async def _apply(self, pending: list[Migration], *, stamp_version: int | None) -> list[int]:
         applied: list[int] = []
         async with self.engine.begin() as conn:
+            # W7/F56: WAL 只在迁移路径设置一次（需要短暂写锁）；已有 WAL 库
+            # 该语句是幂等 no-op。
+            await conn.execute(text("PRAGMA journal_mode=WAL"))
             await conn.execute(
                 text(
                     "CREATE TABLE IF NOT EXISTS schema_version ("

@@ -106,16 +106,40 @@ backup_before_upgrade() {
 }
 
 ensure_volume_owner() {
-  # 从 0.2.x（root 卷）升到 0.3.0（非 root 容器）时校正属主；已有 0.3.0 卷是幂等的。
+  # 从 0.2.x（root 卷）升到 0.3.0（非 root 容器）时校正属主。
+  # 0.3.1（F47）：先 stat 卷内 DB 属主，已对就跳过——无条件 chown -R 会在
+  # 数万帧文件的卷上制造每次升级数分钟的 IO 风暴。
   local volume_uid="${OBS_UID:-}"
   if [[ -z "$volume_uid" ]]; then
     volume_uid="$(grep -E '^OBS_UID=' "$APP_DIR/server/.env" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
   fi
   volume_uid="${volume_uid:-10001}"
   if docker volume inspect observatory-data >/dev/null 2>&1; then
-    log "校正数据卷属主为容器用户 $volume_uid"
+    local current_owner
+    current_owner="$(docker run --rm -v observatory-data:/data alpine:3 \
+      sh -c 'stat -c %u /data/observatory.db 2>/dev/null || echo unknown')" || current_owner="unknown"
+    if [[ "$current_owner" == "$volume_uid" ]]; then
+      log "数据卷属主已是 $volume_uid，跳过 chown"
+      return 0
+    fi
+    log "校正数据卷属主为容器用户 $volume_uid（当前 $current_owner）"
     docker run --rm -v observatory-data:/data alpine:3 chown -R "$volume_uid:$volume_uid" /data \
       || warn "数据卷 chown 失败；新容器可能无法写 /data"
+  fi
+}
+
+prune_upgrade_backups() {
+  # F47：升级备份只增不清会把小盘 VPS 填满（backup.sh 的 7 天清理只作用于
+  # 其自己的 DEST）。保留最近 3 份，成功路径末尾调用。
+  local keep="${OBS_UPGRADE_BACKUPS_KEEP:-3}"
+  [[ -d "$APP_DIR/backups" ]] || return 0
+  local old
+  old="$(ls -1dt "$APP_DIR"/backups/upgrade-* 2>/dev/null | tail -n +$((keep + 1)) || true)"
+  if [[ -n "$old" ]]; then
+    log "清理旧升级备份（保留 $keep 份）"
+    while IFS= read -r dir; do
+      rm -rf -- "$dir"
+    done <<<"$old"
   fi
 }
 
@@ -292,10 +316,12 @@ main() {
   # 包登记失败不回滚代码（服务端已健康），只告警。
   register_agent_packages || warn "受控端安装包登记异常（服务端不回滚）"
 
+  prune_upgrade_backups
+
   log "升级完成：$OLD_VERSION → $NEW_VERSION"
   log "旧状态与数据库备份：$ROLLBACK_DIR"
   log "当前运行版本：$(running_version)"
-  log "受控端会在下一次心跳看到新版本并自行更新。"
+  log "受控端会在下一次 welcome/心跳收到 update_offer 并自行更新（0.3.1 起 v3 链路闭环）。"
   exit 0
 }
 

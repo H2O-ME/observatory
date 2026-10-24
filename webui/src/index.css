@@ -375,3 +375,43 @@
     }
   }
 }
+
+/* ==========================================================================
+   Chromium 81 兼容回退（0.3.1 F39）——目标平台是手表端 WebView。
+   JS 侧 shim 在 src/compat.ts，这里补 CSS 面：
+   * 100dvh（Ch108）→ 100vh 回退；用 .app-vh / .app-vh-min 替代 Tailwind 的
+     h-[100dvh] / min-h-[100dvh]（后者在不支持的引擎上整条规则被丢弃，外壳
+     高度塌陷、滚动区失效）。
+   * aspect-ratio（Ch88）→ padding-top 盒子回退（.aspect-video 由 Tailwind
+     生成同名类，这里按类名补 @supports not 分支）。
+   * flex 容器里的 gap（Ch84）：已知的可接受降级——布局仍成立，仅间距丢失；
+     若手表实机 Ch ≥84 可删除本注释。不要为此改 margin 方案（会破坏桌面端）。
+   ========================================================================== */
+.app-vh {
+  height: 100vh;
+}
+.app-vh-min {
+  min-height: 100vh;
+}
+@supports (height: 100dvh) {
+  .app-vh {
+    height: 100dvh;
+  }
+  .app-vh-min {
+    min-height: 100dvh;
+  }
+}
+@supports not (aspect-ratio: 16 / 9) {
+  .aspect-video {
+    position: relative;
+  }
+  .aspect-video::before {
+    content: "";
+    display: block;
+    padding-top: 56.25%;
+  }
+  .aspect-video > * {
+    position: absolute;
+    inset: 0;
+  }
+}

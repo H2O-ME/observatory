@@ -14,7 +14,8 @@ WORKDIR /build
 COPY webui/package.json webui/package-lock.json* ./
 RUN npm ci --no-audit --no-fund 2>/dev/null || npm install --no-audit --no-fund
 COPY webui/ ./
-RUN npm run build
+# F44: dist 版本戳——启动时数据卷副本与镜像内副本比对，不一致则以镜像为准覆盖
+RUN npm run build && printf '%s' "$BUILD_VERSION" > dist/.version
 
 
 FROM python:3.12-slim
@@ -66,12 +67,9 @@ EXPOSE 8443
 USER observatory
 
 # A11：只信任本机 nginx / Docker 网桥的转发头。若改为 CDN 直连 8443，
-# 需要把这里替换成 CDN 回源网段，并同时显式打开 OBS_TRUST_FORWARDED_FOR。
-CMD ["uvicorn", "observatory.main:app", \
-     "--host", "0.0.0.0", \
-     "--port", "8443", \
-     "--ssl-keyfile", "/certs/server.key", \
-     "--ssl-certfile", "/certs/server.crt", \
-     "--proxy-headers", \
-     "--forwarded-allow-ips", "127.0.0.1,172.16.0.0/12", \
-     "--no-server-header"]
+# 需要把 OBS_FORWARDED_ALLOW_IPS 换成 CDN 回源网段，并同时显式打开
+# OBS_TRUST_FORWARDED_FOR。
+# 0.3.1（F45/F16）：转发信任网段可经 .env 覆盖（默认收窄场景写 172.18.0.1）；
+# --timeout-graceful-shutdown 15 与 compose 的 stop_grace_period: 30s 配合，
+# 让 20s 长轮询在途连接先收到正常断连而不是 SIGKILL。
+CMD ["sh", "-c", "uvicorn observatory.main:app --host 0.0.0.0 --port 8443 --ssl-keyfile /certs/server.key --ssl-certfile /certs/server.crt --proxy-headers --forwarded-allow-ips \"${OBS_FORWARDED_ALLOW_IPS:-127.0.0.1,172.16.0.0/12}\" --timeout-graceful-shutdown 15 --no-server-header"]

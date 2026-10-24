@@ -80,6 +80,24 @@ async def uninstall_pending(session: AsyncSession, device_id: int) -> bool:
     return result.first() is not None
 
 
+async def uninstall_pending_many(session: AsyncSession, device_ids: list[int]) -> set[int]:
+    """W7: one GROUP BY for the whole wall instead of one query per device."""
+
+    if not device_ids:
+        return set()
+    kind_column = getattr(Command, "kind", None) or getattr(Command, "type", None)
+    result = await session.execute(
+        select(Command.device_id)
+        .where(
+            Command.device_id.in_(device_ids),
+            kind_column == "uninstall",
+            Command.status.in_(_PENDING_STATUSES),
+        )
+        .group_by(Command.device_id)
+    )
+    return {int(row[0]) for row in result.fetchall()}
+
+
 async def latest_frame_ids(session: AsyncSession, device_ids: list[int]) -> dict[int, int]:
     if not device_ids:
         return {}
@@ -183,10 +201,22 @@ async def list_devices(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     devices = list((await session.execute(select(Device).order_by(Device.enrolled_at_ms.asc()))).scalars().all())
-    frame_ids = await latest_frame_ids(session, [device.id for device in devices])
-    payloads = [
-        await device_payload(session, device, latest_frame_id=frame_ids.get(device.id)) for device in devices
-    ]
+    device_ids = [device.id for device in devices]
+    frame_ids = await latest_frame_ids(session, device_ids)
+    # W7: 批量取 uninstall_pending——此前每台设备一条 SQL，设备墙每几秒轮询一次。
+    pending_set = await uninstall_pending_many(session, device_ids)
+    payloads = []
+    for device in devices:
+        effective = await store().effective(session, device.settings or {})
+        state = device_state(device, effective_settings=effective, uninstall_pending=device.id in pending_set)
+        payloads.append(
+            device_out(
+                device,
+                state=presence.snapshot(state),
+                effective_settings=effective,
+                latest_frame_id=frame_ids.get(device.id),
+            )
+        )
     from ..core.config import resolve_version
 
     return stamp(

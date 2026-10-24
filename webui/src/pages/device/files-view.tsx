@@ -249,8 +249,13 @@ export function FilesView({ device }: { device: Device }) {
   const deleteEntry = async () => {
     if (!pendingDelete) return;
     const entry = pendingDelete;
-    setPendingDelete(null);
-    await runOp({ op: "delete", path: entry.path, recursive: entry.is_dir }, "删除");
+    // F43: 关闭对话框推迟到操作结束——递归删除大目录可能数秒，立即关闭时
+    // 没有 busy 反馈且窗口期内可双击触发两次 DELETE。
+    try {
+      await runOp({ op: "delete", path: entry.path, recursive: entry.is_dir }, "删除");
+    } finally {
+      setPendingDelete(null);
+    }
   };
 
   const upload = async (file: File) => {

@@ -8,6 +8,7 @@ surface and the audit trail.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -96,7 +97,9 @@ async def _put_auth_setting(session: AsyncSession, key: str, value: str | None) 
 async def _check_password(settings: Any, session: AsyncSession, password: str) -> bool:
     stored_hash = await _get_auth_setting(session, KEY_PASSWORD_HASH)
     if stored_hash:
-        return verify_password(password, stored_hash)
+        # W7: bcrypt(12) takes ~300ms — off the event loop, or every login
+        # stalls every agent long-poll and frame upload for that duration.
+        return bool(await asyncio.to_thread(verify_password, password, stored_hash))
     expected = settings.admin_password
     return constant_time_compare(password, expected)
 
@@ -283,7 +286,7 @@ async def change_password(
         raise AppError.bad_request("新密码至少 10 位")
     if new == current:
         raise AppError.bad_request("新密码不能与当前密码相同")
-    await _put_auth_setting(session, KEY_PASSWORD_HASH, hash_password(new))
+    await _put_auth_setting(session, KEY_PASSWORD_HASH, await asyncio.to_thread(hash_password, new))
     # F15: revoke every session issued before this change.
     await bump_credential_version(request, session)
     await audit.record(session, action=audit.ACTION_PASSWORD_CHANGE, ip=client_ip(request))

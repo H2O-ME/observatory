@@ -35,7 +35,7 @@ export class ErrorBoundary extends Component<Props, State> {
     const { error } = this.state;
     if (!error) return this.props.children;
     return (
-      <div className="flex min-h-[100dvh] items-center justify-center px-4">
+      <div className="flex app-vh-min items-center justify-center px-4">
         <div className="glass w-full max-w-md rounded-panel border border-line p-5 text-center shadow-card">
           <p className="text-sm font-medium text-ink">控制台渲染出错</p>
           <p className="mt-1.5 break-words text-xs leading-relaxed text-soft">{error.message}</p>

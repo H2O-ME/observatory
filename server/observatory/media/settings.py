@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
@@ -137,10 +138,15 @@ def configure(static: Any | None = None) -> None:
     _DEFAULTS = None
 
 
+_LOAD_CACHE: dict[str, Any] = {}
+_LOAD_CACHE_TTL_S = 30.0
+
+
 def reset_cache() -> None:
     global _STATIC, _DEFAULTS
     _STATIC = None
     _DEFAULTS = None
+    _LOAD_CACHE.clear()
 
 
 # --------------------------------------------------------------------------
@@ -313,7 +319,17 @@ async def load(session: AsyncSession, *, base: MediaSettings | None = None) -> M
 
     只做"取值 + 类型归一"，不做范围校验（那是 console/settings 的单一职责）。
     表不存在（骨架期）或单行损坏时退回默认值并记日志，绝不让保留/摄取因配置读取失败而停摆。
+
+    W7（F55）：结果带 30s TTL 缓存——此前每帧上传都全表扫一遍 settings，
+    高频采集下是纯浪费；设置页保存经 console/settings_store（独立缓存），
+    媒体层最多延迟 30s 收敛，与保留策略的运行节奏匹配。
     """
+
+    now = time.monotonic()
+    cached = _LOAD_CACHE.get("value")
+    loaded_at = float(_LOAD_CACHE.get("at", 0.0))
+    if cached is not None and now - loaded_at < _LOAD_CACHE_TTL_S:
+        return cached if base is None else resolve({}, base=base)
 
     start = base or defaults()
     values: dict[str, Any] = {}
@@ -325,7 +341,11 @@ async def load(session: AsyncSession, *, base: MediaSettings | None = None) -> M
 
     for key, raw in rows:
         values[str(key)] = _decode_stored_value(raw)
-    return resolve(values, base=start)
+    resolved = resolve(values, base=start)
+    if base is None:
+        _LOAD_CACHE["value"] = resolved
+        _LOAD_CACHE["at"] = now
+    return resolved
 
 
 __all__ = [

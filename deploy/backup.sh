@@ -67,6 +67,13 @@ else
 fi
 
 log "打包数据卷 → $DEST/observatory-data-$STAMP.tar.gz"
+# 0.3.1（F51）：tar 前先做 WAL checkpoint，把 WAL 合回主库——否则 tar 里的
+# observatory.db 与 -wal 是不同瞬间的，单独用 tar 恢复可能拿到不一致快照。
+if docker exec observatory-api python -c "import sqlite3;sqlite3.connect('/data/observatory.db').execute('PRAGMA wal_checkpoint(TRUNCATE)')" >/dev/null 2>&1; then
+  log "已执行 wal_checkpoint(TRUNCATE)"
+else
+  warn "wal_checkpoint 失败（容器可能未运行）；tar 中的 DB 与 -wal 可能不同瞬间"
+fi
 docker run --rm \
   -v observatory-data:/data:ro \
   -v "$DEST":/backup \

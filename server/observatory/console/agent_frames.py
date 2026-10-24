@@ -27,11 +27,19 @@ from ..core.crypto import DEVICE_TOKEN_HEADER, device_token_hash
 from ..core.db import get_session
 from ..core.errors import AppError
 from ..core.models import Device
+from ..core.crypto import RateLimiter
 from .dto import stamp
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agent", tags=["agent-frames"])
+
+#: F53: per-device frame-ingress bucket. After a server restart the whole fleet
+#: replays persisted frames at once; without a bucket that storm goes straight
+#: into transcode + SQLite and stacks on the reconnect burst.
+FRAMES_RATE_LIMIT = 240
+FRAMES_RATE_WINDOW_S = 60
+_FRAMES_LIMITER = RateLimiter(FRAMES_RATE_LIMIT, FRAMES_RATE_WINDOW_S)
 
 
 async def require_device_token(
@@ -66,6 +74,11 @@ async def upload_frame(
         raise AppError.bad_request("空图像")
     if len(body) > int(settings.max_frame_bytes):
         raise AppError.bad_request("图像过大")
+    if not _FRAMES_LIMITER.allow(f"frames:{device.uid}"):
+        raise AppError.rate(
+            "帧上传过于频繁，请稍后重试",
+            retry_after=_FRAMES_LIMITER.retry_after(f"frames:{device.uid}"),
+        )
 
     try:
         from ..media import ingest as media_ingest

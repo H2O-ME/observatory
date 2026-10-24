@@ -106,6 +106,9 @@ export function LiveView({ device }: Props) {
   const lastMoveRef = useRef(0);
   const frameCountRef = useRef(0);
   const pingAtRef = useRef(0);
+  // F41: 修饰键按下状态——keydown 对修饰键只发 down、keyup 补 up，组合键
+  // （Ctrl+C / Alt+F4 / Win 组合）才可用；repeat 事件靠该集合去重。
+  const heldModifiersRef = useRef<Set<number>>(new Set());
 
   const uid = device.uid;
   const issue = controlUnavailableReason(device.presence);
@@ -234,7 +237,12 @@ export function LiveView({ device }: Props) {
       socket.onclose = (event) => {
         if (socketRef.current !== socket) return;
         socketRef.current = null;
+        const active = sessionRef.current;
         sessionRef.current = null;
+        // F41: 远端断开（受控端重启/通道丢失）也要撤销 grant——否则控制流
+        // 残留到 TTL，设备一直被独占。
+        if (active) void api.revokeControl(uid, active.token).catch(() => undefined);
+        heldModifiersRef.current.clear();
         setSession(null);
         setFps(0);
         setStatus(event.code === 4409 ? "error" : "closed");
@@ -308,8 +316,30 @@ export function LiveView({ device }: Props) {
   };
 
   const onWheel = (event: React.WheelEvent) => {
-    event.preventDefault();
+    // React 17+ 在根节点以 passive 方式注册 wheel 监听，这里的
+    // preventDefault 是空操作（页面照滚）——真正的拦截在下面的原生监听。
     send({ type: "input", ev: { kind: "wheel", delta: event.deltaY > 0 ? -1 : 1 } });
+  };
+
+  // F41: 原生非 passive wheel 监听——preventDefault 真正生效，控制画面
+  // 滚轮不再同时滚动控制台页面。
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const handler = (event: WheelEvent) => {
+      if (!sessionRef.current) return;
+      event.preventDefault();
+      send({ type: "input", ev: { kind: "wheel", delta: event.deltaY > 0 ? -1 : 1 } });
+    };
+    stage.addEventListener("wheel", handler, { passive: false });
+    return () => stage.removeEventListener("wheel", handler);
+  }, [send]);
+
+  const MODIFIER_KEYS: Record<string, number> = {
+    Control: 0x11,
+    Alt: 0x12,
+    Shift: 0x10,
+    Meta: 0x5b,
   };
 
   const onKeyDown = (event: React.KeyboardEvent) => {
@@ -330,8 +360,26 @@ export function LiveView({ device }: Props) {
     const code = vkCodeFor(event);
     if (!code) return;
     event.preventDefault();
+    if (event.key in MODIFIER_KEYS) {
+      // F41: 修饰键按下只发 down；keyup 时才发 up。之前 down+up 立即成对
+      // 发送，Ctrl+C 到远端只剩单独的 c——所有组合键实际不可用。
+      if (event.repeat || heldModifiersRef.current.has(code)) return;
+      heldModifiersRef.current.add(code);
+      send({ type: "input", ev: { kind: "key", code, down: true } });
+      return;
+    }
     send({ type: "input", ev: { kind: "key", code, down: true } });
     send({ type: "input", ev: { kind: "key", code, down: false } });
+  };
+
+  const onKeyUp = (event: React.KeyboardEvent) => {
+    if (!sessionRef.current) return;
+    const code = vkCodeFor(event);
+    if (!code) return;
+    if (event.key in MODIFIER_KEYS) {
+      if (!heldModifiersRef.current.delete(code)) return;
+      send({ type: "input", ev: { kind: "key", code, down: false } });
+    }
   };
 
   const sendText = (value: string) => {
@@ -424,6 +472,7 @@ export function LiveView({ device }: Props) {
         onPointerUp={onPointerUp}
         onWheel={onWheel}
         onKeyDown={onKeyDown}
+        onKeyUp={onKeyUp}
         onContextMenu={(event) => event.preventDefault()}
         aria-label="实时画面与输入区域"
       >

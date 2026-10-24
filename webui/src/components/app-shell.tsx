@@ -151,7 +151,7 @@ export function AppShell() {
   const isActive = (to: string) => location.pathname === to || location.pathname.startsWith(`${to}/`);
 
   return (
-    <div className="flex h-[100dvh] w-full flex-col overflow-hidden">
+    <div className="flex app-vh w-full flex-col overflow-hidden">
       <header
         className={cn(
           "glass-chrome z-20 flex shrink-0 items-center gap-2 border-b border-line px-3",

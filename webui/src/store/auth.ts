@@ -13,7 +13,7 @@
 
 import { create } from "zustand";
 
-import { api, isApiError, setUnauthorizedHandler, writeToken } from "@/lib/api";
+import { api, bumpSessionEpoch, currentSessionEpoch, isApiError, setUnauthorizedHandler, writeToken } from "@/lib/api";
 import { queryClient } from "@/lib/query-client";
 import { useLive } from "@/store/live";
 import type { SessionInfo } from "@/lib/types";
@@ -45,6 +45,9 @@ function sessionFields(session: SessionInfo) {
 /** Drop everything that belongs to the current session. */
 function clearSession(): void {
   writeToken("");
+  // F40: cancel in-flight queries BEFORE clearing — a resolve that lands after
+  // clear() would rebuild a cache entry with the previous operator's data.
+  void queryClient.cancelQueries();
   queryClient.clear();
   useLive.getState().reset();
 }
@@ -86,6 +89,7 @@ export const useAuth = create<AuthState>((set, get) => ({
   async login(password, totp) {
     const result = await api.login(password, totp);
     writeToken(result.token);
+    bumpSessionEpoch();
     set({ status: "authed", version: result.version, error: "" });
     await get().refresh();
   },
@@ -103,9 +107,13 @@ export const useAuth = create<AuthState>((set, get) => ({
 
 // One 401 handler for the whole application. It must not import a React hook, so
 // it reaches the store through `getState`/`setState`.
-setUnauthorizedHandler(() => {
+setUnauthorizedHandler((requestEpoch) => {
+  // F40: a 401 from a request that started before the current session (stale
+  // in-flight during login/logout) must not tear the new session down.
+  if (requestEpoch !== currentSessionEpoch()) return;
   const current = useAuth.getState();
   if (current.status === "anonymous") return;
+  bumpSessionEpoch();
   clearSession();
   useAuth.setState({ status: "anonymous", error: "" });
 });

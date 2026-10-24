@@ -66,6 +66,42 @@ def _resolve_webui_dir(settings: Settings) -> tuple[Path, str]:
     return configured, "missing"
 
 
+def _sync_bundled_webui(settings: Settings) -> None:
+    """F44: the data-volume copy of the console never refreshed by itself.
+
+    ``_resolve_webui_dir`` prefers ``/data/webui``; once a copy exists there
+    (historical layout, manual edit, restored volume) a newer image kept serving
+    the OLD frontend against the NEW API — the classic silent version mismatch.
+    At startup the bundled dist's ``.version`` stamp wins over a different
+    data-volume stamp; the volume copy is refreshed in place.
+    """
+
+    import shutil
+
+    if not (BUNDLED_WEBUI / "index.html").is_file():
+        return
+    data_dir = Path(settings.webui_dir)
+    if not (data_dir / "index.html").is_file():
+        return
+    bundled_stamp = (BUNDLED_WEBUI / ".version")
+    data_stamp = data_dir / ".version"
+    bundled_version = bundled_stamp.read_text(encoding="utf-8").strip() if bundled_stamp.is_file() else ""
+    data_version = data_stamp.read_text(encoding="utf-8").strip() if data_stamp.is_file() else ""
+    if not bundled_version or bundled_version == data_version:
+        return
+    try:
+        shutil.copytree(BUNDLED_WEBUI, data_dir, dirs_exist_ok=True)
+        log_event(
+            log,
+            logging.INFO,
+            "webui.dist_synced",
+            from_version=data_version or "unknown",
+            to_version=bundled_version,
+        )
+    except OSError as exc:
+        log.warning("could not refresh the data-volume webui copy (%s); serving stale assets", exc)
+
+
 def _load_media() -> Any | None:
     try:
         from . import media
@@ -477,6 +513,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         directory=directory_name,
         agent_config_provider="console" if app.state.agent_config_provider else "defaults",
     )
+    _sync_bundled_webui(settings)
     await _start_media(app, database)
     _wire_frame_events(app)
     task = asyncio.create_task(_housekeeping(app), name="observatory-housekeeping")
