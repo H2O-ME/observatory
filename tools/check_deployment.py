@@ -132,8 +132,13 @@ async def main() -> int:
     parser = argparse.ArgumentParser(description="Observatory 0.3.0 线上体检")
     parser.add_argument("--console-host", default="control.tianhw.top")
     parser.add_argument("--agent-host", default="observatory.123423.xyz")
-    parser.add_argument("--password", required=True, help="控制台管理员密码")
-    parser.add_argument("--token", default="", help="可选：已生成的一次性安装令牌；省略则登录后现场签发")
+    parser.add_argument("--password", default="", help="控制台管理员密码（优先用 --password-stdin，避免 ps 可见）")
+    parser.add_argument("--password-stdin", action="store_true", help="从 stdin 读控制台管理员密码（F64）")
+    parser.add_argument(
+        "--token",
+        default="",
+        help="可选：已生成的一次性安装令牌；省略则登录后现场签发。注意：传给本工具的令牌会被体检设备消费掉，不要传准备装真机的令牌。",
+    )
     parser.add_argument("--device-uid", default="", help="体检设备 uid（默认随机，避免冲突）")
     parser.add_argument("--expect-version", default="", help="期望版本；默认不强制")
     parser.add_argument("--min-cert-days", type=int, default=7, help="证书最少剩余天数（默认 7）")
@@ -143,6 +148,12 @@ async def main() -> int:
     parser.add_argument("--insecure", action="store_true", help="跳过 TLS 校验（自签名测试环境）")
     args = parser.parse_args()
 
+    if args.password_stdin:
+        import sys as _sys
+
+        args.password = _sys.stdin.readline().rstrip("\r\n")
+    if not args.password:
+        parser.error("需要 --password 或 --password-stdin")
     arguments_ok = bool(args.password)
     if not arguments_ok:
         print("缺少 --password", file=sys.stderr)
@@ -395,7 +406,15 @@ async def main() -> int:
                         if (current.get("presence") or {}).get("state") == "offline":
                             break
                     deleted = await client.delete(f"{console}/api/v1/devices/{uid}", headers=auth)
-                check("可以删除体检设备", deleted.status_code in (200, 204), f"{deleted.status_code} {deleted.text[:120]}")
+                if deleted.status_code in (200, 204):
+                    check("可以删除体检设备", True)
+                else:
+                    # F64：清理失败降级为提示而非整个体检失败——设备状态依赖
+                    # agent_offline_after_s 配置，可能远大于 cleanup_wait。
+                    skip(
+                        "删除体检设备",
+                        f"删除被拒（{deleted.status_code}）；请稍后手动删除 {uid}（agent_offline_after_s 可能大于 --cleanup-wait）",
+                    )
         except httpx.HTTPError as exc:
             check("网络请求", False, repr(exc)[:200])
         except Exception as exc:  # noqa: BLE001

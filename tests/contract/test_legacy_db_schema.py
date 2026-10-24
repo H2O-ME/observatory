@@ -207,3 +207,63 @@ def test_n3_migrates_legacy_schema_with_backup(tmp_dir) -> None:
         assert {"uid", "token_hash", "deleted_at_ms"} <= tombstone_columns, "v4 删除墓碑表（F9）"
     finally:
         connection.close()
+
+def test_migration_failure_restores_backup(tmp_dir) -> None:
+    """C6 补测（0.3.1 F63）：迁移失败必须还原备份并以 MigrationError 拒绝启动。
+
+    0.3.0 的 docstring 承诺了这条失败恢复路径，但没有任何测试执行过它——
+    "看起来测了其实没测"的典型。注入一个必然抛错的迁移，断言：备份生成、
+    异常类型正确、库内容回到迁移前。
+    """
+
+    import asyncio
+
+    import pytest as _pytest
+
+    from observatory.core.config import Settings
+    from observatory.core.db import Database, Migration, MigrationError
+
+    database_path = tmp_dir / "observatory.db"
+    _seed_legacy_database(database_path, devices=3, frames=5)
+    settings = Settings(
+        data_dir=tmp_dir,
+        secret_key="test-secret-key-0123456789abcdef0123456789",
+        admin_password="test-admin-password",
+    )
+
+    async def broken_migration(_conn) -> None:
+        raise RuntimeError("injected migration failure")
+
+    async def run() -> None:
+        database = Database(settings)
+        original = list(database.__class__.__mro__)  # keep reference shape
+        del original
+        import observatory.core.db as db_module
+
+        saved = db_module.MIGRATIONS
+        db_module.MIGRATIONS = (
+            Migration(2, "injected_broken", broken_migration),
+        )
+        try:
+            with _pytest.raises(MigrationError):
+                await database.migrate()
+        finally:
+            db_module.MIGRATIONS = saved
+        await database.engine.dispose()
+
+    asyncio.run(run())
+
+    connection = sqlite3.connect(database_path)
+    try:
+        # 还原后：0.2.10 形状原样保留（没有 schema_version 表、没有 v2 列）
+        tables = {row[0] for row in connection.execute("select name from sqlite_master where type='table'")}
+        assert set(legacy_db.LEGACY_DB_TABLES) <= tables, "还原后旧表必须原样存在"
+        assert "schema_version" not in tables, "迁移失败后不得留下半迁移状态"
+        device_columns = {row[1] for row in connection.execute("PRAGMA table_info(devices)")}
+        assert "boot_id" not in device_columns, "还原后不应有 v2 新列"
+    finally:
+        connection.close()
+
+    # 迁移前备份存在且非空
+    backups = list((tmp_dir / "backups").glob("pre-migrate-v*.db"))
+    assert backups and all(item.stat().st_size > 0 for item in backups), "失败路径也必须留下备份"
