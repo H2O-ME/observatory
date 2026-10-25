@@ -24,9 +24,10 @@ import pytest
 
 # 注意：本模块启用了 `from __future__ import annotations`，函数内定义的
 # FastAPI 路由的参数注解会以字符串形式被 FastAPI 在**模块全局**求值——
-# WebSocket/WebSocketDisconnect 必须在模块级导入，否则路由的 websocket
-# 参数会被当成 query 参数拒绝（2026-10-25 a23 测试的踩坑）。
-from fastapi import WebSocket, WebSocketDisconnect
+# WebSocket 必须在模块级导入，否则路由的 websocket 参数会被当成 query
+# 参数拒绝（2026-10-25 a23 测试的踩坑）。WebSocketDisconnect 仅个别用例
+# 引用，维持函数内局部导入。
+from fastapi import WebSocket
 
 pytestmark = pytest.mark.acceptance
 
@@ -714,7 +715,7 @@ def test_a23_console_websockets_served_on_agent_host() -> None:
     控制观看端 /api/v1/devices/<uid>/control）必须能在 agent 域名承载；
     同路径的 REST 仍只归 console 域。"""
 
-    from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, WebSocketDisconnect
     from fastapi.testclient import TestClient
 
     from observatory.adapters.hostsplit import HostSplit
