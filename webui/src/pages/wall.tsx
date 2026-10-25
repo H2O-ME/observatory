@@ -100,7 +100,7 @@ export function WallPage() {
         }
       />
 
-      <StatGrid columns={4}>
+      <StatGrid columns={4} className="stagger">
         <StatCard label="在线" value={isLoading ? "—" : counts.online} tone="ok" icon={Activity} />
         <StatCard label="受限" value={isLoading ? "—" : counts.degraded} tone="warn" icon={ShieldAlert} />
         <StatCard label="离线" value={isLoading ? "—" : counts.offline} tone="neutral" icon={WifiOff} />
@@ -162,7 +162,7 @@ export function WallPage() {
           </div>
         </div>
       ) : (
-        <div className={cn("grid min-w-0 gap-4 sm:gap-5", columns)}>
+        <div className={cn("stagger grid min-w-0 gap-4 sm:gap-5", columns)}>
           {devices.map((device) => (
             <DeviceCard
               key={device.uid}

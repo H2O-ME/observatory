@@ -72,9 +72,13 @@ export function StatCard({
       <div className="relative flex min-w-0 items-start justify-between gap-2">
         <div className={cn("min-w-0", watch ? "flex-1" : "")}>
           <p className={cn("eyebrow truncate", watch && "text-[0.6rem]")}>{label}</p>
+          {/* Keyed by content: a server refresh that changes the number
+              remounts the node and replays a short fade — the update is seen,
+              not just silently replaced. */}
           <p
+            key={String(value)}
             className={cn(
-              "tnum mt-1 truncate font-semibold tracking-tight",
+              "tnum animate-sm-fade mt-1 truncate font-semibold tracking-tight",
               TONE_TEXT[tone],
               watch ? "text-lg" : "text-[1.55rem] leading-tight",
             )}

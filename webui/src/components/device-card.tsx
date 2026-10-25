@@ -61,7 +61,7 @@ export function DeviceCard({ device, variant = "full" }: Props) {
     <Link
       to={`/device/${encodeURIComponent(device.uid)}`}
       aria-label={`打开设备 ${name}`}
-      className={cn("block h-full min-w-0 rounded-panel no-underline", offline && "opacity-80")}
+      className={cn("device-tile block h-full min-w-0 rounded-panel no-underline", offline && "opacity-80")}
     >
       <GlowCard
         isStatic={watch}
@@ -70,7 +70,7 @@ export function DeviceCard({ device, variant = "full" }: Props) {
         tint={offline ? "rgba(124, 136, 160, 0.14)" : "rgba(99, 146, 255, 0.20)"}
       >
         <div className="frame-stage ratio-16-10 relative w-full overflow-hidden rounded-xl bg-sunken">
-          <div className="inset-full">
+          <div className="thumb-zoom inset-full">
             {device.latest_frame_id ? (
               <FrameView
                 uid={device.uid}

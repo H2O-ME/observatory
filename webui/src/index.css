@@ -739,3 +739,159 @@
     min-height: 44px;
   }
 }
+
+/* ==========================================================================
+   Motion system (0.5)
+   ----------------------------------------------------------------------------
+   Entrance-first: page transitions, staggered lists, value flashes. All pure
+   CSS keyframes on transform/opacity — Chromium 81 safe, no @property.
+   `prefers-reduced-motion` and the watch viewport tone everything down.
+   ========================================================================== */
+
+/* Route change: the shell keys the outlet wrapper by pathname, so a mount
+   replays this. One animation for every page, no per-page wiring. */
+.page-enter {
+  animation: page-in 0.3s cubic-bezier(0.22, 0.68, 0.36, 1) both;
+}
+
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Staggered lists: add `.stagger` to a grid/list container. Children rise in
+   with 40ms steps (capped — long lists all share the last delay so the tail
+   never waits). */
+.stagger > * {
+  animation: item-in 0.44s cubic-bezier(0.22, 0.68, 0.36, 1) both;
+}
+.stagger > *:nth-child(2) {
+  animation-delay: 40ms;
+}
+.stagger > *:nth-child(3) {
+  animation-delay: 80ms;
+}
+.stagger > *:nth-child(4) {
+  animation-delay: 120ms;
+}
+.stagger > *:nth-child(5) {
+  animation-delay: 160ms;
+}
+.stagger > *:nth-child(6) {
+  animation-delay: 200ms;
+}
+.stagger > *:nth-child(7) {
+  animation-delay: 240ms;
+}
+.stagger > *:nth-child(n + 8) {
+  animation-delay: 280ms;
+}
+
+@keyframes item-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Device tile: the 16:10 thumbnail breathes up on hover (desktop only). The
+   wrapper is absolutely positioned inside the frame, so scaling it never
+   affects layout. */
+.thumb-zoom {
+  transition: transform 0.5s cubic-bezier(0.22, 0.68, 0.36, 1);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .device-tile:hover .thumb-zoom {
+    transform: scale(1.04);
+  }
+
+  /* Sidebar idle items nudge right on hover — a quiet affordance that stays
+     flat (no lift, no shadow). */
+  .nav-idle {
+    transition: transform 0.16s ease, background-color 0.16s ease,
+      color 0.16s ease;
+  }
+  .nav-idle:hover {
+    transform: translateX(2px);
+  }
+}
+
+/* Dialogs: mount animation matching the geometry — desktop scales/fades in
+   place, the mobile bottom sheet slides up. The final keyframe equals the
+   resting transform of each variant. */
+.ui-dialog {
+  animation: dialog-in 0.26s cubic-bezier(0.22, 0.68, 0.36, 1) both;
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -47%) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@media (max-width: 640px) {
+  .ui-dialog {
+    animation-name: sheet-in;
+  }
+}
+
+@keyframes sheet-in {
+  from {
+    opacity: 0;
+    transform: translateY(28px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Watch: keep entrances (they aid orientation) but drop the stagger delays
+   and shorten everything — the watch repaints on a tight budget. */
+@media (max-width: 480px) and (max-height: 560px), (max-width: 340px) {
+  .page-enter {
+    animation-duration: 0.2s;
+  }
+  .stagger > *,
+  .stagger > *:nth-child(n + 2) {
+    animation-delay: 0s !important;
+    animation-duration: 0.3s;
+  }
+  .ui-dialog {
+    animation-duration: 0.2s;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-enter,
+  .stagger > *,
+  .ui-dialog {
+    animation: none;
+  }
+  .thumb-zoom,
+  .nav-idle {
+    transition: none;
+  }
+  .device-tile:hover .thumb-zoom {
+    transform: none;
+  }
+  .nav-idle:hover {
+    transform: none;
+  }
+}

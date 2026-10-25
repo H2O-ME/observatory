@@ -52,7 +52,7 @@ export function ErrorBlock({
   onRetry?: () => void;
 }) {
   return (
-    <div className="surface-danger flex min-w-0 flex-wrap items-center gap-2 p-3.5 text-[0.82rem] text-danger">
+    <div className="surface-danger animate-sm-in flex min-w-0 flex-wrap items-center gap-2 p-3.5 text-[0.82rem] text-danger">
       <AlertTriangle className="size-4 shrink-0" aria-hidden />
       <span className="min-w-0 flex-1 break-words">{message}</span>
       {retryable && onRetry ? (

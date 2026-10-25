@@ -105,7 +105,7 @@ function LiveDot({ verbose = false }: { verbose?: boolean }) {
       }
     >
       {connected ? (
-        <Activity className="size-3.5" />
+        <Activity className="size-3.5 animate-sm-pulse" />
       ) : (
         <WifiOff className="size-3.5" />
       )}
@@ -219,7 +219,7 @@ function DesktopSidebar({ active }: { active: (to: string) => boolean }) {
                         </span>
                       </MovingBorder>
                     ) : (
-                      <span className="flex items-center gap-3 rounded-xl px-3.5 py-3 text-[0.88rem] text-soft transition-colors hover:bg-sunken hover:text-ink">
+                      <span className="nav-idle flex items-center gap-3 rounded-xl px-3.5 py-3 text-[0.88rem] text-soft hover:bg-sunken hover:text-ink">
                         <Icon className="size-[1.05rem]" />
                         {entry.label}
                       </span>
@@ -450,8 +450,9 @@ export function AppShell() {
 
           <main ref={mainRef} className={cn("min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain", !desktop && "pb-dock")}>
             <div
+              key={pathname}
               className={cn(
-                "mx-auto w-full min-w-0",
+                "page-enter mx-auto w-full min-w-0",
                 watch
                   ? "max-w-none px-2.5 py-3"
                   : desktop
@@ -469,5 +470,4 @@ export function AppShell() {
     </div>
   );
 }
-
 
