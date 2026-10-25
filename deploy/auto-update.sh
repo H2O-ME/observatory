@@ -55,12 +55,34 @@ else
     warn "工作区有未提交改动，跳过自动更新（先手工处理或清理）"
     exit 0
   fi
-  log "发现新提交 ${LOCAL_SHA:0:12} → ${REMOTE_SHA:0:12}，开始部署"
-  # 自动链路不保留 200MB+ 的升级前数据卷备份（用户明确不需要）；
-  # 手工执行 deploy/update.sh 时仍默认备份。
-  SKIP_BACKUP=1 bash deploy/update.sh
-  LOCAL_SHA="$(git rev-parse HEAD)"
-  log "部署完成，当前 commit $(git rev-parse --short HEAD)"
+  CHANGED="$(git diff --name-only "$LOCAL_SHA" "$REMOTE_SHA")"
+  NEED_BUILD=0
+  while IFS= read -r file; do
+    [[ -z "$file" ]] && continue
+    case "$file" in
+      deploy/docker-compose.yml)
+        NEED_BUILD=1 ;;
+      docs/*|README.md|.github/*|tests/*|tools/*|agent/*|\
+      deploy/*|webui/DESIGN_SYSTEM.md|.gitignore|.dockerignore)
+        ;;
+      *)
+        NEED_BUILD=1 ;;
+    esac
+  done <<< "$CHANGED"
+
+  if [[ "$NEED_BUILD" -eq 0 ]]; then
+    log "新提交只涉及文档/CI/部署脚本/受控端源码，快进代码（不重建镜像）"
+    git merge --ff-only "$REMOTE_SHA"
+    LOCAL_SHA="$(git rev-parse HEAD)"
+    log "已快进到 $(git rev-parse --short HEAD)"
+  else
+    log "发现运行时新提交 ${LOCAL_SHA:0:12} → ${REMOTE_SHA:0:12}，开始部署"
+    # 自动链路不保留 200MB+ 的升级前数据卷备份（用户明确不需要）；
+    # 手工执行 deploy/update.sh 时仍默认备份。
+    SKIP_BACKUP=1 bash deploy/update.sh
+    LOCAL_SHA="$(git rev-parse HEAD)"
+    log "部署完成，当前 commit $(git rev-parse --short HEAD)"
+  fi
 fi
 
 VERSION="$(tr -d '[:space:]' < VERSION)"

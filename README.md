@@ -144,14 +144,19 @@ sudo REPO_URL=git@github.com:<you>/observatory.git \
 5. 渲染 nginx 站点模板（域名/证书路径构建期注入）→ `nginx -t` → reload；
 6. 构建 `observatory/api:<VERSION>` 并启动；健康检查失败**退出非 0**。
 
-日常更新：
+日常更新（0.3.6 起为自动链路）：
 
 ```bash
-sudo bash deploy/update.sh
+# 本地：推送 main 即可，服务器每 2 分钟自动拉取并部署
+git push origin main
+# 本地：推送 tag 触发 CI 构建受控端；服务器自动取回 agent-dist 并登记
+git push origin v<VERSION>
 ```
 
-升级前自动备份数据库 + 数据卷，记录旧 commit/镜像；健康检查或版本校验失败会**自动回退旧 commit + 旧镜像**并退出非 0。
-详见 [docs/部署.md](docs/部署.md)。
+自动部署走 `deploy/auto-update.sh` + `observatory-auto-update.timer`（只读 deploy key 拉取 GitHub），
+健康检查或版本校验失败会**自动回退旧 commit + 旧镜像**；只有文档/CI/部署脚本变更时快进代码、不重建镜像。
+受控端包只在 tag 构建，服务器拉取 `agent-dist` 后校验 sha256 自动上线。
+详见 [docs/发布与更新链路.md](docs/发布与更新链路.md)（手工兜底与排障见 [docs/部署.md](docs/部署.md)）。
 
 ## 容器与安全默认值
 
