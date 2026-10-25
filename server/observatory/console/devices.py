@@ -319,7 +319,9 @@ async def delete_device(
         from ..media import ingest as media_ingest
     except ImportError as exc:  # pragma: no cover - W0 skeleton guard
         raise AppError.internal("媒体层未就绪，拒绝在未清理画面数据的情况下删除设备") from exc
-    media_result = await media_ingest.delete_device_data(session, device, await store().load(session))
+    media_result = await media_ingest.delete_device_data(
+        session, device, await store().load(session), purge_remote=bool(purge_remote)
+    )
     # F9: leave a tombstone so the running agent gets 410 GONE (terminal) instead
     # of 401 (infinite re-enroll loop), and enrolment cannot resurrect the uid.
     session.add(

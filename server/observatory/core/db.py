@@ -36,7 +36,7 @@ from .log import log_event
 log = logging.getLogger(__name__)
 
 #: Bump this and append a migration function when the schema changes.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 #: 每个连接都执行的 PRAGMA（W7/F56：journal_mode 需要短暂拿写锁且只需设一次，
 #: 移到迁移路径；NullPool 下每会话新建连接，这里只留真正 per-connection 的项）。
@@ -337,11 +337,32 @@ async def _migration_v4_tombstones_and_indexes(conn: AsyncConnection) -> None:
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_actor ON audit (actor)"))
 
 
+
+
+async def _migration_v5_archive_frame_ts(conn: AsyncConnection) -> None:
+    """frame_archives.frame_ts_ms（归档行的原始采集时间）+ 热查询复合索引。
+
+    P1/P2（2026-10 审查）：restore 重建 Frame 此前用 created_at_ms（归档登记
+    时刻），取回的帧在时间线上排错位置、还被保留策略当作新帧；audit/commands
+    的过滤+排序热查询只有单列索引。
+    """
+
+    await conn.execute(text("ALTER TABLE frame_archives ADD COLUMN frame_ts_ms BIGINT NULL"))
+    # 老行没有原始 ts：沿用旧语义，restore 行为与 v4 一致。
+    await conn.execute(text("UPDATE frame_archives SET frame_ts_ms = created_at_ms WHERE frame_ts_ms IS NULL"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_action_ts ON audit (action, ts_ms)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_device_ts ON audit (device_uid, ts_ms)"))
+    await conn.execute(
+        text("CREATE INDEX IF NOT EXISTS ix_commands_device_created ON commands (device_id, created_at_ms)")
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline_0_2_10", _migration_v1_baseline),
     Migration(2, "link_v3_0_3_0", _migration_v2_link_v3),
     Migration(3, "device_token_index", _migration_v3_device_token_index),
     Migration(4, "tombstones_and_indexes", _migration_v4_tombstones_and_indexes),
+    Migration(5, "archive_frame_ts_and_indexes", _migration_v5_archive_frame_ts),
 )
 
 

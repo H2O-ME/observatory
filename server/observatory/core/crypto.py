@@ -144,12 +144,20 @@ def verify_totp(secret: str, code: str) -> bool:
 
 # -------------------------------------------------------------- rate limiter ---
 class RateLimiter:
-    """In-memory sliding-window limiter (one process, no Redis dependency)."""
+    """In-memory sliding-window limiter (one process, no Redis dependency).
+
+    P1（2026-10 审查）：公网扫描器轮换源地址会让 key 集合无限增长——
+    `_prune` 原来只清当前 key 的 deque，空 bucket 与新 key 永不回收。
+    每 1024 次 allow 做一次全局清扫，删除整个窗口都过期的 bucket。
+    """
+
+    _SWEEP_EVERY = 1024
 
     def __init__(self, limit: int, window_seconds: int) -> None:
         self.limit = max(1, int(limit))
         self.window = max(1, int(window_seconds))
         self._hits: dict[str, deque[float]] = {}
+        self._calls = 0
 
     def _prune(self, key: str, now: float) -> deque[float]:
         bucket = self._hits.setdefault(key, deque())
@@ -158,8 +166,16 @@ class RateLimiter:
             bucket.popleft()
         return bucket
 
+    def _sweep(self, now: float) -> None:
+        cutoff = now - self.window
+        for key in [k for k, b in self._hits.items() if not b or b[-1] < cutoff]:
+            self._hits.pop(key, None)
+
     def allow(self, key: str) -> bool:
         now = time.monotonic()
+        self._calls += 1
+        if self._calls % self._SWEEP_EVERY == 0:
+            self._sweep(now)
         bucket = self._prune(key, now)
         if len(bucket) >= self.limit:
             return False

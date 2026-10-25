@@ -175,6 +175,10 @@ class FrameArchive(Base):
     status: Mapped[str] = mapped_column(String(16), default="待上传")
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     created_at_ms: Mapped[int] = mapped_column(BigInteger, default=now_ms)
+    #: 原始帧的采集时间（P1，2026-10 业务审查）：restore 重建 Frame 时用它，
+    #: 没有它取回的帧会以"归档登记时刻"排在时间线上并被保留策略当作新帧。
+    #: v5 之前的老行为以 created_at_ms 兜底。
+    frame_ts_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     uploaded_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 

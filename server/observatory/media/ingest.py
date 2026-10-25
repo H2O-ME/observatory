@@ -25,7 +25,7 @@ import logging
 import re
 from typing import Any, Callable
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -265,11 +265,22 @@ def _remove_device_dirs(settings: MediaSettings, uid: str) -> tuple[int, int]:
     return files, freed
 
 
-async def delete_device_data(session: AsyncSession, device: Device, settings: Any = None) -> dict[str, int | str]:
+async def delete_device_data(
+    session: AsyncSession,
+    device: Device,
+    settings: Any = None,
+    *,
+    purge_remote: bool = True,
+) -> dict[str, int | str]:
     """删除一台设备的全部媒体数据：本地树 → 远端归档 → 数据库行。
 
     顺序刻意如此：先删本地（不可逆、无远端依赖），再删远端（失败可观测、状态行保留），
     最后删数据库行（一旦删行就无法再定位远端路径）。
+
+    P1（2026-10 业务审查）：``purge_remote=False`` 此前是死参数——接收、写
+    审计、发事件，但这里无条件本地+远端全清。现在 False 时跳过远端删除，
+    且 ``frame_archives`` 状态行**保留**（它们是远端副本仅存的账目，删了
+    就再也无法定位/清理远端）；Frame 行照删（本地帧已随目录删除）。
     """
 
     media_settings = await _resolve_settings(session, settings)
@@ -277,13 +288,20 @@ async def delete_device_data(session: AsyncSession, device: Device, settings: An
 
     remote_removed = 0
     archive_error = ""
-    try:
-        remote_removed = await archive.purge_device(session, device, settings=media_settings)
-    except (SQLAlchemyError, RuntimeError, ValueError) as exc:
-        archive_error = str(exc)[:200]
-        log.error("设备归档远端清理失败 device=%s: %s", device.uid, exc)
+    frames = 0
+    if not purge_remote:
+        from ..core.models import Frame as FrameRow
 
-    frames = await retention.purge_device(session, int(device.id))
+        result = await session.execute(delete(FrameRow).where(FrameRow.device_id == int(device.id)))
+        frames = int(result.rowcount or 0)
+        await session.commit()
+    else:
+        try:
+            remote_removed = await archive.purge_device(session, device, settings=media_settings)
+        except (SQLAlchemyError, RuntimeError, ValueError) as exc:
+            archive_error = str(exc)[:200]
+            log.error("设备归档远端清理失败 device=%s: %s", device.uid, exc)
+        frames = await retention.purge_device(session, int(device.id))
     log.info(
         "设备媒体数据已删除 device=%s 文件=%d 释放=%d 帧行=%d 远端条目=%d",
         device.uid,

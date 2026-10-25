@@ -325,6 +325,7 @@ class ArchiveService:
             status=STATUS_PENDING,
             attempts=0,
             created_at_ms=moment,
+            frame_ts_ms=int(frame.ts_ms),
             uploaded_at_ms=None,
             error="",
         )
@@ -341,11 +342,20 @@ class ArchiveService:
         if not media_settings.archive_ready:
             return 0
         moment = self._clock()
+        # P1（2026-10 审查）：此前只在 Python 侧过滤 retry_eligible——attempts
+        # 耗尽的失败行永远占据 ORDER BY created_at 的窗口头部，累计 32/64 条
+        # 之后真正可重试的行永远选不出来（队头阻塞），且这些行无任何清理
+        # 路径。现在把 attempts 上限推进 SQL，排序改为"下次可重试时间"近似
+        # （attempts 越多重试越晚，created_at 越早优先），耗尽行不再挡路。
+        max_attempts = max(1, int(media_settings.archive_max_attempts))
         rows = (
             await session.execute(
                 select(FrameArchive)
-                .where(FrameArchive.status.in_((STATUS_PENDING, STATUS_FAILED)))
-                .order_by(FrameArchive.created_at_ms.asc())
+                .where(
+                    FrameArchive.status.in_((STATUS_PENDING, STATUS_FAILED)),
+                    FrameArchive.attempts < max_attempts,
+                )
+                .order_by(FrameArchive.created_at_ms.asc(), FrameArchive.attempts.asc())
                 .limit(max(1, int(limit)))
             )
         ).scalars().all()
@@ -496,7 +506,9 @@ class ArchiveService:
 
         frame = Frame(
             device_id=int(row.device_id),
-            ts_ms=int(row.created_at_ms),
+            # 原始采集时间（v5 起持久化在归档行上）；老行回退登记时刻，
+            # 与 v4 行为一致。
+            ts_ms=int(getattr(row, "frame_ts_ms", None) or row.created_at_ms),
             device_ts_ms=None,
             session=0,
             kind=kind_from_remote_path(row.remote_path),

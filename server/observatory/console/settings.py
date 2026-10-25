@@ -60,12 +60,19 @@ async def push_config(
         if agent_session is None:
             continue
         effective = await settings_values.effective(session, row.settings or {})
+        safe = device_safe_config(effective)
         try:
             await agent_session.send(
                 "config",
-                {"config": device_safe_config(effective)},
+                {"config": safe},
                 deadline_ms=CONFIG_PUSH_DEADLINE_MS,
             )
+            # P1（2026-10 业务审查）：同步会话快照。WS 长连会话的
+            # agent_config 原本永不刷新（HTTP 载体也只在 stale>80s 时刷新），
+            # 导致"关闭自动更新"后 update_offer 仍按旧快照继续下发——设置对
+            # 长连设备失效。推送成功即更新快照，offer 门控(session.py:519)
+            # 立即读到新值。
+            agent_session.agent_config = dict(safe)
             sent += 1
         except Exception as exc:  # noqa: BLE001 - carrier failure must not fail the write
             log.warning("config push failed device=%s: %s", row.uid, exc)

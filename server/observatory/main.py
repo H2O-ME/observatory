@@ -37,6 +37,9 @@ from .link.registry import DatabaseDeviceDirectory, registry
 
 log = logging.getLogger(__name__)
 
+#: 强引用在途的后台 fire-and-forget 任务（见 frame-event 推送处注释）。
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
 #: Media has no HTTP router (its API lives in console); it is wired via
 #: ``media.configure/start/stop`` below. Retention is expensive (unlink per frame),
 #: so it runs on its own low-frequency schedule, not on every housekeeping tick.
@@ -442,7 +445,12 @@ def _wire_frame_events(app: FastAPI) -> None:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        loop.create_task(push(), name="frame-event")
+        # P1（2026-10 审查）：事件循环对运行中任务只持弱引用——裸 create_task
+        # 的返回值被 GC 时未开始的 frame_added 推送会凭空消失。存入模块级
+        # 集合，done 回调里移除（asyncio 文档的标准写法）。
+        task = loop.create_task(push(), name="frame-event")
+        _BACKGROUND_TASKS.add(task)
+        task.add_done_callback(_BACKGROUND_TASKS.discard)
 
     try:
         # add_frame_listener lives on media.ingest (the package module does not

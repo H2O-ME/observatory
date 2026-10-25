@@ -52,6 +52,16 @@ async def require_device_token(
     digest = device_token_hash(token, request.app.state.settings.secret_key)
     device = (await session.execute(select(Device).where(Device.token_hash == digest))).scalars().first()
     if device is None:
+        # P1（2026-10 业务审查）：已删除设备的 token 命中的是墓碑——必须回
+        # 410 终态而不是 401。链路目录早已这么做（F9），但帧上传路径此前只查
+        # devices 表，已删设备的帧循环会陷入 401 → 重注册 → 401 死循环。
+        from ..core.models import DeletedDevice
+
+        tombstone = (
+            await session.execute(select(DeletedDevice).where(DeletedDevice.token_hash == digest))
+        ).scalars().first()
+        if tombstone is not None:
+            raise AppError.gone("该设备已删除")
         raise AppError.auth("设备令牌无效")
     if device.uninstalled_at_ms:
         raise AppError.gone("该设备已卸载")

@@ -400,6 +400,20 @@ async def control_socket(websocket: WebSocket, uid: str) -> None:
         return
 
     grant.viewer = websocket
+    # P1（2026-10 业务审查）：观看会话全程留痕。grant 创建有审计，但 WS
+    # 建立/结束此前无记录——无法回答"谁在何时真的看了屏幕、看了多久"。
+    view_started_ms = now_ms()
+    try:
+        async with websocket.app.state.db.sessionmaker() as audit_session:
+            await audit.record(
+                audit_session,
+                action=audit.ACTION_CONTROL_VIEW,
+                device=device,
+                ip=(websocket.client.host if websocket.client else ""),
+                detail={"stage": "view_started", "token_hint": grant.token[:8]},
+            )
+    except Exception:  # noqa: BLE001 - 审计失败不能中断观看
+        log.warning("control view_started audit failed")
     await websocket.send_json(
         {
             "type": "ready",
@@ -520,6 +534,21 @@ async def control_socket(websocket: WebSocket, uid: str) -> None:
             await _send_to_agent(websocket, grant, {"session": grant.token, "action": "stop"})
         grant.revoked = True
         SESSIONS.remove(grant.token)
+        try:
+            async with websocket.app.state.db.sessionmaker() as audit_session:
+                await audit.record(
+                    audit_session,
+                    action=audit.ACTION_CONTROL_VIEW,
+                    device=device,
+                    ip=(websocket.client.host if websocket.client else ""),
+                    detail={
+                        "stage": "view_ended",
+                        "token_hint": grant.token[:8],
+                        "view_s": max(0, (now_ms() - view_started_ms) // 1000),
+                    },
+                )
+        except Exception:  # noqa: BLE001
+            log.warning("control view_ended audit failed")
         with contextlib.suppress(Exception):
             await websocket.close(code=CLOSE_REVOKED, reason="control closed")
 

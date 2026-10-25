@@ -7,6 +7,7 @@ fails to import.  This router only serves the *detailed* page behind login.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 from pathlib import Path
@@ -31,8 +32,15 @@ router = APIRouter(tags=["system"], dependencies=[Depends(require_admin)], route
 
 _PROCESS_STARTED_AT_MS = now_ms()
 
+# P1（2026-10 审查）：frames/thumbs 目录在 2 万帧规模下是 4 万个文件——在
+# 事件循环上同步 rglob+stat 会阻塞数秒（Windows/Defender 更久），期间所有
+# 长轮询、WS 心跳、帧上传停摆。缓存 + 后台线程化：60s TTL 内直接回旧值，
+# 实际遍历丢给 to_thread。
+_TREE_CACHE_S = 60.0
+_tree_cache: dict[Path, tuple[float, int]] = {}
 
-def _tree_bytes(root: Path) -> int:
+
+def _tree_bytes_sync(root: Path) -> int:
     if not root.exists():
         return 0
     total = 0
@@ -42,6 +50,18 @@ def _tree_bytes(root: Path) -> int:
                 total += path.stat().st_size
         except OSError:
             log.warning("could not stat %s while computing storage usage", path)
+    return total
+
+
+async def _tree_bytes(root: Path) -> int:
+    import time as _time
+
+    cached = _tree_cache.get(root)
+    now = _time.monotonic()
+    if cached and now - cached[0] < _TREE_CACHE_S:
+        return cached[1]
+    total = await asyncio.to_thread(_tree_bytes_sync, root)
+    _tree_cache[root] = (now, total)
     return total
 
 
@@ -88,8 +108,8 @@ async def system_status(
             "channels": links.counts(),
             "control_sessions": SESSIONS.active_count(),
             "storage": {
-                "frames_bytes": _tree_bytes(frames_dir),
-                "thumbs_bytes": _tree_bytes(thumbs_dir),
+                "frames_bytes": await _tree_bytes(frames_dir),
+                "thumbs_bytes": await _tree_bytes(thumbs_dir),
                 "db_bytes": db_bytes,
                 "disk_total": disk_total,
                 "disk_free": disk_free,

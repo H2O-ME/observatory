@@ -635,13 +635,26 @@ async def _purge_commands(session: AsyncSession, settings: MediaSettings, now_ms
 
 
 async def _purge_archive_rows(session: AsyncSession, settings: MediaSettings, now_ms: int) -> int:
-    """已删除的归档状态行保留 30 天后清理，避免状态表无限增长。"""
+    """已删除的归档状态行保留 30 天后清理，避免状态表无限增长。
+
+    P1（2026-10 审查）：attempts 耗尽的 FAILED 行此前没有任何清理路径
+    （sweep 选不出来、这里也不删），表会无限膨胀。同窗口清理：失败且
+    重试耗尽且超过保留期的行一并删除——它们的远端副本状态已不可恢复，
+    留在表里只剩统计意义。
+    """
 
     cutoff = cutoff_ms(ARCHIVE_ROW_RETENTION_DAYS, now_ms)
+    max_attempts = max(1, int(getattr(settings, "archive_max_attempts", 8) or 8))
     result = await session.execute(
         delete(FrameArchive).where(
-            FrameArchive.status == archive.STATUS_DELETED,
             FrameArchive.created_at_ms < cutoff,
+            (
+                (FrameArchive.status == archive.STATUS_DELETED)
+                | (
+                    (FrameArchive.status == archive.STATUS_FAILED)
+                    & (FrameArchive.attempts >= max_attempts)
+                )
+            ),
         )
     )
     await session.commit()
