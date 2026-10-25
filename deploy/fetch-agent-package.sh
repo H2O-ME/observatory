@@ -92,9 +92,13 @@ log "登记到控制台"
 # (10001) 运行；随后 package-add 需要把文件复制成自己的副本，会因目标文件不可写
 # 而 PermissionError。先拷到容器 /tmp（package-add 只读源文件），由 CLI 负责写入
 # /data/packages 并落库。
-REMOTE_TMP="/tmp/${NAME}"
+REMOTE_TMP="/data/tmp/${NAME}"
+# 容器 rootfs 是只读的（/tmp 也不行），但数据卷可写；用 /data/tmp 作为中转。
 docker cp "${OUT_DIR}/${NAME}" "observatory-api:${REMOTE_TMP}" \
   || die "docker cp 失败（容器 observatory-api 是否在运行？）"
+# 旧的 docker cp 可能在 /data/packages 留下 root 属主文件；容器用户是目录 owner，
+# 可以 unlink（无需写文件权限）。清理后再让 CLI 以 observatory 身份写入。
+docker exec observatory-api rm -f "/data/packages/${NAME}" >/dev/null 2>&1 || true
 if docker exec -w /srv observatory-api python -m observatory.cli package-add "${REMOTE_TMP}" >/dev/null; then
   docker exec observatory-api rm -f "${REMOTE_TMP}" >/dev/null 2>&1 || true
   log "已登记 ${NAME}"
