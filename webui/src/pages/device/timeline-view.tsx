@@ -255,8 +255,8 @@ export function TimelineView({ device }: { device: DeviceLike }) {
                   ) : null}
                 </span>
                 <span className="flex items-center justify-between gap-2 border-t border-line bg-panel px-2.5 py-1.5">
-                  <span className="font-mono text-xs text-soft">{formatDateTime(bucket.ts_ms).slice(11)}</span>
-                  <span className="text-[0.7rem] text-faint">{formatDateTime(bucket.ts_ms).slice(5, 10)}</span>
+                  <span className="font-mono text-[0.8rem] font-medium text-ink">{formatDateTime(bucket.ts_ms).slice(11)}</span>
+                  <span className="text-xs text-soft">{formatDateTime(bucket.ts_ms).slice(5, 10)}</span>
                 </span>
               </button>
             ))}

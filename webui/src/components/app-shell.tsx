@@ -160,7 +160,9 @@ function NavItem({
       <NavLink to={item.to} className="block no-underline">
         {active ? (
           <MovingBorder duration={9000} containerClassName="rounded-xl">
-            <span className="flex items-center gap-2.5 rounded-xl bg-brand-soft px-3 py-2 text-sm font-semibold text-brand shadow-card">
+            {/* 实心品牌色块：深色主题下唯一无歧义的选中态（brand-soft 半透明
+              底透过流光描边会发糊，2026-10-25 时间线截图反馈）。 */}
+            <span className="flex items-center gap-2.5 rounded-xl bg-brand px-3 py-2 text-sm font-semibold text-brand-ink shadow-card">
               <Icon className="size-[1.1rem]" />
               {item.label}
             </span>
