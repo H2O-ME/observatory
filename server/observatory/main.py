@@ -641,6 +641,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         agent_hosts=settings.agent_host_list,
         trust_forwarded_for=settings.trust_forwarded_for,
         allow_loopback_console=settings.allow_loopback_console,
+        # 与 uvicorn --forwarded-allow-ips 同源：受信反代（宿主 nginx 走 docker
+        # 网桥）转发的 loopback Host 视同本机流量（2026-10-26 生产事故复盘）。
+        trusted_proxy_ips=os.environ.get(
+            "OBS_FORWARDED_ALLOW_IPS", "127.0.0.1,172.16.0.0/12"
+        ),
     )
     # P1（2026-10 审查）：网络层请求体上限——在 FastAPI 解析 body 之前拒绝
     # 超限请求（限流此前发生在 body 完整读入内存之后）。装在 HostSplit 内层：

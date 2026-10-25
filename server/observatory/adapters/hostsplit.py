@@ -34,6 +34,35 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 #: 没有网络对端，与本机回环同等对待；此外覆盖整个 127/8。
 CLIENT_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "testclient"})
 
+
+def _parse_networks(spec: str) -> tuple["ipaddress.IPv4Network | ipaddress.IPv6Network", ...]:
+    """Parse ``"127.0.0.1,::1,172.16.0.0/12"`` into networks (bad entries skipped)."""
+
+    import ipaddress
+
+    networks = []
+    for piece in (spec or "").split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(piece, strict=False))
+        except ValueError:
+            log.warning("trusted proxy entry %r is not an IP/network; skipped", piece)
+    return tuple(networks)
+
+
+def _in_networks(ip: str, networks: tuple) -> bool:
+    import ipaddress
+
+    if not ip or not networks:
+        return False
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr in net for net in networks)
+
 SHARED_PREFIXES = (
     "/api/v1/agent/",
     "/api/v1/public/",
@@ -94,12 +123,21 @@ class HostSplit:
         agent_hosts: list[str],
         trust_forwarded_for: bool = False,
         allow_loopback_console: bool = True,
+        trusted_proxy_ips: str = "127.0.0.1,::1,172.16.0.0/12",
     ) -> None:
         self.app = app
         self.console_hosts = [host.lower() for host in console_hosts if host]
         self.agent_hosts = [host.lower() for host in agent_hosts if host]
         self.trust_forwarded_for = trust_forwarded_for
         self.allow_loopback_console = allow_loopback_console
+        # P0 修正（2026-10-26 生产事故复盘）：生产形态是宿主 nginx（docker 网桥
+        # IP，如 172.20.0.1）反代到容器，转发的 Host 就是 127.0.0.1——第一版
+        # 修复要求"client 也必须 loopback"，把这些合法主力流量全部 404，健康
+        # 检查 120s 超时触发回滚。正确的信任边界与 uvicorn 的
+        # --forwarded-allow-ips 同源：受信反代网段内的客户端转发的 loopback
+        # Host 视同宿主本机流量；公网直连 8443（容器 0.0.0.0 监听，受控端
+        # 直连路径）的伪造 Host:127.0.0.1 仍然被拒——攻击面收窄不变。
+        self.trusted_proxies = _parse_networks(trusted_proxy_ips)
         self.config_complete = bool(self.console_hosts and self.agent_hosts)
         if not self.config_complete:
             log.error(
@@ -110,20 +148,17 @@ class HostSplit:
             )
 
     # -- policy ------------------------------------------------------------
-    def _console_allowed(self, host: str, *, client_is_loopback: bool) -> bool:
+    def _console_allowed(self, host: str, *, client_is_local: bool) -> bool:
         if host in self.console_hosts:
             return True
         # P0（2026-10 架构审查）：Host 头完全由客户端控制。此前公网请求只要
         # 带 ``Host: 127.0.0.1`` 就命中 loopback 分支，整个控制台 API（登录、
-        # 命令、文件、删除）对互联网敞开——"fail-closed" 实为最大的 fail-open。
-        # loopback 放行现在要求 **Host 是 loopback 且真实对端地址也是
-        # loopback**（scope["client"]，代理后是网桥 IP、伪造不了）。
-        return bool(
-            self.allow_loopback_console and host in LOOPBACK_HOSTS and client_is_loopback
-        )
+        # 命令、文件、删除）对互联网敞开。现在 loopback Host 仅在客户端是
+        # 本机回环或受信反代（网段见 __init__ 注释）时放行。
+        return bool(self.allow_loopback_console and host in LOOPBACK_HOSTS and client_is_local)
 
-    def _shared_allowed(self, host: str, *, client_is_loopback: bool) -> bool:
-        if host in LOOPBACK_HOSTS and client_is_loopback:
+    def _shared_allowed(self, host: str, *, client_is_local: bool) -> bool:
+        if host in LOOPBACK_HOSTS and client_is_local:
             return True
         if not self.config_complete:
             return False
@@ -142,15 +177,19 @@ class HostSplit:
 
         host = request_host(scope, trust_forwarded_for=self.trust_forwarded_for)
         client_ip = (scope.get("client") or ("", 0))[0]
-        client_is_loopback = _normalise_host(client_ip) in CLIENT_LOOPBACK_HOSTS or client_ip.startswith("127.")
+        client_is_local = (
+            _normalise_host(client_ip) in CLIENT_LOOPBACK_HOSTS
+            or client_ip.startswith("127.")
+            or _in_networks(client_ip, self.trusted_proxies)
+        )
         path = str(scope.get("path") or "/")
         allowed = (
-            self._shared_allowed(host, client_is_loopback=client_is_loopback)
+            self._shared_allowed(host, client_is_local=client_is_local)
             if _is_shared(path)
-            else self._console_allowed(host, client_is_loopback=client_is_loopback)
+            else self._console_allowed(host, client_is_local=client_is_local)
         )
         if not allowed and scope["type"] == "websocket" and _is_shared_ws(path):
-            allowed = self._shared_allowed(host, client_is_loopback=client_is_loopback)
+            allowed = self._shared_allowed(host, client_is_local=client_is_local)
         if allowed:
             await self.app(scope, receive, send)
             return
@@ -211,7 +250,7 @@ def build(
         agent_hosts=agent_hosts,
         trust_forwarded_for=trust_forwarded_for,
         allow_loopback_console=allow_loopback_console,
-    )
+    )  # trusted_proxy_ips 由 main.py 从 OBS_FORWARDED_ALLOW_IPS 注入（见 main 装配处）
 
 
 __all__ = [
