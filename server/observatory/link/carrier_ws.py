@@ -157,23 +157,41 @@ async def link_ws(websocket: WebSocket) -> None:
 
     async def pump_downlink() -> None:
         await link_ready.wait()
+        #: Envelopes already written on this socket. ``outbox.pending()`` is the
+        #: at-least-once queue: an entry stays there until the agent acks it, so
+        #: it must never be read as "work to send now". Doing that (the first F22
+        #: draft) made the pump re-send the same batch on every loop iteration —
+        #: a hot loop that starved the ack path and buried a fresh downlink
+        #: (ctrl_stop) behind thousands of duplicates until the idle timeout
+        #: closed the link (2026-10-25 CI incident, reproduced on 2-CPU Linux).
+        sent: set[str] = set()
         while not session.closed:
+            # Snapshot the revision *before* reading the queue: a put that lands
+            # between the two bumps the revision, so the wait below returns at
+            # once and the wake-up is never lost (F22).
+            revision = session.outbox.revision
             queued = session.outbox.pending()
-            if queued:
-                for envelope in queued:
+            sent.intersection_update(envelope.id for envelope in queued)
+            unsent = [envelope for envelope in queued if envelope.id not in sent]
+            if unsent:
+                for envelope in unsent:
                     if not await send_envelope(envelope):
                         return
-                # F22: a put during the batch's awaits must not be slept away —
-                # only wait when the queue really is empty now.
-                if session.outbox.pending():
-                    continue
-                await session.outbox.wait_for_change(settings.heartbeat_interval_s)
+                    sent.add(envelope.id)
                 continue
-            changed = await session.outbox.wait_for_change(settings.heartbeat_interval_s)
-            if not changed and not session.closed and not session.outbox.pending():
-                ping = new_envelope("ping", {"server_time_ms": clock.now_ms()}, clock=clock)
-                if not await send_envelope(ping):
-                    return
+            changed = await session.outbox.wait_for_change(settings.heartbeat_interval_s, since=revision)
+            if session.closed:
+                return
+            if changed:
+                continue
+            # One heartbeat of silence: at-least-once retransmission is bounded
+            # to this cadence instead of being a busy loop.
+            if session.outbox.pending():
+                sent.clear()
+                continue
+            ping = new_envelope("ping", {"server_time_ms": clock.now_ms()}, clock=clock)
+            if not await send_envelope(ping):
+                return
 
     async def handle_text(text: str) -> None:
         try:

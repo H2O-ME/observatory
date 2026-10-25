@@ -445,7 +445,10 @@ def _wire_frame_events(app: FastAPI) -> None:
         loop.create_task(push(), name="frame-event")
 
     try:
-        media.add_frame_listener(on_frame)
+        # add_frame_listener lives on media.ingest (the package module does not
+        # re-export it) — the 0.3.1 CI run surfaced this as a warning, which
+        # silently disabled frame_added events.
+        media.ingest.add_frame_listener(on_frame)
     except Exception as exc:  # noqa: BLE001 - event wiring must not break media start
         log.warning("frame event listener not registered (%s)", exc)
 

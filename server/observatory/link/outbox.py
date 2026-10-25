@@ -30,6 +30,14 @@ class Outbox:
         self._event = asyncio.Event()
         self._last_ack_id: str | None = None
         self._closed = False
+        #: Monotonic change counter (0.3.1 F22 final design): put/ack/wake/close
+        #: each bump it. Carriers snapshot the revision *before* reading the
+        #: queue and pass it to ``wait_for_change(since=...)``, so a change that
+        #: lands between "check" and "clear" can never be slept away — while
+        #: un-acked backlog deliberately does NOT count as a change (the pump
+        #: must sleep instead of hot-looping re-sends; that mistake starved a
+        #: fresh ctrl_stop behind thousands of duplicate writes on CI).
+        self._revision = 0
 
     @property
     def closed(self) -> bool:
@@ -38,6 +46,16 @@ class Outbox:
     @property
     def last_ack_id(self) -> str | None:
         return self._last_ack_id
+
+    @property
+    def revision(self) -> int:
+        """Monotonic change counter for ``wait_for_change(since=...)`` (F22)."""
+
+        return self._revision
+
+    def _notify(self) -> None:
+        self._revision += 1
+        self._event.set()
 
     def pending_count(self) -> int:
         return len(self._pending)
@@ -56,7 +74,7 @@ class Outbox:
         if len(self._pending) >= self._maxsize:
             raise AppError.internal("下行队列已满，请稍后重试")
         self._pending[envelope.id] = envelope
-        self._event.set()
+        self._notify()
 
     def ack(self, message_id: str) -> bool:
         """Mark one message as delivered. Returns ``True`` when it was queued."""
@@ -66,6 +84,7 @@ class Outbox:
         removed = self._pending.pop(message_id, None) is not None
         if removed:
             self._last_ack_id = message_id
+            self._notify()
             log_event(log, logging.DEBUG, "outbox.acked", message_id=message_id)
         return removed
 
@@ -82,6 +101,7 @@ class Outbox:
             if queued_id == message_id:
                 break
         if removed:
+            self._notify()
             log_event(log, logging.DEBUG, "outbox.ack_watermark", message_id=message_id, removed=removed)
         return removed
 
@@ -91,7 +111,12 @@ class Outbox:
         messages = self.pending()
         if messages or self._closed:
             return messages
+        marker = self._revision
+        # Clear *before* re-checking: a put that lands between the check above
+        # and this clear would otherwise have its wake-up erased (F22).
         self._event.clear()
+        if self._revision != marker:
+            return self.pending()
         try:
             await asyncio.wait_for(self._event.wait(), timeout=max(0.01, float(timeout_s)))
         except asyncio.TimeoutError:
@@ -101,22 +126,26 @@ class Outbox:
             self._event.clear()
         return self.pending()
 
-    async def wait_for_change(self, timeout_s: float) -> bool:
+    async def wait_for_change(self, timeout_s: float, *, since: int | None = None) -> bool:
         """Wait until the queue changes or *timeout_s* passes.
 
-        Returns ``True`` when a put/ack/close woke the caller. Unlike
-        :meth:`wait_for_messages` this does not return immediately when the queue
-        already has pending items, which is what the WS pump needs.
+        Returns ``True`` when a put/ack/close woke the caller. ``since`` is the
+        :attr:`revision` the caller already acted on; passing it makes the wait
+        race-free — a put that lands between the caller's last check and the
+        ``clear()`` bumps the revision, so it can never be slept away (F22).
 
-        F22: re-checks ``pending()`` after clearing — a put that landed while the
-        caller was draining (before ``clear()``) used to have its wakeup eaten
-        and the pump slept a whole heartbeat interval with work queued.
+        Note: un-acked backlog is deliberately **not** a change. Entries stay in
+        ``pending()`` until the agent acks them, so a carrier that already wrote
+        them must be able to sleep instead of hot-looping duplicate re-sends
+        (that mistake starved a fresh ctrl_stop behind thousands of duplicate
+        writes on slow CI runners — 2026-10-25 incident).
         """
 
         if self._closed:
             return True
+        marker = self._revision if since is None else int(since)
         self._event.clear()
-        if self._pending:
+        if self._revision != marker:
             return True
         try:
             await asyncio.wait_for(self._event.wait(), timeout=max(0.01, float(timeout_s)))
@@ -129,12 +158,12 @@ class Outbox:
     def wake(self) -> None:
         """Wake a waiting carrier (used for pings/shutdown)."""
 
-        self._event.set()
+        self._notify()
 
     def close(self) -> None:
         self._closed = True
         self._pending.clear()
-        self._event.set()
+        self._notify()
 
 
 __all__ = ["Outbox"]
