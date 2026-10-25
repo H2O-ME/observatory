@@ -311,6 +311,15 @@ def test_a05_revoke_stops_ctrl_in_and_ttl_closes(tmp_dir: Path) -> None:
             assert welcome["t"] == "welcome", welcome
 
             token = create_grant()
+            # 路径 1 只测 revoke 语义：CI 慢机（2 CPU + portal 往返）上从 grant()
+            # 到 DELETE 可能跨过真实 30s TTL，grant 会被 TTL 定时器先收走（0.3.1
+            # CI 实录）。主动延长有效期，把"到期自动停止"留给路径 2 的定时器断言。
+            from observatory.console.control import SESSIONS as _A05_SESSIONS
+            from observatory.core.clock import now_ms as _a05_now
+
+            _grant_a5 = _A05_SESSIONS.get(token)
+            assert _grant_a5 is not None
+            _grant_a5.expires_at_ms = _a05_now() + 300_000
             with client.websocket_connect(f"/api/v1/devices/OBS-A5/control?token={token}") as viewer:
                 ready = viewer.receive_json()
                 assert ready["type"] == "ready", ready
