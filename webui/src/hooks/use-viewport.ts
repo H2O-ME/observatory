@@ -3,18 +3,25 @@ import { useEffect, useState } from "react";
 export type Viewport = "watch" | "mobile" | "desktop";
 
 function measure(): Viewport {
-  const width = typeof window === "undefined" ? 1280 : window.innerWidth;
-  if (width <= 380) return "watch";
-  if (width <= 860) return "mobile";
+  if (typeof window === "undefined") return "desktop";
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+
+  // Square-ish tiny screens are watches (Wear OS: 320×320, 384×384, 454×454).
+  // A 390×844 phone must never fall into this branch.
+  const squareWatch = width <= 480 && height <= 560;
+  if (squareWatch || width <= 340) return "watch";
+  if (width <= 900) return "mobile";
   return "desktop";
 }
 
 /**
  * Coarse viewport class.
  *
- * The watch breakpoint exists because those screens are ~320-360 CSS pixels wide
- * and every extra column makes text unreadable. Layout decisions key off this
- * instead of duplicating media queries in twenty components.
+ * Layout decisions that differ structurally (navigation variant, column count,
+ * density) key off this; ordinary responsive layout still uses CSS media
+ * queries. The watch branch is deliberately square-screen-aware so a portrait
+ * phone is never mistaken for a watch.
  */
 export function useViewport(): Viewport {
   const [viewport, setViewport] = useState<Viewport>(measure);

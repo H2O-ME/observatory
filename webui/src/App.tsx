@@ -1,11 +1,12 @@
 import { useEffect } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
+import { Loader2, RadioTower, RefreshCw } from "lucide-react";
 
 import { AppShell } from "@/components/app-shell";
+import { GridPattern } from "@/components/aceternity/grid-pattern";
 import { Spotlight } from "@/components/aceternity/spotlight";
 import { LiveBridge } from "@/components/live-bridge";
 import { Button } from "@/components/ui/button";
-import { Spinner } from "@/components/ui/spinner";
 import { AccountPage } from "@/pages/account";
 import { AuditPage } from "@/pages/audit";
 import { BackupPage } from "@/pages/backup";
@@ -18,12 +19,8 @@ import { WallPage } from "@/pages/wall";
 import { useAuth } from "@/store/auth";
 
 /**
- * Route table.
- *
- * The 0.3.0 URLs are `/wall`, `/device/:uid/{overview,live,timeline,files,commands}`,
- * `/backup`, `/audit`, `/settings`, `/updates` (spec §2.2). The 0.2.x bookmarks
- * `/` and `/devices/:uid` still resolve — same element, no redirect — so nobody's
- * saved link breaks.
+ * Route table. 0.2.x bookmarks (`/` and `/devices/:uid`) keep resolving to the
+ * same element so nobody's saved link breaks.
  */
 export function App() {
   const { status, error, version, bootstrap, refresh } = useAuth();
@@ -34,10 +31,20 @@ export function App() {
 
   if (status === "boot") {
     return (
-      <div className="relative flex app-vh flex-col items-center justify-center gap-3 overflow-hidden">
+      <div className="relative flex app-vh flex-col items-center justify-center overflow-hidden px-4">
+        <GridPattern className="opacity-50" stroke="var(--c-grid-line)" strokeDasharray="4 6" />
         <Spotlight className="left-[-30%] top-[-10%] opacity-30" />
-        <Spinner className="relative z-10 size-5 text-brand" />
-        <p className="relative z-10 text-sm text-soft">正在连接 Observatory…</p>
+        <div className="surface-strong relative z-10 flex flex-col items-center px-8 py-7">
+          <span className="relative flex size-12 items-center justify-center rounded-2xl border border-line bg-brand-soft text-brand">
+            <RadioTower className="size-5" />
+            <span className="absolute -right-1 -top-1 size-2.5 rounded-full bg-ok animate-sm-pulse" />
+          </span>
+          <p className="mt-4 text-[0.95rem] font-semibold text-ink">正在连接 Observatory</p>
+          <p className="mt-1 flex items-center gap-1.5 text-[0.78rem] text-soft">
+            <Loader2 className="size-3.5 animate-spin text-brand" />
+            读取服务端会话…
+          </p>
+        </div>
       </div>
     );
   }
@@ -45,13 +52,15 @@ export function App() {
   if (status === "error") {
     return (
       <div className="relative flex app-vh items-center justify-center overflow-hidden px-4">
+        <GridPattern className="opacity-50" stroke="var(--c-grid-line)" strokeDasharray="4 6" />
         <Spotlight className="left-[-30%] top-[-10%] opacity-30" />
-        <div className="glass-raised relative z-10 w-full max-w-sm rounded-window border border-line p-6 text-center shadow-pop">
-          <p className="text-sm font-medium text-ink">{error}</p>
-          <p className="mt-2 text-xs leading-relaxed text-soft">
+        <div className="surface-strong relative z-10 w-full max-w-sm p-6 text-center">
+          <p className="text-[0.95rem] font-semibold text-ink">{error}</p>
+          <p className="mt-2 text-[0.8rem] leading-relaxed text-soft">
             控制台无法读取服务端会话。网络恢复后可以继续使用，登录状态会保留。
           </p>
           <Button className="mt-5 w-full" onClick={() => void refresh()}>
+            <RefreshCw className="size-4" />
             重试
           </Button>
         </div>

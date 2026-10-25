@@ -1,37 +1,51 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
-/* The console is token-driven: components only ever name a semantic colour,
-   never a raw hex. Flipping the two variable sets below is therefore the whole
-   dark-mode implementation — the `.dark` class on <html> is the only switch,
-   and `system` mode resolves to one of the two sets in JS before first paint.
+/* ============================================================================
+   Observatory · Deep-field console
+   ----------------------------------------------------------------------------
+   Token-driven. Every component names a semantic colour, never a raw hex.
+   Two vocabularies are mapped to the same primitives:
+     · `bg/panel/ink/soft/brand/…`   the console's own names
+     · `background/card/muted/…`     shadcn's names (Base UI wrappers)
 
-   Two vocabularies are mapped onto the SAME primitives:
-     • `--c-*`  the console's own names (bg/panel/ink/soft/brand/…)
-     • shadcn's names (background/card/muted-foreground/primary/…)
-   They must not be conflated: shadcn's `accent` and `muted` are *surfaces*
-   (hover fills, track backgrounds), whereas the console's brand colour and
-   secondary text colour are `brand` and `soft`. Renaming the console's tokens
-   is what keeps `bg-accent` in a shadcn menu from turning solid blue. */
+   Chromium 81 (watch WebView) rules that shaped this file:
+   * utilities that Tailwind v4 emits through color-mix() are not dependable;
+     alpha surfaces therefore live in `--c-*-soft` tokens / custom classes;
+   * `inset`, individual `translate/rotate/scale`, `aspect-ratio`, `100dvh`
+     and flex `gap` are missing — fallbacks are at the bottom of this file;
+   * `.surface*` never depends on backdrop-filter for contrast (watch removes
+     the blur entirely in mobile.css).
+   ========================================================================== */
+
 @custom-variant dark (&:where(.dark, .dark *));
 
 @theme inline {
   /* ---------------------------------------------------- console vocabulary */
   --color-bg: var(--c-bg);
+  --color-bg-2: var(--c-bg-2);
   --color-panel: var(--c-panel);
+  --color-panel-strong: var(--c-panel-strong);
   --color-raised: var(--c-raised);
   --color-sunken: var(--c-sunken);
+  --color-sunken-strong: var(--c-sunken-strong);
   --color-line: var(--c-line);
   --color-line-strong: var(--c-line-strong);
   --color-ink: var(--c-ink);
   --color-soft: var(--c-soft);
   --color-faint: var(--c-faint);
   --color-brand: var(--c-brand);
+  --color-brand-2: var(--c-brand-2);
+  --color-brand-3: var(--c-brand-3);
   --color-brand-ink: var(--c-brand-ink);
   --color-brand-soft: var(--c-brand-soft);
   --color-ok: var(--c-ok);
   --color-warn: var(--c-warn);
   --color-danger: var(--c-danger);
+  --color-ok-soft: var(--c-ok-soft);
+  --color-warn-soft: var(--c-warn-soft);
+  --color-danger-soft: var(--c-danger-soft);
+  --color-on-danger: var(--c-on-danger);
 
   /* ----------------------------------------------------- shadcn vocabulary */
   --color-background: var(--c-bg);
@@ -71,66 +85,69 @@
   --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "Consolas",
     "Liberation Mono", monospace;
 
-  /* Slightly softer corners than Tailwind's defaults, across the board.
-     `xl` is the radius shadcn's Card/Dialog/AlertDialog already ship, so it
-     is the panel radius; `panel` is kept as the name to reach for. `window`
-     is the larger radius for the floating chrome frames.
-     Tailwind emits same-property utilities in name order, and `window` sorts
-     before `xl` — so on a shadcn surface that already carries `rounded-xl`,
-     a bare `rounded-window` loses. Those call sites use `rounded-window!`,
-     which is why the bang is there and not a typo to be tidied away. */
   --radius-sm: 0.5rem;
   --radius-md: 0.625rem;
   --radius-lg: 0.75rem;
   --radius-xl: 1rem;
-  --radius-panel: 1rem;
-  --radius-window: 1.375rem;
+  --radius-panel: 1.125rem;
+  --radius-window: 1.5rem;
 
   --animate-aurora: aurora 60s linear infinite;
 }
 
 /* ---------------------------------------------------------------- light -- */
 :root {
-  --c-bg: #eef0f6;
-  --c-panel: rgba(255, 255, 255, 0.86);
-  --c-raised: rgba(255, 255, 255, 0.96);
-  --c-glass: rgba(255, 255, 255, 0.6);
-  --c-sunken: rgba(15, 23, 42, 0.05);
-  --c-line: rgba(15, 23, 42, 0.09);
-  --c-line-strong: rgba(15, 23, 42, 0.17);
-  --c-ink: #1d1d1f;
-  --c-soft: #5c6270;
-  --c-faint: #8a8f9c;
-  --c-brand: #0071e3;
+  --c-bg: #f1f4fa;
+  --c-bg-2: #e7ecf7;
+  --c-panel: rgba(255, 255, 255, 0.74);
+  --c-panel-strong: rgba(255, 255, 255, 0.92);
+  --c-raised: rgba(255, 255, 255, 0.98);
+  --c-glass: rgba(248, 250, 255, 0.72);
+  --c-sunken: rgba(15, 23, 42, 0.045);
+  --c-sunken-strong: rgba(15, 23, 42, 0.08);
+  --c-line: rgba(15, 23, 42, 0.10);
+  --c-line-strong: rgba(15, 23, 42, 0.20);
+  --c-ink: #0f172a;
+  --c-soft: #56607a;
+  --c-faint: #8790a4;
+  --c-brand: #2563eb;
+  --c-brand-2: #7c3aed;
+  --c-brand-3: #0891b2;
   --c-brand-ink: #ffffff;
-  --c-brand-soft: rgba(0, 113, 227, 0.11);
+  --c-brand-soft: rgba(37, 99, 235, 0.10);
   --c-on-danger: #ffffff;
-  --c-ok: #0e8a45;
+  --c-ok: #0e8a4b;
   --c-warn: #b45309;
-  --c-danger: #d70015;
+  --c-danger: #d92d20;
+  --c-ok-soft: rgba(14, 138, 75, 0.10);
+  --c-warn-soft: rgba(180, 83, 9, 0.10);
+  --c-danger-soft: rgba(217, 45, 32, 0.09);
 
-  --c-chart-1: #0071e3;
-  --c-chart-2: #5e5ce6;
-  --c-chart-3: #0e8a45;
+  --c-chart-1: #2563eb;
+  --c-chart-2: #7c3aed;
+  --c-chart-3: #0e8a4b;
   --c-chart-4: #b45309;
-  --c-chart-5: #d70015;
+  --c-chart-5: #d92d20;
 
-  --sh-card: 0 1px 2px rgba(16, 24, 40, 0.05),
-    0 10px 30px -12px rgba(16, 24, 40, 0.14);
-  --sh-raised: 0 2px 8px rgba(16, 24, 40, 0.07),
-    0 20px 48px -16px rgba(16, 24, 40, 0.2);
-  --sh-pop: 0 32px 80px -20px rgba(16, 24, 40, 0.34),
-    0 6px 20px -6px rgba(16, 24, 40, 0.12);
+  --c-glow-a: rgba(59, 130, 246, 0.22);
+  --c-glow-b: rgba(124, 58, 237, 0.16);
+  --c-glow-c: rgba(8, 145, 178, 0.13);
+  --c-grid-line: rgba(15, 23, 42, 0.07);
 
-  /* Aceternity's aurora: saturated diagonal stripes, cut into bands by a
-     same-coloured-as-the-background gradient, then blurred into a wash. */
+  --sh-card: 0 1px 2px rgba(16, 24, 40, 0.04),
+    0 14px 40px -20px rgba(16, 24, 40, 0.18);
+  --sh-raised: 0 2px 10px rgba(16, 24, 40, 0.06),
+    0 28px 64px -24px rgba(16, 24, 40, 0.24);
+  --sh-pop: 0 32px 80px -20px rgba(16, 24, 40, 0.30),
+    0 6px 20px -6px rgba(16, 24, 40, 0.10);
+
   --aurora: repeating-linear-gradient(
     100deg,
-    #0071e3 10%,
-    #a5b4fc 15%,
-    #7dd3fc 20%,
+    #60a5fa 10%,
+    #c4b5fd 15%,
+    #67e8f9 20%,
     #ddd6fe 25%,
-    #60a5fa 30%
+    #93c5fd 30%
   );
   --aurora-band: repeating-linear-gradient(
     100deg,
@@ -140,47 +157,60 @@
     transparent 12%,
     #fff 16%
   );
-  --aurora-opacity: 0.5;
+  --aurora-opacity: 0.42;
 }
 
 /* ----------------------------------------------------------------- dark -- */
 .dark {
-  --c-bg: #08090c;
-  --c-panel: rgba(30, 32, 38, 0.8);
-  --c-raised: rgba(42, 45, 53, 0.95);
-  --c-glass: rgba(22, 23, 28, 0.58);
-  --c-sunken: rgba(255, 255, 255, 0.05);
-  --c-line: rgba(255, 255, 255, 0.09);
+  --c-bg: #05060a;
+  --c-bg-2: #090b13;
+  --c-panel: rgba(18, 21, 31, 0.62);
+  --c-panel-strong: rgba(21, 25, 37, 0.86);
+  --c-raised: rgba(27, 31, 44, 0.96);
+  --c-glass: rgba(9, 11, 18, 0.66);
+  --c-sunken: rgba(255, 255, 255, 0.045);
+  --c-sunken-strong: rgba(255, 255, 255, 0.09);
+  --c-line: rgba(255, 255, 255, 0.085);
   --c-line-strong: rgba(255, 255, 255, 0.19);
-  --c-ink: #f2f4f8;
-  --c-soft: #9ba3b0;
-  --c-faint: #6d7583;
-  --c-brand: #0a84ff;
+  --c-ink: #f5f7fc;
+  --c-soft: #a3adc2;
+  --c-faint: #6f7a90;
+  --c-brand: #6392ff;
+  --c-brand-2: #a78bfa;
+  --c-brand-3: #22d3ee;
   --c-brand-ink: #ffffff;
-  --c-brand-soft: rgba(10, 132, 255, 0.18);
+  --c-brand-soft: rgba(99, 146, 255, 0.16);
   --c-on-danger: #ffffff;
-  --c-ok: #30d158;
-  --c-warn: #ffb340;
-  --c-danger: #ff6b60;
+  --c-ok: #34d399;
+  --c-warn: #fbbf24;
+  --c-danger: #fb7185;
+  --c-ok-soft: rgba(52, 211, 153, 0.12);
+  --c-warn-soft: rgba(251, 191, 36, 0.11);
+  --c-danger-soft: rgba(251, 113, 133, 0.11);
 
-  --c-chart-1: #0a84ff;
-  --c-chart-2: #7d7aff;
-  --c-chart-3: #30d158;
-  --c-chart-4: #ffb340;
-  --c-chart-5: #ff6b60;
+  --c-chart-1: #6392ff;
+  --c-chart-2: #a78bfa;
+  --c-chart-3: #34d399;
+  --c-chart-4: #fbbf24;
+  --c-chart-5: #fb7185;
 
-  --sh-card: 0 1px 0 rgba(255, 255, 255, 0.045) inset,
-    0 12px 32px -14px rgba(0, 0, 0, 0.7);
+  --c-glow-a: rgba(59, 130, 246, 0.26);
+  --c-glow-b: rgba(139, 92, 246, 0.20);
+  --c-glow-c: rgba(34, 211, 238, 0.14);
+  --c-grid-line: rgba(255, 255, 255, 0.06);
+
+  --sh-card: 0 1px 0 rgba(255, 255, 255, 0.04) inset,
+    0 18px 46px -24px rgba(0, 0, 0, 0.9);
   --sh-raised: 0 1px 0 rgba(255, 255, 255, 0.06) inset,
-    0 24px 56px -18px rgba(0, 0, 0, 0.8);
+    0 30px 70px -26px rgba(0, 0, 0, 0.92);
   --sh-pop: 0 1px 0 rgba(255, 255, 255, 0.07) inset,
-    0 40px 96px -24px rgba(0, 0, 0, 0.9);
+    0 44px 110px -28px rgba(0, 0, 0, 0.96);
 
   --aurora: repeating-linear-gradient(
     100deg,
-    #0a84ff 10%,
-    #6366f1 15%,
-    #38bdf8 20%,
+    #2563eb 10%,
+    #7c3aed 15%,
+    #06b6d4 20%,
     #a78bfa 25%,
     #3b82f6 30%
   );
@@ -192,11 +222,9 @@
     transparent 12%,
     #000 16%
   );
-  --aurora-opacity: 0.42;
+  --aurora-opacity: 0.30;
 }
 
-/* The stripe sweep Aceternity animates: two background layers drifting at
-   different rates, which is what makes the bands appear to fold. */
 @keyframes aurora {
   from {
     background-position: 50% 50%, 50% 50%;
@@ -206,6 +234,7 @@
   }
 }
 
+/* ------------------------------------------------------------------ base -- */
 @layer base {
   * {
     border-color: var(--color-line);
@@ -217,168 +246,289 @@
     height: 100%;
   }
 
-  body {
-    background-color: var(--color-bg);
-    color: var(--color-ink);
-    font-family: var(--font-sans);
-    letter-spacing: -0.006em;
-    -webkit-font-smoothing: antialiased;
-    text-rendering: optimizeLegibility;
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
   }
 
-  /* The ambient layer. A fixed pseudo-element means no page renders a
-     backdrop div, and it sits below content because the body background is
-     propagated to the canvas. Masked to fade out downwards so the aurora is
-     brightest behind the chrome and never competes with table text. */
+  body {
+    margin: 0;
+    background-color: var(--c-bg);
+    color: var(--c-ink);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.55;
+    letter-spacing: -0.008em;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow-x: hidden;
+  }
+
+  /* Ambient wash: three soft radial pools, no blur filter (the watch GPU
+     hates it) and no layout impact. */
   body::before {
     content: "";
     position: fixed;
-    inset: -25% -25% 0;
+    top: 0;
+    right: 0;
+    left: 0;
+    height: 70vh;
     z-index: -1;
     pointer-events: none;
-    background-image: var(--aurora-band), var(--aurora);
-    background-size: 300% 200%, 200% 100%;
-    background-position: 50% 50%, 50% 50%;
-    opacity: var(--aurora-opacity);
-    filter: blur(56px) saturate(140%);
-    mask-image: radial-gradient(ellipse 90% 60% at 50% 0%, #000 5%, transparent 70%);
-    -webkit-mask-image: radial-gradient(
-      ellipse 90% 60% at 50% 0%,
-      #000 5%,
-      transparent 70%
-    );
-    animation: var(--animate-aurora);
-    will-change: background-position;
+    background-image: radial-gradient(
+        58% 48% at 50% -8%,
+        var(--c-glow-a),
+        transparent 72%
+      ),
+      radial-gradient(42% 40% at 92% 6%, var(--c-glow-b), transparent 72%),
+      radial-gradient(38% 36% at 4% 16%, var(--c-glow-c), transparent 72%);
+    opacity: 0.95;
   }
 
-  /* Timestamps, IPs and checksums line up only in a monospace face. */
-  .tnum {
-    font-family: var(--font-mono);
-    font-variant-numeric: tabular-nums;
-    font-size: 0.8125em;
+  .dark body::before {
+    opacity: 1;
   }
 
   ::selection {
-    background: var(--color-brand);
-    color: var(--color-brand-ink);
+    background: var(--c-brand);
+    color: var(--c-brand-ink);
   }
 
+  /* :focus-visible is Chromium 86; keep the fallback outline for the watch. */
+  :focus {
+    outline: none;
+  }
   :focus-visible {
-    outline: 2px solid var(--color-brand);
+    outline: 2px solid var(--c-brand);
     outline-offset: 2px;
-    border-radius: 4px;
+    border-radius: 6px;
   }
 
   ::-webkit-scrollbar {
-    width: 11px;
-    height: 11px;
+    width: 10px;
+    height: 10px;
   }
   ::-webkit-scrollbar-track {
     background: transparent;
   }
   ::-webkit-scrollbar-thumb {
-    background: var(--color-line-strong);
+    background: var(--c-line-strong);
     border: 3px solid transparent;
     background-clip: content-box;
     border-radius: 999px;
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: var(--color-faint);
+    background: var(--c-faint);
     background-clip: content-box;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    margin: 0;
+    font-weight: 600;
+    letter-spacing: -0.022em;
+    color: var(--c-ink);
+  }
+
+  p {
+    margin: 0;
+  }
+
+  /* Native date/time widgets are close to invisible in dark mode. */
+  .dark input[type="datetime-local"]::-webkit-calendar-picker-indicator,
+  .dark input[type="date"]::-webkit-calendar-picker-indicator {
+    filter: invert(0.8);
   }
 }
 
+/* ------------------------------------------------------------- utilities -- */
 @layer utilities {
-  .scrollbar-none {
-    scrollbar-width: none;
+  /* ---------------------------------------------------------------- colour */
+  .eyebrow {
+    font-size: 0.6875rem;
+    line-height: 1.2;
+    font-weight: 600;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--c-faint);
   }
-  .scrollbar-none::-webkit-scrollbar {
+
+  .display-title {
+    font-size: clamp(1.5rem, 1.1rem + 1.4vw, 2.1rem);
+    line-height: 1.1;
+    font-weight: 650;
+    letter-spacing: -0.035em;
+    color: var(--c-ink);
+  }
+
+  .text-gradient {
+    background-image: linear-gradient(
+      100deg,
+      var(--c-brand-3),
+      var(--c-brand),
+      var(--c-brand-2)
+    );
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .tnum {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+  }
+
+  /* --------------------------------------------------------------- surface */
+  .surface {
+    position: relative;
+    background-color: var(--c-panel);
+    border: 1px solid var(--c-line);
+    border-radius: var(--radius-panel);
+    box-shadow: var(--sh-card);
+    -webkit-backdrop-filter: blur(16px) saturate(135%);
+    backdrop-filter: blur(16px) saturate(135%);
+  }
+
+  .surface-strong {
+    position: relative;
+    background-color: var(--c-panel-strong);
+    border: 1px solid var(--c-line-strong);
+    border-radius: var(--radius-panel);
+    box-shadow: var(--sh-raised);
+    -webkit-backdrop-filter: blur(22px) saturate(145%);
+    backdrop-filter: blur(22px) saturate(145%);
+  }
+
+  .surface-quiet {
+    position: relative;
+    background-color: var(--c-sunken);
+    border: 1px solid transparent;
+    border-radius: var(--radius-panel);
+  }
+
+  .surface-danger {
+    position: relative;
+    background-color: var(--c-danger-soft);
+    border: 1px solid var(--c-danger);
+    border-color: rgba(217, 45, 32, 0.28);
+    border-radius: var(--radius-panel);
+  }
+
+  .surface-warn {
+    position: relative;
+    background-color: var(--c-warn-soft);
+    border: 1px solid rgba(180, 83, 9, 0.28);
+    border-radius: var(--radius-panel);
+  }
+
+  .surface-ok {
+    position: relative;
+    background-color: var(--c-ok-soft);
+    border: 1px solid rgba(14, 138, 75, 0.26);
+    border-radius: var(--radius-panel);
+  }
+
+  .surface-hover {
+    transition: transform 0.18s ease, border-color 0.18s ease,
+      box-shadow 0.18s ease, background-color 0.18s ease;
+  }
+
+  .glass-chrome {
+    background-color: var(--c-glass);
+    border-color: var(--c-line);
+    -webkit-backdrop-filter: blur(24px) saturate(150%);
+    backdrop-filter: blur(24px) saturate(150%);
+  }
+
+  /* --------------------------------------------------------------- layout */
+  .app-vh {
+    height: 100vh;
+  }
+  .app-vh-min {
+    min-height: 100vh;
+  }
+
+  .inset-full {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+  }
+
+  .hide-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .hide-scrollbar::-webkit-scrollbar {
     display: none;
   }
 
-  /* ------------------------------------------------- Aceternity 组件的 CSS 层 */
-  /* 旋转锥形渐变描边（MovingBorder / HoverBorderGradient）：超大渐变层绕
-     中心旋转，被外层 overflow-hidden 裁成细边。Chromium 81 安全；
-     reduced-motion 下不旋转，只剩静态渐变。 */
-  .border-spin-bg {
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    width: 300%;
-    height: 300%;
-    margin-left: -150%;
-    margin-top: -150%;
-    animation: border-spin 4s linear infinite;
-    transition: opacity 0.25s ease;
-  }
-  @keyframes border-spin {
-    to {
-      transform: rotate(360deg);
-    }
+  .scroll-x {
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
   }
 
-  /* Meteors 流星：短渐变尾迹 + 斜向位移。 */
-  .meteor {
-    animation: meteor-effect 6s linear infinite;
-  }
-  .meteor::before {
-    content: "";
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    width: 60px;
-    height: 1px;
-    background: linear-gradient(90deg, var(--c-faint), transparent);
-    transform: translate(-50%, -50%);
-  }
-  @keyframes meteor-effect {
-    0% {
-      transform: rotate(215deg) translateX(0);
-      opacity: 1;
-    }
-    70% {
-      opacity: 1;
-    }
-    100% {
-      transform: rotate(215deg) translateX(-420px);
-      opacity: 0;
-    }
+  .tap {
+    min-height: 44px;
   }
 
-  @media (prefers-reduced-motion: reduce) {
-    .border-spin-bg {
-      animation: none;
-    }
-    .meteor {
-      display: none;
-    }
+  .tap-row {
+    min-height: 48px;
+    transition: background-color 0.12s ease;
+  }
+  .tap-row:active {
+    background-color: var(--c-sunken);
   }
 
-  /* Chrome (sidebar, toolbar, sheets) is translucent so the aurora shows
-     through; content surfaces stay near-opaque so dense tables and screen
-     frames remain readable. */
-  .glass {
-    background-color: var(--c-panel);
-    -webkit-backdrop-filter: blur(24px) saturate(180%);
-    backdrop-filter: blur(24px) saturate(180%);
+  .safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom);
   }
-  .glass-raised {
-    background-color: var(--c-raised);
-    -webkit-backdrop-filter: blur(28px) saturate(180%);
-    backdrop-filter: blur(28px) saturate(180%);
-  }
-  .glass-chrome {
-    background-color: var(--c-glass);
-    -webkit-backdrop-filter: blur(28px) saturate(180%);
-    backdrop-filter: blur(28px) saturate(180%);
+  .safe-top {
+    padding-top: env(safe-area-inset-top);
   }
 
-  /* Subtle checkerboard behind frames, so letterboxing is obvious. */
+  /* --------------------------------------------------------------- motion */
+  .lift {
+    transition: transform 0.18s ease, border-color 0.18s ease,
+      box-shadow 0.18s ease;
+  }
+
+  .animate-sm-pulse {
+    animation: sm-pulse 2s ease-in-out infinite;
+  }
+  .animate-sm-in {
+    animation: sm-in 0.22s ease-out both;
+  }
+  .animate-sm-fade {
+    animation: sm-fade 0.24s ease-out both;
+  }
+
+  /* Dialog content: one class so the mobile/watch bottom-sheet swap is
+     consistent and so centering uses `transform` (Chromium 81 lacks the
+     individual `translate` property Tailwind v4 emits). */
+  /* Aspect boxes with a Chromium 81 padding fallback. Children that should
+     fill the box use .inset-full. */
+  .ratio-16-9,
+  .ratio-16-10,
+  .ratio-4-3,
+  .ratio-square {
+    position: relative;
+  }
+
   .frame-stage {
-    background-image: linear-gradient(45deg, var(--color-sunken) 25%, transparent 25%),
-      linear-gradient(-45deg, var(--color-sunken) 25%, transparent 25%),
-      linear-gradient(45deg, transparent 75%, var(--color-sunken) 75%),
-      linear-gradient(-45deg, transparent 75%, var(--color-sunken) 75%);
+    background-image: linear-gradient(
+        45deg,
+        var(--c-sunken) 25%,
+        transparent 25%
+      ),
+      linear-gradient(-45deg, var(--c-sunken) 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, var(--c-sunken) 75%),
+      linear-gradient(-45deg, transparent 75%, var(--c-sunken) 75%);
     background-size: 18px 18px;
     background-position: 0 0, 0 9px, 9px -9px, -9px 0;
   }
@@ -392,24 +542,16 @@
       opacity: 0.35;
     }
   }
-  .animate-sm-pulse {
-    animation: sm-pulse 2s ease-in-out infinite;
-  }
-
   @keyframes sm-in {
     from {
       opacity: 0;
-      transform: translateY(4px);
+      transform: translateY(6px);
     }
     to {
       opacity: 1;
-      transform: none;
+      transform: translateY(0);
     }
   }
-  .animate-sm-in {
-    animation: sm-in 0.16s ease-out both;
-  }
-
   @keyframes sm-fade {
     from {
       opacity: 0;
@@ -418,39 +560,22 @@
       opacity: 1;
     }
   }
-  .animate-sm-fade {
-    animation: sm-fade 0.2s ease-out both;
-  }
+}
 
-  @media (prefers-reduced-motion: reduce) {
-    body::before {
-      animation: none;
-    }
-    .animate-sm-pulse,
-    .animate-sm-in,
-    .animate-sm-fade {
-      animation: none;
-    }
+@media (hover: hover) and (pointer: fine) {
+  .surface-hover:hover {
+    transform: translateY(-2px);
+    border-color: var(--c-line-strong);
+    box-shadow: var(--sh-raised);
+  }
+  .lift:hover {
+    transform: translateY(-2px);
   }
 }
 
 /* ==========================================================================
-   Chromium 81 兼容回退（0.3.1 F39）——目标平台是手表端 WebView。
-   JS 侧 shim 在 src/compat.ts，这里补 CSS 面：
-   * 100dvh（Ch108）→ 100vh 回退；用 .app-vh / .app-vh-min 替代 Tailwind 的
-     h-[100dvh] / min-h-[100dvh]（后者在不支持的引擎上整条规则被丢弃，外壳
-     高度塌陷、滚动区失效）。
-   * aspect-ratio（Ch88）→ padding-top 盒子回退（.aspect-video 由 Tailwind
-     生成同名类，这里按类名补 @supports not 分支）。
-   * flex 容器里的 gap（Ch84）：已知的可接受降级——布局仍成立，仅间距丢失；
-     若手表实机 Ch ≥84 可删除本注释。不要为此改 margin 方案（会破坏桌面端）。
+   Chromium 81 compatibility fallbacks
    ========================================================================== */
-.app-vh {
-  height: 100vh;
-}
-.app-vh-min {
-  min-height: 100vh;
-}
 @supports (height: 100dvh) {
   .app-vh {
     height: 100dvh;
@@ -459,17 +584,301 @@
     min-height: 100dvh;
   }
 }
-@supports not (aspect-ratio: 16 / 9) {
-  .aspect-video {
-    position: relative;
+
+@supports (aspect-ratio: 16 / 9) {
+  .ratio-16-9 {
+    aspect-ratio: 16 / 9;
   }
-  .aspect-video::before {
+  .ratio-16-10 {
+    aspect-ratio: 16 / 10;
+  }
+  .ratio-4-3 {
+    aspect-ratio: 4 / 3;
+  }
+  .ratio-square {
+    aspect-ratio: 1 / 1;
+  }
+}
+
+@supports not (aspect-ratio: 16 / 9) {
+  .ratio-16-9::before {
     content: "";
     display: block;
     padding-top: 56.25%;
   }
-  .aspect-video > * {
+  .ratio-16-10::before {
+    content: "";
+    display: block;
+    padding-top: 62.5%;
+  }
+  .ratio-4-3::before {
+    content: "";
+    display: block;
+    padding-top: 75%;
+  }
+  .ratio-square::before {
+    content: "";
+    display: block;
+    padding-top: 100%;
+  }
+  .ratio-16-9 > *,
+  .ratio-16-10 > *,
+  .ratio-4-3 > *,
+  .ratio-square > * {
     position: absolute;
-    inset: 0;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+  }
+}
+
+/* Watch / tiny screens: bottom-sheet dialogs, no heavy blur, no fixed dock
+   padding surprises. */
+@media (max-width: 640px) {
+  .ui-dialog {
+    top: auto;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    transform: none;
+    width: 100%;
+    max-width: 100%;
+    max-height: 90vh;
+    border-radius: 1.375rem 1.375rem 0 0;
+    padding-bottom: calc(1rem + env(safe-area-inset-bottom));
+  }
+}
+
+@media (max-width: 420px), (prefers-reduced-motion: reduce) {
+  .surface,
+  .surface-strong,
+  .surface-danger,
+  .surface-warn,
+  .surface-ok,
+  .glass-chrome {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+  .surface,
+  .surface-strong {
+    background-color: var(--c-panel-strong);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body::before {
+    animation: none;
+  }
+  .animate-sm-pulse,
+  .animate-sm-in,
+  .animate-sm-fade {
+    animation: none;
+  }
+  .surface-hover,
+  .lift {
+    transition: none;
+  }
+  .surface-hover:hover,
+  .lift:hover {
+    transform: none;
+  }
+}
+
+/* Coarse pointers: nothing may be smaller than a fingertip. */
+@media (pointer: coarse) {
+  button,
+  [role="button"],
+  a.tap-target {
+    min-height: 44px;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Dialog geometry (unlayered on purpose: it must win over Tailwind utilities,
+   and it cannot use `translate` utilities — Chromium 81 lacks the individual
+   transform properties Tailwind v4 emits). `--dialog-max` is set inline by
+   DialogContent per size.
+   ------------------------------------------------------------------------- */.ui-dialog {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(calc(100% - 1.5rem), var(--dialog-max, 34rem));
+  max-width: none;
+  max-height: 88vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-radius: var(--radius-window);
+}
+
+/* Watch: bottom sheet, full width, safe-area aware. */
+@media (max-width: 640px) {
+  .ui-dialog {
+    top: auto;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    transform: none;
+    width: 100%;
+    max-width: 100%;
+    max-height: 90vh;
+    border-radius: 1.375rem 1.375rem 0 0;
+    padding-bottom: calc(1.25rem + env(safe-area-inset-bottom));
+  }
+}
+
+/* Switch: explicit transform (Chromium 81) + a 44px pseudo hit area. */
+.ui-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  width: 48px;
+  height: 28px;
+  min-height: 28px;
+  padding: 2px;
+  border-radius: 999px;
+  border: 1px solid var(--c-line);
+  background-color: var(--c-sunken-strong);
+  transition: background-color 0.18s ease, border-color 0.18s ease;
+  outline: none;
+  cursor: pointer;
+}
+
+.ui-switch::after {
+  content: "";
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  bottom: -8px;
+  left: -8px;
+  border-radius: 999px;
+}
+
+.ui-switch[data-checked] {
+  background-color: var(--c-brand);
+  border-color: var(--c-brand);
+}
+
+.ui-switch[data-disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ui-switch:focus-visible {
+  outline: 2px solid var(--c-brand);
+  outline-offset: 2px;
+}
+
+.ui-switch-thumb {
+  display: block;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background-color: #fff;
+  box-shadow: 0 1px 3px rgba(2, 6, 23, 0.35);
+  transform: translateX(0);
+  transition: transform 0.18s ease;
+}
+
+.ui-switch[data-checked] .ui-switch-thumb {
+  transform: translateX(20px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-switch,
+  .ui-switch-thumb {
+    transition: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Brand mark: a small gradient orb with an orbit ring. The old logo was a flat
+   letter block; this gives the shell a recognisable mark at 320px too.
+   ------------------------------------------------------------------------- */
+.ace-brand-orb {
+  background-image: linear-gradient(145deg, var(--c-brand-soft), transparent 70%);
+  box-shadow: 0 0 22px -8px var(--c-brand);
+}
+
+.ace-brand-orb__ring {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  bottom: 3px;
+  left: 3px;
+  border-radius: 0.7rem;
+  border: 1px solid var(--c-line-strong);
+  pointer-events: none;
+}
+
+.ace-brand-orb__ring::after {
+  content: "";
+  position: absolute;
+  top: -2px;
+  left: 50%;
+  width: 4px;
+  height: 4px;
+  margin-left: -2px;
+  border-radius: 999px;
+  background: var(--c-brand-3);
+  box-shadow: 0 0 8px var(--c-brand-3);
+}
+
+@keyframes ace-orb-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Floating dock override. The kit ships a full-width bottom bar; the redesign
+   uses a detached capsule so it reads as a floating control rather than page
+   chrome, and so the round watch corners never clip it.
+   ------------------------------------------------------------------------- */
+.ace-dock.ace-dock--floating {
+  right: 0.75rem;
+  bottom: calc(0.625rem + env(safe-area-inset-bottom));
+  left: 0.75rem;
+  top: auto;
+  width: auto;
+  max-width: 34rem;
+  margin-left: auto;
+  margin-right: auto;
+  padding: 0.375rem;
+  border: 1px solid var(--c-line-strong);
+  border-radius: 1.25rem;
+  background-color: var(--c-panel-strong);
+  box-shadow: var(--sh-raised);
+}
+
+.ace-dock.ace-dock--floating .ace-dock__list {
+  gap: 0.25rem;
+}
+
+.ace-dock.ace-dock--floating .ace-dock__link {
+  border-radius: 0.9rem;
+}
+
+.ace-dock.ace-dock--floating .ace-dock__link.is-active {
+  background-color: var(--c-brand);
+  color: var(--c-brand-ink);
+}
+
+.ace-dock.ace-dock--floating .ace-dock__link.is-active .ace-dock__icon {
+  color: var(--c-brand-ink);
+}
+
+@media (max-width: 480px) and (max-height: 560px), (max-width: 340px) {
+  .ace-dock.ace-dock--floating {
+    right: 0.375rem;
+    bottom: calc(0.375rem + env(safe-area-inset-bottom));
+    left: 0.375rem;
+    border-radius: 1rem;
+    padding: 0.25rem;
+  }
+  .ace-dock.ace-dock--floating .ace-dock__link {
+    min-height: 44px;
   }
 }

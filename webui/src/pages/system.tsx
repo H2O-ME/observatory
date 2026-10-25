@@ -1,10 +1,25 @@
 import { useQuery } from "@tanstack/react-query";
-import { Archive, Database, HardDrive, PackageCheck, Radio, RefreshCw, ServerCog, Timer } from "lucide-react";
+import type { ReactNode } from "react";
+import {
+  Archive,
+  Database,
+  HardDrive,
+  Images,
+  MonitorSmartphone,
+  PackageCheck,
+  Radio,
+  RefreshCw,
+  ServerCog,
+  Timer,
+} from "lucide-react";
 
-import { Banner, ErrorBlock, LoadingBlock } from "@/components/async-state";
-import { Meter } from "@/components/meter";
-import { PageShell } from "@/components/page-shell";
+import { BentoGridItem, GlowCard, GridPattern } from "@/components/aceternity";
+import { ErrorBlock, LoadingBlock } from "@/components/async-state";
+import { RingMeter } from "@/components/meter";
+import { PageHeader } from "@/components/page-header";
+import { StatCard } from "@/components/stat-card";
 import { Button } from "@/components/ui/button";
+import { useViewport } from "@/hooks/use-viewport";
 import { api, isApiError } from "@/lib/api";
 import { formatBytes, formatDateTime, formatDuration } from "@/lib/format";
 import { useServerNow } from "@/store/clock";
@@ -27,9 +42,17 @@ const CARRIER_LABEL: Record<string, string> = {
  *
  * Known gap: the schema version is not exposed by any endpoint yet (`core/db.py`
  * has `SCHEMA_VERSION = 3`), so the page says so instead of inventing a value.
+ *
+ * Presentation (0.4): four telemetry tiles, a lit storage ring, then two-column
+ * source cards; one column on phones/watches.
  */
 export function SystemPage() {
   const now = useServerNow();
+  const viewport = useViewport();
+  const desktop = viewport === "desktop";
+  const watch = viewport === "watch";
+  const stack = watch ? "space-y-3" : "space-y-5";
+
   const systemQuery = useQuery({ queryKey: ["system"], queryFn: api.getSystem, refetchInterval: 15_000 });
   const healthQuery = useQuery({ queryKey: ["health"], queryFn: api.getHealth, refetchInterval: 15_000 });
   const settingsQuery = useQuery({ queryKey: ["settings"], queryFn: api.getSettings, staleTime: 60_000 });
@@ -55,214 +78,242 @@ export function SystemPage() {
     return typeof value === "string" ? value : "";
   };
   const bool = (key: string): boolean => Boolean(values[key]);
+  const refreshing = systemQuery.isFetching || healthQuery.isFetching;
 
   return (
-    <PageShell
-      title="系统"
-      subtitle="服务端详细状态：版本、载波、数据量、媒体用量与保留策略"
-      actions={
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => {
-            void systemQuery.refetch();
-            void healthQuery.refetch();
-          }}
-          disabled={systemQuery.isFetching || healthQuery.isFetching}
-        >
-          <RefreshCw className={cn("size-3.5", (systemQuery.isFetching || healthQuery.isFetching) && "animate-spin")} />
-          刷新
-        </Button>
-      }
-    >
+    <div className="w-full min-w-0">
+      <PageHeader
+        icon={ServerCog}
+        title="系统"
+        description="版本、载波、媒体用量与保留策略；全部来自服务端接口。"
+        actions={
+          <Button
+            size="sm"
+            variant="outline"
+            className="tap"
+            onClick={() => {
+              void systemQuery.refetch();
+              void healthQuery.refetch();
+            }}
+            disabled={refreshing}
+          >
+            <RefreshCw className={cn("size-3.5", refreshing && "animate-spin")} />
+            刷新
+          </Button>
+        }
+      />
 
-      {systemQuery.isError ? (
-        <ErrorBlock
-          message={isApiError(systemQuery.error) ? systemQuery.error.message : "无法读取系统状态"}
-          retryable
-          onRetry={() => void systemQuery.refetch()}
-        />
-      ) : systemQuery.isLoading ? (
-        <LoadingBlock label="正在读取系统状态…" rows={5} />
-      ) : null}
+      <div className={cn("mt-4 min-w-0 sm:mt-5", stack)}>
+        {systemQuery.isError ? (
+          <ErrorBlock
+            message={isApiError(systemQuery.error) ? systemQuery.error.message : "无法读取系统状态"}
+            retryable
+            onRetry={() => void systemQuery.refetch()}
+          />
+        ) : systemQuery.isLoading ? (
+          <LoadingBlock label="正在读取系统状态…" rows={5} />
+        ) : null}
 
-      {system ? (
-        <>
-          <section className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
-            {[
-              { label: "服务端版本", value: `v${system.version || "—"}` },
-              { label: "运行时长", value: formatDuration(system.uptime_s) },
-              { label: "设备", value: String(system.devices) },
-              { label: "画面", value: String(system.frames) },
-              { label: "命令记录", value: String(system.commands) },
-              { label: "控制会话", value: String(system.control_sessions) },
-            ].map((item) => (
-              <div key={item.label} className="rounded-panel border border-line bg-panel p-2.5">
-                <p className="text-[0.7rem] text-faint">{item.label}</p>
-                <p className="mt-0.5 truncate font-mono text-sm font-semibold text-ink">{item.value}</p>
+        {system ? (
+          <>
+            <section aria-label="服务端指标" className="grid min-w-0 grid-cols-2 gap-3 sm:gap-5 lg:grid-cols-4">
+              <StatCard
+                label="服务端版本"
+                value={`v${system.version || "—"}`}
+                hint="控制台服务端"
+                icon={ServerCog}
+                tone="brand"
+              />
+              <StatCard label="运行时长" value={formatDuration(system.uptime_s)} hint="自服务端启动" icon={Timer} />
+              <StatCard
+                label="设备"
+                value={String(system.devices)}
+                hint={`WS ${carriers.ws ?? "—"} · 轮询 ${carriers.poll ?? "—"}`}
+                icon={MonitorSmartphone}
+                tone="brand"
+              />
+              <StatCard
+                label="画面"
+                value={String(system.frames)}
+                hint={formatBytes(storage?.frames_bytes)}
+                icon={Images}
+              />
+            </section>
+
+            {/* ------------------------------------------------------ storage hero */}
+            <GlowCard isStatic={!desktop} className="min-w-0" contentClassName="p-3 sm:p-5">
+              <div className="grid min-w-0 gap-4 md:grid-cols-[auto_minmax(0,1fr)] md:items-center md:gap-6">
+                <div className="flex min-w-0 justify-center md:justify-start">
+                  <RingMeter label="磁盘占用" value={diskUsedPercent} />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="flex min-w-0 items-center text-[0.98rem] font-semibold tracking-tight text-ink">
+                    <span className="mr-2 flex size-7 shrink-0 items-center justify-center rounded-lg border border-line bg-sunken text-brand">
+                      <Database className="size-3.5" />
+                    </span>
+                    数据量与存储
+                  </h2>
+                  <p className="mt-1 text-[0.75rem] leading-relaxed text-soft">
+                    磁盘已用 <span className="tnum">{diskUsedPercent ?? "—"}%</span>（服务端计算）。
+                  </p>
+                  <dl className="mt-2.5 grid min-w-0 grid-cols-2 gap-1.5 sm:gap-2">
+                    <StorageTile label="数据库" value={formatBytes(storage?.db_bytes)} />
+                    <StorageTile label="画面文件" value={formatBytes(storage?.frames_bytes)} />
+                    <StorageTile label="缩略图" value={formatBytes(storage?.thumbs_bytes)} />
+                    <StorageTile
+                      label="数据卷"
+                      value={`${formatBytes(storage?.disk_free)} 可用 / ${formatBytes(storage?.disk_total)} 总容量`}
+                    />
+                  </dl>
+                  {num("storage_quota_mb") !== null ? (
+                    <p className="mt-2 text-[0.72rem] leading-relaxed text-faint">
+                      数据卷配额 {formatBytes((num("storage_quota_mb") ?? 0) * 1024 * 1024)}，回收目标占用{" "}
+                      {num("quota_target") ?? "—"}%。
+                    </p>
+                  ) : null}
+                </div>
               </div>
-            ))}
-          </section>
+            </GlowCard>
 
-          <div className="grid gap-3 lg:grid-cols-2">
-            <section className="rounded-panel border border-line bg-panel p-4">
-              <h2 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-soft">
-                <Radio className="size-3.5" />
-                设备载波
-              </h2>
-              {carrierEntries.length === 0 ? (
-                <p className="text-xs text-faint">当前没有任何受控端链路。</p>
-              ) : (
-                <ul className="space-y-1 text-xs">
-                  {carrierEntries.map(([carrier, count]) => (
-                    <li key={carrier} className="flex items-center justify-between gap-2">
-                      <span className="text-soft">
-                        <span className="font-mono">{carrier}</span>
-                        {CARRIER_LABEL[carrier] ? ` · ${CARRIER_LABEL[carrier]}` : ""}
-                      </span>
-                      <span className="font-mono text-ink">{count}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-              <p className="mt-1.5 text-[0.7rem] leading-relaxed text-faint">
-                来自服务端链路注册表（与 <span className="font-mono">/api/v1/health</span> 同源）；控制台连接数不在此列。
-              </p>
-            </section>
+            {/* -------------------------------------------------------- source cards */}
+            <div className="grid min-w-0 gap-4 sm:gap-5 lg:grid-cols-2">
+              <BentoGridItem
+                title="设备载波"
+                description="载波 → 会话数（链路注册表快照）"
+                icon={<Radio />}
+              >
+                {carrierEntries.length === 0 ? (
+                  <div className="relative mt-2 min-w-0 overflow-hidden rounded-lg border border-dashed border-line bg-sunken px-2.5 py-3 text-center">
+                    <GridPattern
+                      className="pointer-events-none absolute inset-full opacity-30"
+                      stroke="var(--c-grid-line)"
+                      fade="radial"
+                    />
+                    <p className="relative text-[0.75rem] text-faint">当前没有任何受控端链路。</p>
+                  </div>
+                ) : (
+                  <dl className="mt-2 grid min-w-0">
+                    {carrierEntries.map(([carrier, count]) => (
+                      <KvRow key={carrier} label={<span className="break-all">{carrier}{CARRIER_LABEL[carrier] ? ` · ${CARRIER_LABEL[carrier]}` : ""}</span>}>
+                        <span className="tnum font-semibold text-ink">{count}</span>
+                      </KvRow>
+                    ))}
+                  </dl>
+                )}
+              </BentoGridItem>
 
-            <section className="rounded-panel border border-line bg-panel p-4">
-              <h2 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-soft">
-                <Timer className="size-3.5" />
-                运行与命令
-              </h2>
-              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-                <dt className="text-faint">服务端当前时间</dt>
-                <dd className="text-soft">{formatDateTime(now ?? system.server_time_ms)}</dd>
-                <dt className="text-faint">待处理命令</dt>
-                <dd className="text-soft">{system.pending_commands}</dd>
-                <dt className="text-faint">控制会话</dt>
-                <dd className="text-soft">{system.control_sessions}</dd>
-                <dt className="text-faint">schema 版本</dt>
-                <dd className="text-warn">服务端未上报（建议 /system 补充 SCHEMA_VERSION）</dd>
-                <dt className="text-faint">安装</dt>
-                <dd className="text-soft">
-                  {system.install.enabled ? `可用 · 待用令牌 ${system.install.available_tokens}` : "未启用"}
-                </dd>
-              </dl>
-            </section>
-          </div>
+              <BentoGridItem title="运行与命令" description="服务端时钟与命令队列" icon={<Timer />}>
+                <dl className="mt-2 grid min-w-0">
+                  <KvRow label="服务端时间">
+                    <span className="tnum break-all">{formatDateTime(now ?? system.server_time_ms)}</span>
+                  </KvRow>
+                  <KvRow label="命令记录">
+                    <span className="tnum">{system.commands}</span>
+                  </KvRow>
+                  <KvRow label="待处理命令">
+                    <span className={cn("tnum", system.pending_commands > 0 ? "font-semibold text-warn" : "text-soft")}>
+                      {system.pending_commands}
+                    </span>
+                  </KvRow>
+                  <KvRow label="控制会话">
+                    <span className="tnum">{system.control_sessions}</span>
+                  </KvRow>
+                  <KvRow label="schema 版本">
+                    <span className="text-[0.72rem] leading-relaxed text-warn">服务端未上报</span>
+                  </KvRow>
+                  <KvRow label="安装">
+                    <span className="break-all">
+                      {system.install.enabled ? `可用 · 待用令牌 ${system.install.available_tokens}` : "未启用"}
+                    </span>
+                  </KvRow>
+                </dl>
+              </BentoGridItem>
 
-          <section className="rounded-panel border border-line bg-panel p-4">
-            <h2 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-soft">
-              <Database className="size-3.5" />
-              数据量与存储
-            </h2>
-            <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-              <dt className="text-faint">数据库</dt>
-              <dd className="text-soft">{formatBytes(storage?.db_bytes)}</dd>
-              <dt className="text-faint">画面文件</dt>
-              <dd className="text-soft">{formatBytes(storage?.frames_bytes)}</dd>
-              <dt className="text-faint">缩略图</dt>
-              <dd className="text-soft">{formatBytes(storage?.thumbs_bytes)}</dd>
-              <dt className="text-faint">数据卷</dt>
-              <dd className="text-soft">
-                {formatBytes(storage?.disk_free)} 可用 / {formatBytes(storage?.disk_total)} 总容量
-              </dd>
-            </dl>
-            <div className="mt-2">
-              <Meter label={`磁盘占用（服务端计算 ${diskUsedPercent ?? "—"}%）`} value={diskUsedPercent} />
+              <BentoGridItem title="保留策略" description="全局设置，服务端实际生效值" icon={<HardDrive />}>
+                {settingsQuery.isError ? (
+                  <p className="mt-2 text-[0.78rem] leading-relaxed text-warn">无法读取设置中的保留策略值。</p>
+                ) : (
+                  <dl className="mt-2 grid min-w-0">
+                    <KvRow label="画面保留">
+                      <span className="tnum">{num("frame_retention_days") ?? "—"} 天</span>
+                    </KvRow>
+                    <KvRow label="保留任务间隔">
+                      <span className="tnum">{num("media_retention_interval_s") ?? "—"} 秒</span>
+                    </KvRow>
+                    <KvRow label="审计保留">
+                      <span className="tnum">{num("audit_retention_days") ?? "—"} 天</span>
+                    </KvRow>
+                    <KvRow label="命令记录保留">
+                      <span className="tnum">{num("command_retention_days") ?? "—"} 天</span>
+                    </KvRow>
+                  </dl>
+                )}
+              </BentoGridItem>
+
+              <BentoGridItem title="归档配置" description="远端仓库与失败队列" icon={<Archive />}>
+                <dl className="mt-2 grid min-w-0">
+                  <KvRow label="归档开关">
+                    <span className={bool("archive_enabled") ? "text-ok" : "text-soft"}>
+                      {bool("archive_enabled") ? "已开启" : "已关闭"}
+                    </span>
+                  </KvRow>
+                  <KvRow label="仓库">
+                    <span className="break-all font-mono text-[0.74rem]">{text("archive_repo") || "—"}</span>
+                  </KvRow>
+                  <KvRow label="分支">
+                    <span className="break-all font-mono text-[0.74rem]">{text("archive_branch") || "—"}</span>
+                  </KvRow>
+                  <KvRow label="路径前缀">
+                    <span className="break-all font-mono text-[0.74rem]">{text("archive_path_prefix") || "—"}</span>
+                  </KvRow>
+                </dl>
+              </BentoGridItem>
+
+              <BentoGridItem title="安装与访问" description="控制台域名与安装脚本" icon={<PackageCheck />}>
+                <dl className="mt-2 grid min-w-0">
+                  <KvRow label="控制台域名">
+                    <span className="break-all">{system.console_host || "—"}</span>
+                  </KvRow>
+                  <KvRow label="备用域名">
+                    <span className="break-all">{system.base_urls.join("  |  ") || "—"}</span>
+                  </KvRow>
+                  <KvRow label="安装版本">
+                    <span className="tnum">v{system.install.version || "—"}</span>
+                  </KvRow>
+                  <KvRow label="安装脚本">
+                    <span className="break-all font-mono text-[0.7rem]">
+                      {system.install.script_url || "—"}
+                      <br />
+                      {system.install.cmd_url || "—"}
+                    </span>
+                  </KvRow>
+                </dl>
+              </BentoGridItem>
+
             </div>
-            {num("storage_quota_mb") !== null ? (
-              <p className="mt-1.5 text-[0.7rem] leading-relaxed text-faint">
-                数据卷配额 {formatBytes((num("storage_quota_mb") ?? 0) * 1024 * 1024)}，回收目标占用{" "}
-                {num("quota_target") ?? "—"}%。
-              </p>
-            ) : null}
-          </section>
+          </>
+        ) : null}
+      </div>
+    </div>
+  );
+}
 
-          <section className="rounded-panel border border-line bg-panel p-4">
-            <h2 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-soft">
-              <HardDrive className="size-3.5" />
-              保留策略（全局设置，服务端实际生效值）
-            </h2>
-            {settingsQuery.isError ? (
-              <p className="text-xs text-warn">无法读取设置中的保留策略值。</p>
-            ) : (
-              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-                <dt className="text-faint">画面保留</dt>
-                <dd className="text-soft">{num("frame_retention_days") ?? "—"} 天</dd>
-                <dt className="text-faint">保留任务间隔</dt>
-                <dd className="text-soft">{num("media_retention_interval_s") ?? "—"} 秒</dd>
-                <dt className="text-faint">审计保留</dt>
-                <dd className="text-soft">{num("audit_retention_days") ?? "—"} 天</dd>
-                <dt className="text-faint">命令记录保留</dt>
-                <dd className="text-soft">{num("command_retention_days") ?? "—"} 天</dd>
-              </dl>
-            )}
-            <p className="mt-1.5 text-[0.7rem] leading-relaxed text-faint">
-              这里的值来自全局设置；设备级覆盖（设备页“设置”页签）不会改变保留策略在服务器上的执行值。
-            </p>
-          </section>
+/** One compact storage figure. */
+function StorageTile({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 rounded-xl border border-line bg-sunken p-2">
+      <dt className="truncate text-[0.66rem] font-medium uppercase tracking-[0.12em] text-faint">{label}</dt>
+      <dd className="tnum mt-0.5 min-w-0 break-words text-[0.8rem] font-semibold text-ink">{value}</dd>
+    </div>
+  );
+}
 
-          <div className="grid gap-3 lg:grid-cols-2">
-            <section className="rounded-panel border border-line bg-panel p-4">
-              <h2 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-soft">
-                <Archive className="size-3.5" />
-                归档配置
-              </h2>
-              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-                <dt className="text-faint">归档开关</dt>
-                <dd className="text-soft">{bool("archive_enabled") ? "已开启" : "已关闭"}</dd>
-                <dt className="text-faint">仓库</dt>
-                <dd className="break-all text-soft">{text("archive_repo") || "—"}</dd>
-                <dt className="text-faint">分支</dt>
-                <dd className="text-soft">{text("archive_branch") || "—"}</dd>
-                <dt className="text-faint">路径前缀</dt>
-                <dd className="text-soft">{text("archive_path_prefix") || "—"}</dd>
-              </dl>
-              <p className="mt-1.5 text-[0.7rem] leading-relaxed text-faint">
-                队列与失败明细见「备份」页；归档令牌（secret）不会出现在浏览器。
-              </p>
-            </section>
-
-            <section className="rounded-panel border border-line bg-panel p-4">
-              <h2 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-soft">
-                <PackageCheck className="size-3.5" />
-                安装与访问
-              </h2>
-              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-                <dt className="text-faint">控制台域名</dt>
-                <dd className="break-all text-soft">{system.console_host || "—"}</dd>
-                <dt className="text-faint">备用域名</dt>
-                <dd className="break-all text-soft">{system.base_urls.join("  |  ") || "—"}</dd>
-                <dt className="text-faint">安装版本</dt>
-                <dd className="font-mono text-soft">v{system.install.version || "—"}</dd>
-                <dt className="text-faint">安装脚本</dt>
-                <dd className="break-all font-mono text-[0.7rem] text-soft">
-                  {system.install.script_url || "—"} · {system.install.cmd_url || "—"}
-                </dd>
-              </dl>
-            </section>
-          </div>
-
-          <section className="rounded-panel border border-line bg-panel p-4">
-            <h2 className="mb-1.5 flex items-center gap-1.5 text-sm font-semibold text-soft">
-              <ServerCog className="size-3.5" />
-              页面说明
-            </h2>
-            <ul className="list-disc space-y-0.5 pl-4 text-[0.7rem] leading-relaxed text-soft">
-              <li>所有数值来自服务端接口；控制台不推算“在线/新鲜度”，也不使用浏览器时钟判断时间。</li>
-              <li>载波计数来自链路注册表快照，页面每 15 秒刷新一次。</li>
-              <li>保留策略是全局值；按设备的覆盖不会出现在这里（见设备页“设置”页签）。</li>
-            </ul>
-          </section>
-        </>
-      ) : null}
-
-      <Banner tone="info">
-        待补字段：schema 版本（服务端已有 <span className="font-mono">core/db.py::SCHEMA_VERSION</span>，但
-        <span className="font-mono"> /api/v1/system</span> 未输出）。补上后本页直接显示，无需前端再改结构。
-      </Banner>
-    </PageShell>
+/** Definition-list row used by the bento cards (grid, never flex gap). */
+function KvRow({ label, children }: { label: ReactNode; children: ReactNode }) {
+  return (
+    <div className="grid min-w-0 grid-cols-[minmax(0,6.5rem)_minmax(0,1fr)] items-baseline gap-2 border-b border-line py-1.5 last:border-b-0 last:pb-0">
+      <dt className="min-w-0 break-all text-[0.7rem] text-faint">{label}</dt>
+      <dd className="min-w-0 break-all text-[0.78rem] text-soft">{children}</dd>
+    </div>
   );
 }

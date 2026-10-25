@@ -1,15 +1,34 @@
 import { useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { KeyRound, Loader2, ShieldCheck } from "lucide-react";
+import {
+  ArrowRight,
+  Eye,
+  EyeOff,
+  KeyRound,
+  Loader2,
+  LockKeyhole,
+  Moon,
+  RadioTower,
+  ShieldCheck,
+  Sun,
+  SunMoon,
+} from "lucide-react";
 
-import { GridPattern } from "@/components/aceternity/grid-pattern";
-import { HoverBorderGradient } from "@/components/aceternity/hover-border-gradient";
-import { Meteors } from "@/components/aceternity/meteors";
-import { Spotlight } from "@/components/aceternity/spotlight";
-import { TextGenerateEffect } from "@/components/aceternity/text-generate-effect";
+import {
+  AuroraBackground,
+  BackgroundBeams,
+  GridPattern,
+  HoverBorderGradient,
+  LampEffect,
+  Meteors,
+  Sparkles,
+  Spotlight,
+  TextGenerateEffect,
+} from "@/components/aceternity";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useViewport } from "@/hooks/use-viewport";
+import { THEME_LABEL, useTheme, type ThemeMode } from "@/lib/theme";
 import { isApiError } from "@/lib/api";
 import { useAuth } from "@/store/auth";
 
@@ -17,12 +36,16 @@ interface Props {
   version: string;
 }
 
+const THEME_ICON: Record<ThemeMode, typeof Sun> = { system: SunMoon, light: Sun, dark: Moon };
+
 /**
- * Login（0.3.3 Aceternity 重写）。
+ * Login (0.4 rewrite).
  *
- * 逻辑不变：TOTP 字段在服务端 session 声明 `totp_enabled` 时首渲染即出现，
- * 错误串回退保留；F40 深链接回跳保留。视觉层换成 Spotlight + 网格 + 流星
- * 的组合——手表端（无 hover、省电）自动去掉流星与网格动画。
+ * Same logic as before: TOTP appears when the server session says it is enabled
+ * (or after the server asks for it), deep-link return is preserved, and the
+ * console never invents error copy. The visual is a deep-field hero with the
+ * lamp/beams/meteors atmosphere, collapsing to a single compact card on the
+ * watch.
  */
 export function LoginPage({ version }: Props) {
   const login = useAuth((state) => state.login);
@@ -32,8 +55,11 @@ export function LoginPage({ version }: Props) {
   const location = useLocation();
   const viewport = useViewport();
   const watch = viewport === "watch";
+  const { mode, cycle } = useTheme();
+  const ThemeIcon = THEME_ICON[mode];
 
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [totp, setTotp] = useState("");
   const [needTotp, setNeedTotp] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -48,9 +74,10 @@ export function LoginPage({ version }: Props) {
     setError("");
     try {
       await login(password, showTotp ? totp : undefined);
-      // F40: 会话过期被踢到登录页时 URL 未变（App 匿名态不走路由），登录后
-      // 回跳原深链接；直登 /login 才去设备墙。
-      const target = location.pathname !== "/login" ? `${location.pathname}${location.search}` : "/wall";
+      const target =
+        location.pathname !== "/login"
+          ? `${location.pathname}${location.search}`
+          : "/wall";
       navigate(target, { replace: true });
     } catch (failure) {
       const message = isApiError(failure) ? failure.message : "登录失败";
@@ -62,93 +89,216 @@ export function LoginPage({ version }: Props) {
   };
 
   return (
-    <div className="relative flex app-vh-min items-center justify-center overflow-hidden px-4 py-8">
-      {/* 背景层：网格 + 顶光 + 流星（手表端只留顶光） */}
-      {!watch ? <GridPattern strokeDasharray="4 4" className="opacity-60 [mask-image:radial-gradient(ellipse_70%_60%_at_50%_40%,#000,transparent)]" /> : null}
-      <Spotlight className="left-[-40%] top-[-10%] md:left-[-15%]" />
-      {!watch ? <Meteors number={10} /> : null}
+    <div className="relative flex app-vh-min w-full flex-col overflow-hidden">
+      <AuroraBackground fixed intensity={0.85} />
+      {!watch ? <BackgroundBeams fixed count={10} className="opacity-55" /> : null}
+      <GridPattern
+        className="pointer-events-none opacity-50"
+        stroke="var(--c-grid-line)"
+        strokeDasharray="4 6"
+      />
+      {!watch ? <Meteors number={9} /> : null}
+      <Spotlight className="left-[-40%] top-[-20%] opacity-30 md:left-[-12%]" />
 
-      <div className="relative z-10 w-full max-w-sm">
-        <div className="mb-6 text-center">
-          <h1 className="text-2xl font-semibold tracking-tight text-ink">
-            <TextGenerateEffect words="Observatory" duration={0.6} />
-          </h1>
-          <p className="mt-1.5 text-sm text-soft">
-            <TextGenerateEffect words="受控端控制台" duration={0.5} />
-          </p>
-          <p className="mt-2.5 inline-flex items-center rounded-md border border-line bg-sunken px-2 py-0.5 font-mono text-[0.72rem] text-soft">
-            版本 v{version || "—"}
-          </p>
-        </div>
-
-        <form onSubmit={submit} className="glass-raised relative space-y-4 rounded-window border border-line p-6 shadow-pop">
-          <Spotlight className="left-[-30%] top-[-25%] h-[130%] w-[160%] opacity-25" />
-          <div className="relative space-y-1.5">
-            <Label htmlFor="password" className="text-xs text-soft">
-              控制台密码
-            </Label>
-            <Input
-              id="password"
-              type="password"
-              autoComplete="current-password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              placeholder="请输入密码"
-              className="h-11 text-base"
-              required
-              autoFocus
-            />
-          </div>
-
-          {showTotp ? (
-            <div className="relative space-y-1.5">
-              <Label htmlFor="totp" className="flex items-center gap-1.5 text-xs text-soft">
-                <ShieldCheck className="size-3.5" />
-                二次验证码
-              </Label>
-              <Input
-                id="totp"
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                value={totp}
-                onChange={(event) => setTotp(event.target.value.replace(/\D/g, "").slice(0, 6))}
-                placeholder="6 位数字"
-                className="h-11 text-center font-mono text-lg tracking-[0.3em]"
-                maxLength={6}
-                autoFocus={totpEnabled}
-              />
-            </div>
-          ) : null}
-
-          {error ? (
-            <p
-              role="alert"
-              aria-live="polite"
-              className="relative rounded-md border border-danger/30 bg-danger/10 px-2.5 py-1.5 text-xs text-danger"
-            >
-              {error}
-            </p>
-          ) : null}
-
-          <HoverBorderGradient
-            type="submit"
-            duration={2}
-            containerClassName="relative w-full"
-            className="w-full text-[0.95rem]"
-            disabled={busy || !password}
-          >
-            <span className="flex items-center justify-center gap-2">
-              {busy ? <Loader2 className="size-4 animate-spin" /> : <KeyRound className="size-4" />}
-              登录
+      <div className="relative z-10 flex min-h-0 flex-1 flex-col">
+        <header className="flex h-14 shrink-0 items-center justify-between px-4 sm:px-6">
+          <span className="flex items-center gap-2.5">
+            <span className="ace-brand-orb relative flex size-9 items-center justify-center rounded-2xl border border-line bg-brand-soft text-brand">
+              <span className="ace-brand-orb__ring" aria-hidden="true" />
+              <span className="text-[0.66rem] font-bold">Ob</span>
             </span>
-          </HoverBorderGradient>
-        </form>
+            <span className="text-[0.9rem] font-semibold tracking-tight text-ink">
+              Observatory
+              {!watch ? <span className="ml-2 text-[0.72rem] font-normal text-faint">受控端控制台</span> : null}
+            </span>
+          </span>
+          <button
+            type="button"
+            onClick={cycle}
+            aria-label={THEME_LABEL[mode]}
+            title={THEME_LABEL[mode]}
+            className="flex size-9 items-center justify-center rounded-xl border border-line bg-sunken text-soft transition-colors hover:text-ink"
+          >
+            <ThemeIcon className="size-4" />
+          </button>
+        </header>
 
-        <p className="mt-5 text-center text-[0.72rem] leading-relaxed text-faint">
-          控制台域名为 {consoleHost || "（服务端未配置）"}
-          <br />
-          受控端可通过任一备用域名接入。
-        </p>
+        <main className="flex flex-1 items-center justify-center px-4 pb-10 pt-2 sm:px-6">
+          <div className={watch ? "w-full max-w-[19rem]" : "grid w-full max-w-5xl grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_26rem] lg:items-center lg:gap-10"}>
+            {/* --------------------------------------------------------- hero */}
+            <section className={watch ? "hidden" : "relative min-w-0"}>
+              {!watch ? (
+                <div
+                  className="pointer-events-none absolute left-1/2 top-[-2.5rem] h-28 w-[34rem] max-w-full opacity-80"
+                  style={{ transform: "translateX(-50%)" }}
+                >
+                  <LampEffect className="h-full w-full" contentClassName="hidden" />
+                </div>
+              ) : null}
+              <div className="relative">
+                <p className="eyebrow mb-3 flex items-center gap-2">
+                  <span className="inline-block size-1.5 rounded-full bg-brand-3" />
+                  deep-field mission control
+                </p>
+                <TextGenerateEffect
+                  as="h1"
+                  words="Observatory"
+                  className="block text-[2.7rem] font-semibold tracking-[-0.045em] text-ink sm:text-[3.4rem]"
+                  wordClassName="text-gradient"
+                  stagger={0.06}
+                />
+                <p className="mt-4 max-w-lg text-[0.98rem] leading-relaxed text-soft">
+                  授权设备的观测、远程控制与数据归档，都在同一个深空控制台里。
+                </p>
+                <Sparkles count={16} className="mt-2 h-10 w-48 opacity-70" />
+
+                <ul className="mt-8 grid max-w-md grid-cols-1 gap-2.5">
+                  {[
+                    { icon: RadioTower, title: "单链路实时观测", text: "WebSocket 与长轮询同一套事实，断线自动降级" },
+                    { icon: ShieldCheck, title: "显式授权控制", text: "每次控制都有 TTL、撤销与全程审计" },
+                    { icon: LockKeyhole, title: "服务端时钟", text: "画面、命令与状态时间只来自服务端" },
+                  ].map((item) => {
+                    const Icon = item.icon;
+                    return (
+                      <li key={item.title} className="flex items-start gap-2.5 rounded-xl border border-line bg-sunken px-3 py-2.5">
+                        <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg border border-line bg-panel text-brand">
+                          <Icon className="size-3.5" />
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block text-[0.82rem] font-semibold text-ink">{item.title}</span>
+                          <span className="block text-[0.72rem] leading-relaxed text-faint">{item.text}</span>
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            </section>
+
+            {/* --------------------------------------------------------- form */}
+            <form
+              onSubmit={submit}
+              className={
+                watch
+                  ? "surface-strong relative p-3"
+                  : "surface-strong relative p-5 sm:p-6"
+              }
+            >
+              {!watch ? (
+                <div className="mb-5">
+                  <p className="eyebrow mb-2">authorized access</p>
+                  <h2 className="text-[1.25rem] font-semibold tracking-tight text-ink">登录控制台</h2>
+                  <p className="mt-1 text-[0.8rem] leading-relaxed text-soft">
+                    需要控制台密码{showTotp ? "与验证器动态码" : ""}。会话仅保存在当前浏览器。
+                  </p>
+                </div>
+              ) : (
+                <div className="mb-3 flex items-center justify-between">
+                  <span className="text-[0.82rem] font-semibold text-ink">登录</span>
+                  <span className="tnum rounded-md border border-line bg-sunken px-1.5 py-0.5 text-[0.62rem] text-faint">
+                    v{version || "—"}
+                  </span>
+                </div>
+              )}
+
+              <div className="space-y-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="password" className="flex items-center gap-1.5">
+                    <KeyRound className="size-3.5 text-faint" />
+                    控制台密码
+                  </Label>
+                  <div className="relative min-w-0">
+                    <Input
+                      id="password"
+                      type={showPassword ? "text" : "password"}
+                      autoComplete="current-password"
+                      value={password}
+                      onChange={(event) => setPassword(event.target.value)}
+                      placeholder="请输入密码"
+                      className="h-11 pr-11 text-base"
+                      required
+                      autoFocus={!watch}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword((current) => !current)}
+                      aria-label={showPassword ? "隐藏密码" : "显示密码"}
+                      title={showPassword ? "隐藏密码" : "显示密码"}
+                      className="absolute top-0 right-0 flex h-11 w-11 items-center justify-center text-faint"
+                      style={{ position: "absolute", top: 0, right: 0 }}
+                    >
+                      {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                    </button>
+                  </div>
+                </div>
+
+                {showTotp ? (
+                  <div className="space-y-1.5">
+                    <Label htmlFor="totp" className="flex items-center gap-1.5">
+                      <ShieldCheck className="size-3.5 text-faint" />
+                      二次验证码
+                    </Label>
+                    <Input
+                      id="totp"
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
+                      value={totp}
+                      onChange={(event) => setTotp(event.target.value.replace(/\D/g, "").slice(0, 6))}
+                      placeholder="6 位数字"
+                      className="h-11 text-center font-mono text-lg tracking-[0.3em]"
+                      maxLength={6}
+                      autoFocus={totpEnabled && !watch}
+                    />
+                  </div>
+                ) : null}
+
+                {error ? (
+                  <p
+                    role="alert"
+                    aria-live="polite"
+                    className="surface-danger break-words px-3 py-2 text-[0.8rem] leading-relaxed text-danger"
+                  >
+                    {error}
+                  </p>
+                ) : null}
+
+                <HoverBorderGradient
+                  type="submit"
+                  duration={2}
+                  block
+                  containerClassName="w-full"
+                  className="h-11 text-[0.92rem]"
+                  disabled={busy || !password}
+                >
+                  <span className="flex items-center justify-center gap-2">
+                    {busy ? <Loader2 className="size-4 animate-spin" /> : <KeyRound className="size-4" />}
+                    {busy ? "正在验证…" : "进入控制台"}
+                    {!busy ? <ArrowRight className="size-4" /> : null}
+                  </span>
+                </HoverBorderGradient>
+
+                {watch ? null : (
+                  <p className="text-[0.7rem] leading-relaxed text-faint">
+                    继续即表示你已获得目标设备的书面授权。连续失败会触发服务端限流。
+                  </p>
+                )}
+              </div>
+
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3">
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-sunken px-2 py-0.5 text-[0.66rem] text-faint">
+                  v{version || "—"}
+                </span>
+                <span className="min-w-0 truncate text-[0.66rem] text-faint">
+                  {consoleHost || "控制台域名未配置"}
+                </span>
+              </div>
+            </form>
+          </div>
+        </main>
+
+        <footer className="shrink-0 px-4 pb-5 text-center text-[0.66rem] leading-relaxed text-faint">
+          控制台域名 {consoleHost || "（服务端未配置）"} · 受控端可通过任一备用域名接入
+        </footer>
       </div>
     </div>
   );

@@ -1,11 +1,15 @@
 import { useState } from "react";
-import { Check, Copy, KeyRound, Loader2, ShieldCheck, ShieldOff } from "lucide-react";
+import type { FormEvent, ReactNode } from "react";
+import { Check, Copy, KeyRound, LogOut, MonitorSmartphone, ShieldCheck, ShieldOff, UserRound } from "lucide-react";
 
+import { GlowCard, GridPattern, ShimmerButton, Sparkles } from "@/components/aceternity";
 import { Banner } from "@/components/async-state";
-import { PageShell } from "@/components/page-shell";
+import { MetaChip, PageHeader } from "@/components/page-header";
+import { Section, SectionHeader } from "@/components/section";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useViewport } from "@/hooks/use-viewport";
 import { api, isApiError } from "@/lib/api";
 import { useAuth } from "@/store/auth";
 import { cn } from "@/lib/utils";
@@ -21,9 +25,17 @@ import { cn } from "@/lib/utils";
  * The TOTP secret is shown as text (secret + `otpauth://` URI): that is the
  * documented fallback for the QR code — no QR image is generated locally, so
  * nothing about the secret leaves the server.
+ *
+ * Presentation (0.4): security cards in a two-column desktop grid, one column on
+ * phones/watches; the TOTP setup panel is the only "lit" surface on the page.
  */
 export function AccountPage() {
   const { totpEnabled, version, consoleHost, baseUrls, refresh, logout } = useAuth();
+  const viewport = useViewport();
+  const desktop = viewport === "desktop";
+  const watch = viewport === "watch";
+  const touch = !desktop;
+  const stack = watch ? "space-y-3" : "space-y-5";
 
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
@@ -50,7 +62,7 @@ export function AccountPage() {
     }
   };
 
-  const submitPassword = async (event: React.FormEvent) => {
+  const submitPassword = async (event: FormEvent) => {
     event.preventDefault();
     const issue =
       next.length < 10
@@ -138,225 +150,283 @@ export function AccountPage() {
   };
 
   return (
-    <PageShell
-      title="账户与安全"
-      subtitle="修改控制台密码、管理二次验证（TOTP）。服务端规则：密码至少 10 位；开启/关闭二次验证都需要有效验证码。"
-    >
+    <div className="w-full min-w-0">
+      <PageHeader
+        icon={UserRound}
+        title="账户与安全"
+        description="修改控制台密码、管理二次验证；新密码至少 10 位，开启/关闭 TOTP 都需要有效验证码。"
+      />
 
-      <section className="rounded-panel border border-line bg-panel p-3">
-        <h2 className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-soft">
-          <KeyRound className="size-3.5" />
-          修改密码
-        </h2>
-        <form className="space-y-2" onSubmit={submitPassword}>
-          <div className="grid gap-2 sm:grid-cols-3">
-            <div className="space-y-1">
-              <Label htmlFor="current-password" className="text-xs text-faint">
-                当前密码
-              </Label>
-              <Input
+      <div className={cn("mt-4 min-w-0 sm:mt-5", stack)}>
+        <div className="grid min-w-0 gap-5 lg:grid-cols-2">
+          {/* ------------------------------------------------------ password card */}
+          <Section title="修改密码" icon={KeyRound}>
+            <form className="grid min-w-0 gap-3" onSubmit={submitPassword}>
+              <PasswordField
                 id="current-password"
-                type="password"
+                label="当前密码"
                 autoComplete="current-password"
                 value={current}
-                onChange={(event) => setCurrent(event.target.value)}
-                className="h-9"
-                required
+                onChange={setCurrent}
+                touch={touch}
               />
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="new-password" className="text-xs text-faint">
-                新密码（至少 10 位）
-              </Label>
-              <Input
+              <PasswordField
                 id="new-password"
-                type="password"
+                label="新密码"
+                hint="至少 10 位"
                 autoComplete="new-password"
                 value={next}
-                onChange={(event) => setNext(event.target.value)}
-                className="h-9"
-                required
+                onChange={setNext}
+                touch={touch}
               />
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="confirm-password" className="text-xs text-faint">
-                确认新密码
-              </Label>
-              <Input
+              <PasswordField
                 id="confirm-password"
-                type="password"
+                label="确认新密码"
                 autoComplete="new-password"
                 value={confirm}
-                onChange={(event) => setConfirm(event.target.value)}
-                className="h-9"
-                required
+                onChange={setConfirm}
+                touch={touch}
               />
-            </div>
-          </div>
-          {passwordMessage ? <Banner tone="ok">{passwordMessage}</Banner> : null}
-          {passwordError ? <Banner tone="error">{passwordError}</Banner> : null}
-          <div className="flex flex-wrap items-center gap-2">
-            <Button type="submit" size="sm" disabled={passwordBusy || !current || !next || !confirm}>
-              {passwordBusy ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
-              保存新密码
-            </Button>
-            <span className="text-[0.7rem] text-faint">
-              修改后当前会话保持有效；下次登录使用新密码。密码哈希由服务端保存。
-            </span>
-          </div>
-        </form>
-      </section>
 
-      <section className="rounded-panel border border-line bg-panel p-3">
-        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="flex items-center gap-1.5 text-xs font-semibold text-soft">
-            {totpEnabled ? <ShieldCheck className="size-3.5 text-ok" /> : <ShieldOff className="size-3.5" />}
-            二次验证（TOTP）
-          </h2>
-          <span
-            className={cn(
-              "rounded border px-1.5 py-0.5 text-[0.7rem]",
-              totpEnabled ? "border-ok/30 bg-ok/10 text-ok" : "border-line bg-sunken text-faint",
-            )}
-          >
-            {totpEnabled ? "已启用" : "未启用"}
-          </span>
+              {passwordMessage ? <Banner tone="ok">{passwordMessage}</Banner> : null}
+              {passwordError ? <Banner tone="error">{passwordError}</Banner> : null}
+
+              <div className="grid min-w-0 border-t border-line pt-3">
+                <ShimmerButton
+                  type="submit"
+                  busy={passwordBusy}
+                  disabled={passwordBusy || !current || !next || !confirm}
+                  className="justify-self-start sm:justify-self-end"
+                >
+                  <Check className="mr-1.5 size-4" />
+                  保存新密码
+                </ShimmerButton>
+              </div>
+            </form>
+          </Section>
+
+          {/* --------------------------------------------------------- TOTP card */}
+          <GlowCard isStatic={!desktop} className="min-w-0" contentClassName="p-3 sm:p-4">
+            <SectionHeader
+              title="二次验证（TOTP）"
+              icon={totpEnabled ? ShieldCheck : ShieldOff}
+              actions={
+                <MetaChip tone={totpEnabled ? "ok" : "default"}>{totpEnabled ? "已启用" : "未启用"}</MetaChip>
+              }
+            />
+
+            <div className="mt-3 grid min-w-0 gap-3">
+              {totpMessage ? <Banner tone="ok">{totpMessage}</Banner> : null}
+              {totpError ? <Banner tone="error">{totpError}</Banner> : null}
+
+              {!totpEnabled && !setup ? (
+                <>
+                  <p className="text-[0.8rem] leading-relaxed text-soft">
+                    开启后每次登录需要验证器上的 6 位验证码；启用过程中会显示一次性密钥。
+                  </p>
+                  <div className="flex min-w-0">
+                    <ShimmerButton busy={totpBusy} onClick={() => void startSetup()}>
+                      <ShieldCheck className="mr-1.5 size-4" />
+                      开始绑定
+                    </ShimmerButton>
+                  </div>
+                </>
+              ) : null}
+
+              {setup ? (
+                <div className="relative min-w-0 overflow-hidden rounded-xl border border-line bg-sunken p-3">
+                  <GridPattern
+                    className="pointer-events-none absolute inset-full opacity-30"
+                    stroke="var(--c-grid-line)"
+                    fade="radial"
+                  />
+                  <Sparkles className="opacity-70" count={10} />
+                  <div className="relative grid min-w-0 gap-2.5">
+                    <Banner tone="info">
+                      在该浏览器打开验证器 App，选择「手动输入密钥」：粘贴下方密钥或 otpauth URI（二维码的文本降级形式），
+                      然后输入验证器显示的 6 位验证码完成启用。
+                    </Banner>
+
+                    <div className="grid min-w-0 gap-1">
+                      <p className="text-[0.7rem] text-faint">密钥（一次性显示，请立即保存）</p>
+                      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5">
+                        <code className="min-w-0 break-all rounded-lg border border-line bg-panel px-2.5 py-2 font-mono text-[0.72rem] leading-relaxed text-ink">
+                          {setup.secret}
+                        </code>
+                        <Button
+                          size="icon-sm"
+                          variant="outline"
+                          className={cn("shrink-0", touch && "size-11")}
+                          aria-label="复制密钥"
+                          title="复制密钥"
+                          onClick={() => void copy(setup.secret, "secret")}
+                        >
+                          {copied === "secret" ? <Check className="size-4" /> : <Copy className="size-4" />}
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div className="grid min-w-0 gap-1">
+                      <p className="text-[0.7rem] text-faint">otpauth URI</p>
+                      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5">
+                        <code className="min-w-0 break-all rounded-lg border border-line bg-panel px-2.5 py-2 font-mono text-[0.72rem] leading-relaxed text-ink">
+                          {setup.uri}
+                        </code>
+                        <Button
+                          size="icon-sm"
+                          variant="outline"
+                          className={cn("shrink-0", touch && "size-11")}
+                          aria-label="复制 otpauth URI"
+                          title="复制 otpauth URI"
+                          onClick={() => void copy(setup.uri, "uri")}
+                        >
+                          {copied === "uri" ? <Check className="size-4" /> : <Copy className="size-4" />}
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,10rem)_auto_auto] sm:items-end">
+                      <div className="min-w-0">
+                        <Label htmlFor="setup-code" className="text-[0.72rem] text-faint">
+                          验证器上的 6 位验证码
+                        </Label>
+                        <Input
+                          id="setup-code"
+                          inputMode="numeric"
+                          autoComplete="one-time-code"
+                          maxLength={6}
+                          value={setupCode}
+                          onChange={(event) => setSetupCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
+                          className={cn("mt-1 h-9 text-center font-mono tracking-[0.3em]", touch && "tap")}
+                        />
+                      </div>
+                      <ShimmerButton
+                        busy={totpBusy}
+                        disabled={totpBusy || setupCode.length !== 6}
+                        onClick={() => void enableTotp()}
+                      >
+                        <Check className="mr-1.5 size-4" />
+                        启用二次验证
+                      </ShimmerButton>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-11 sm:h-9"
+                        onClick={() => {
+                          setSetup(null);
+                          setSetupCode("");
+                        }}
+                      >
+                        取消
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
+              {totpEnabled ? (
+                <div className="grid min-w-0 gap-2 border-t border-line pt-3">
+                  <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,10rem)_auto] sm:items-end">
+                    <div className="min-w-0">
+                      <Label htmlFor="disable-code" className="text-[0.72rem] text-faint">
+                        当前 6 位验证码
+                      </Label>
+                      <Input
+                        id="disable-code"
+                        inputMode="numeric"
+                        autoComplete="one-time-code"
+                        maxLength={6}
+                        value={disableCode}
+                        onChange={(event) => setDisableCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
+                        className={cn("mt-1 h-9 text-center font-mono tracking-[0.3em]", touch && "tap")}
+                      />
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      className="h-11 sm:h-9"
+                      onClick={() => void disableTotp()}
+                      disabled={totpBusy || disableCode.length !== 6}
+                    >
+                      关闭二次验证
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </GlowCard>
         </div>
 
-        {totpMessage ? <Banner tone="ok">{totpMessage}</Banner> : null}
-        {totpError ? <Banner tone="error">{totpError}</Banner> : null}
-
-        {!totpEnabled && !setup ? (
-          <>
-            <p className="mb-2 text-xs leading-relaxed text-soft">
-              开启后，每次登录都需要输入手机验证器上的 6 位验证码。启用过程中会显示一次性密钥，请立即保存到验证器。
-            </p>
-            <Button size="sm" onClick={() => void startSetup()} disabled={totpBusy}>
-              {totpBusy ? <Loader2 className="size-3.5 animate-spin" /> : <ShieldCheck className="size-3.5" />}
-              开始绑定
+        {/* --------------------------------------------------------- session card */}
+        <Section title="会话" icon={MonitorSmartphone}>
+          <dl className="grid min-w-0 gap-0">
+            <InfoRow label="控制台版本">
+              <span className="tnum">v{version || "—"}</span>
+            </InfoRow>
+            <InfoRow label="控制台域名">
+              <span className="break-all">{consoleHost || "（服务端未配置）"}</span>
+            </InfoRow>
+            <InfoRow label="备用域名">
+              <span className="break-all">{baseUrls.join("  |  ") || "—"}</span>
+            </InfoRow>
+          </dl>
+          <div className="mt-3 grid min-w-0">
+            <Button size="sm" variant="outline" className="tap h-11 justify-self-start sm:h-9" onClick={() => void logout()}>
+              <LogOut className="size-3.5" />
+              退出当前会话
             </Button>
-          </>
-        ) : null}
-
-        {setup ? (
-          <div className="space-y-2">
-            <Banner tone="info">
-              在该浏览器打开验证器 App，选择「手动输入密钥」：粘贴下方密钥或 otpauth URI（二维码的文本降级形式），
-              然后输入验证器显示的 6 位验证码完成启用。
-            </Banner>
-            <div className="space-y-1">
-              <p className="text-[0.7rem] text-faint">密钥（一次性显示，请立即保存）</p>
-              <div className="flex items-center gap-1.5">
-                <code className="min-w-0 flex-1 break-all rounded border border-line bg-sunken px-2 py-1 font-mono text-[0.7rem]">
-                  {setup.secret}
-                </code>
-                <Button size="icon-sm" variant="ghost" aria-label="复制密钥" onClick={() => void copy(setup.secret, "secret")}>
-                  {copied === "secret" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-                </Button>
-              </div>
-            </div>
-            <div className="space-y-1">
-              <p className="text-[0.7rem] text-faint">otpauth URI</p>
-              <div className="flex items-center gap-1.5">
-                <code className="min-w-0 flex-1 truncate rounded border border-line bg-sunken px-2 py-1 font-mono text-[0.7rem]">
-                  {setup.uri}
-                </code>
-                <Button size="icon-sm" variant="ghost" aria-label="复制 otpauth URI" onClick={() => void copy(setup.uri, "uri")}>
-                  {copied === "uri" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-                </Button>
-              </div>
-            </div>
-            <div className="flex flex-wrap items-end gap-2">
-              <div className="space-y-1">
-                <Label htmlFor="setup-code" className="text-xs text-faint">
-                  验证器上的 6 位验证码
-                </Label>
-                <Input
-                  id="setup-code"
-                  inputMode="numeric"
-                  autoComplete="one-time-code"
-                  maxLength={6}
-                  value={setupCode}
-                  onChange={(event) => setSetupCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
-                  className="h-9 w-40 text-center font-mono tracking-[0.3em]"
-                />
-              </div>
-              <Button size="sm" onClick={() => void enableTotp()} disabled={totpBusy || setupCode.length !== 6}>
-                {totpBusy ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
-                启用二次验证
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => {
-                  setSetup(null);
-                  setSetupCode("");
-                }}
-              >
-                取消
-              </Button>
-            </div>
           </div>
-        ) : null}
+        </Section>
+      </div>
+    </div>
+  );
+}
 
-        {totpEnabled ? (
-          <div className="mt-2 space-y-2 border-t border-line pt-2">
-            <p className="text-xs leading-relaxed text-soft">
-              关闭二次验证需要当前验证器上的有效验证码（服务端拒绝无验证码的关闭请求）。关闭后仅密码即可登录。
-            </p>
-            <div className="flex flex-wrap items-end gap-2">
-              <div className="space-y-1">
-                <Label htmlFor="disable-code" className="text-xs text-faint">
-                  当前 6 位验证码
-                </Label>
-                <Input
-                  id="disable-code"
-                  inputMode="numeric"
-                  autoComplete="one-time-code"
-                  maxLength={6}
-                  value={disableCode}
-                  onChange={(event) => setDisableCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
-                  className="h-9 w-40 text-center font-mono tracking-[0.3em]"
-                />
-              </div>
-              <Button
-                size="sm"
-                variant="destructive"
-                onClick={() => void disableTotp()}
-                disabled={totpBusy || disableCode.length !== 6}
-              >
-                关闭二次验证
-              </Button>
-            </div>
-          </div>
-        ) : null}
-      </section>
+/** Label + input row; stacks on phones/watches, label column on desktop. */
+function PasswordField({
+  id,
+  label,
+  hint,
+  autoComplete,
+  value,
+  onChange,
+  touch,
+}: {
+  id: string;
+  label: string;
+  hint?: string;
+  autoComplete: string;
+  value: string;
+  onChange: (value: string) => void;
+  touch: boolean;
+}) {
+  return (
+    <div className="grid min-w-0 gap-1.5 sm:grid-cols-[minmax(0,9rem)_minmax(0,1fr)] sm:items-center sm:gap-3">
+      <div className="min-w-0">
+        <Label htmlFor={id} className="text-[0.82rem] font-medium text-ink">
+          {label}
+        </Label>
+        {hint ? <p className="mt-0.5 text-[0.68rem] leading-relaxed text-faint">{hint}</p> : null}
+      </div>
+      <Input
+        id={id}
+        type="password"
+        autoComplete={autoComplete}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className={cn("h-9", touch && "tap")}
+        required
+      />
+    </div>
+  );
+}
 
-      <section className="rounded-panel border border-line bg-panel p-3">
-        <h2 className="mb-2 text-xs font-semibold text-soft">会话</h2>
-        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-          <dt className="text-faint">控制台版本</dt>
-          <dd className="font-mono text-soft">v{version || "—"}</dd>
-          <dt className="text-faint">控制台域名</dt>
-          <dd className="break-all text-soft">{consoleHost || "（服务端未配置）"}</dd>
-          <dt className="text-faint">备用域名</dt>
-          <dd className="break-all text-soft">{baseUrls.join("  |  ") || "—"}</dd>
-          <dt className="text-faint">会话</dt>
-          <dd className="text-soft">
-            当前浏览器使用 HttpOnly 会话 Cookie；退出登录会清除本地会话与缓存。
-          </dd>
-        </dl>
-        <div className="mt-2 flex flex-wrap gap-2">
-          <Button size="sm" variant="outline" onClick={() => void logout()}>
-            退出当前会话
-          </Button>
-        </div>
-      </section>
-
-      <p className="text-[0.7rem] leading-relaxed text-faint">
-        二次验证密钥只在绑定过程中出现在本页；启用后服务端只保存密钥、不再回传。丢失验证器时需要通过服务端运维手段重置
-        （当前版本不提供恢复码）。
-      </p>
-    </PageShell>
+/** One session key/value line. */
+function InfoRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="grid min-w-0 grid-cols-[minmax(0,6.5rem)_minmax(0,1fr)] items-baseline gap-2 border-b border-line py-1.5 last:border-0 last:pb-0">
+      <dt className="min-w-0 break-all text-[0.7rem] text-faint">{label}</dt>
+      <dd className="min-w-0 break-all text-[0.78rem] leading-relaxed text-soft">{children}</dd>
+    </div>
   );
 }

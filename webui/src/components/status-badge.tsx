@@ -2,11 +2,7 @@
  * The only component that renders device liveness.
  *
  * It renders the server's verdict verbatim: `presence.state`, the transport and
- * the server's own `reason` / `age_ms`. It does not add a "stale" heuristic of
- * its own — the 0.2.x console did (`age > 120s → 状态未知`), which duplicated the
- * server threshold and, worse, judged it with the local clock (spec C5, A12).
- * When the console socket is down, the shell says so globally; the badge keeps
- * showing the last server statement, which is the truth as of that response.
+ * the server's own `reason` / `age_ms`. It never invents a freshness heuristic.
  */
 
 import { formatAge } from "@/lib/format";
@@ -23,16 +19,16 @@ const LABELS: Record<Presence["state"], string> = {
 };
 
 const TONES: Record<Presence["state"], string> = {
-  online: "bg-ok/12 text-ok border-ok/30",
-  degraded: "bg-warn/12 text-warn border-warn/30",
-  offline: "bg-sunken text-soft border-line",
-  uninstalling: "bg-warn/12 text-warn border-warn/30",
-  uninstalled: "bg-danger/12 text-danger border-danger/30",
+  online: "border-line bg-ok-soft text-ok",
+  degraded: "border-line bg-warn-soft text-warn",
+  offline: "border-line bg-sunken text-soft",
+  uninstalling: "border-line bg-warn-soft text-warn",
+  uninstalled: "border-line bg-danger-soft text-danger",
 };
 
 const DOTS: Record<Presence["state"], string> = {
-  online: "bg-ok",
-  degraded: "bg-warn",
+  online: "bg-ok shadow-[0_0_0_3px_var(--c-ok-soft)]",
+  degraded: "bg-warn shadow-[0_0_0_3px_var(--c-warn-soft)]",
   offline: "bg-faint",
   uninstalling: "bg-warn animate-sm-pulse",
   uninstalled: "bg-danger",
@@ -48,9 +44,11 @@ interface Props {
   presence: Presence;
   compact?: boolean;
   className?: string;
+  /** Render as a larger dot + label pill (device hero). */
+  large?: boolean;
 }
 
-export function StatusBadge({ presence, compact = false, className }: Props) {
+export function StatusBadge({ presence, compact = false, className, large = false }: Props) {
   const age = presenceAgeMs(presence);
   const transport = transportOf(presence);
   const label = LABELS[presence.state];
@@ -64,19 +62,27 @@ export function StatusBadge({ presence, compact = false, className }: Props) {
   return (
     <span
       className={cn(
-        "inline-flex max-w-full items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium",
+        "inline-flex max-w-full items-center gap-1.5 rounded-full border font-medium",
+        compact ? "px-2 py-0.5 text-[0.72rem]" : "px-2.5 py-1 text-[0.78rem]",
+        large && "px-3 py-1.5 text-[0.84rem]",
         TONES[presence.state],
         className,
       )}
       title={presence.reason || label}
     >
-      <span className={cn("size-1.5 shrink-0 rounded-full", DOTS[presence.state])} />
+      <span
+        className={cn(
+          "shrink-0 rounded-full",
+          large ? "size-2" : "size-1.5",
+          DOTS[presence.state],
+        )}
+      />
       <span className="truncate">{label}</span>
       {!compact && detail ? (
-        <span className="truncate text-[0.7rem] font-normal opacity-75">· {detail}</span>
+        <span className="truncate text-[0.72rem] font-normal opacity-80">· {detail}</span>
       ) : null}
       {!compact && age !== null && presence.state !== "online" ? (
-        <span className="shrink-0 text-[0.7rem] font-normal opacity-60">{formatAge(age)}</span>
+        <span className="shrink-0 text-[0.7rem] font-normal opacity-65">{formatAge(age)}</span>
       ) : null}
     </span>
   );

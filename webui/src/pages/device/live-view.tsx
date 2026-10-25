@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { Expand, Keyboard, MousePointer2, Power, RefreshCw, WifiOff } from "lucide-react";
 
+import { GlowCard } from "@/components/aceternity";
 import { FrameStage } from "@/components/frame-view";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api, isApiError } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { serverNow, serverTimeLeft, useServerNow } from "@/store/clock";
 import { controlUnavailableReason, isPollMode } from "@/lib/presence";
+import { useViewport } from "@/hooks/use-viewport";
 import type { Device } from "@/lib/types";
-import { cn } from "@/lib/utils";
 
 const NORM = 10000;
 const CONTROL_TTL_S = 600;
@@ -23,6 +26,33 @@ interface ControlSession {
   fps: number;
   quality: number;
 }
+
+const STATUS_LABEL: Record<ControlStatus, string> = {
+  idle: "待机",
+  granting: "申请授权",
+  connecting: "连接通道",
+  streaming: "实时传输",
+  error: "通道错误",
+  closed: "会话结束",
+};
+
+const STATUS_TONE: Record<ControlStatus, string> = {
+  idle: "text-soft",
+  granting: "text-warn",
+  connecting: "text-warn",
+  streaming: "text-ok",
+  error: "text-danger",
+  closed: "text-soft",
+};
+
+const STATUS_DOT: Record<ControlStatus, string> = {
+  idle: "bg-faint",
+  granting: "bg-warn animate-sm-pulse",
+  connecting: "bg-warn animate-sm-pulse",
+  streaming: "bg-ok animate-sm-pulse",
+  error: "bg-danger",
+  closed: "bg-faint",
+};
 
 /** Windows virtual-key codes for the keys that are not printable text. */
 const VK_BY_KEY: Record<string, number> = {
@@ -68,6 +98,32 @@ function vkCodeFor(event: React.KeyboardEvent): number {
   return 0;
 }
 
+/** One telemetry cell of the live status strip. */
+function LiveMetric({
+  label,
+  value,
+  unit,
+  hint,
+  tone,
+}: {
+  label: string;
+  value: string;
+  unit?: string;
+  hint?: string;
+  tone?: string;
+}) {
+  return (
+    <div className="min-w-0 rounded-lg border border-line bg-panel px-2.5 py-2">
+      <p className="eyebrow truncate">{label}</p>
+      <p className={cn("tnum mt-0.5 truncate text-[0.95rem] font-semibold leading-tight", tone ?? "text-ink")}>
+        {value}
+        {unit ? <span className="ml-0.5 text-[0.68rem] font-medium text-faint">{unit}</span> : null}
+      </p>
+      {hint ? <p className="mt-0.5 truncate text-[0.68rem] text-faint">{hint}</p> : null}
+    </div>
+  );
+}
+
 interface Props {
   device: Device;
 }
@@ -98,6 +154,7 @@ export function LiveView({ device }: Props) {
   const [fps, setFps] = useState(0);
   const [rttMs, setRttMs] = useState<number | null>(null);
   const [textValue, setTextValue] = useState("");
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   const socketRef = useRef<WebSocket | null>(null);
   const sessionRef = useRef<ControlSession | null>(null);
@@ -112,8 +169,24 @@ export function LiveView({ device }: Props) {
 
   const uid = device.uid;
   const issue = controlUnavailableReason(device.presence);
+  const viewport = useViewport();
+  const watch = viewport === "watch";
   // Subscribes to the single 1 Hz ticker so the countdown ages while visible.
   const now = useServerNow();
+
+  // Presentation only: while the stage is fullscreen it should fill the screen
+  // instead of keeping the letterboxed 16:9 desktop size.
+  useEffect(() => {
+    const sync = () => setIsFullscreen(Boolean(document.fullscreenElement));
+    document.addEventListener("fullscreenchange", sync);
+    return () => document.removeEventListener("fullscreenchange", sync);
+  }, []);
+
+  const stageSizeStyle: CSSProperties | undefined = isFullscreen
+    ? { width: "100%", height: "100%" }
+    : viewport === "desktop"
+      ? { width: "min(100%, max(20rem, calc((100vh - 26rem) * 16 / 9)))" }
+      : undefined;
 
   const send = useCallback((payload: Record<string, unknown>) => {
     const socket = socketRef.current;
@@ -420,27 +493,34 @@ export function LiveView({ device }: Props) {
   if (issue) {
     const pollMode = isPollMode(device.presence);
     return (
-      <div className="space-y-2 rounded-panel border border-warn/30 bg-warn/10 p-3">
-        <p className="flex items-center gap-1.5 text-xs font-medium text-warn">
-          <WifiOff className="size-3.5" />
-          实时控制不可用
-        </p>
-        <p className="text-[0.72rem] leading-relaxed text-warn/90">{issue}</p>
-        <p className="text-[0.68rem] leading-relaxed text-soft">
-          {pollMode
-            ? "轮询模式下仍然可以截图、管理文件、下发命令、查看历史画面；受控端会在网络允许时自动重新升级到 WebSocket。"
-            : "截图、文件管理、命令下发与历史画面仍可正常使用。"}
-        </p>
-        <div className="flex flex-wrap items-center gap-2 pt-0.5">
-          <Button size="sm" disabled title={issue}>
-            <MousePointer2 className="size-3.5" />
-            开始实时控制
-          </Button>
-          <Button size="sm" variant="outline" disabled title={issue}>
-            <Expand className="size-3.5" />
-            全屏
-          </Button>
-          <span className="text-[0.66rem] text-faint">恢复实时通道后此入口会自动可用</span>
+      <div className={cn("min-w-0", watch ? "space-y-3" : "space-y-4")}>
+        <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+          <p className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2 text-[0.8rem] font-medium text-warn">
+            <span className="size-2 shrink-0 rounded-full bg-warn" aria-hidden />
+            <span className="truncate">实时控制不可用</span>
+          </p>
+          <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center sm:gap-2">
+            <Button disabled className="min-h-11" title={issue}>
+              <MousePointer2 className="size-4" aria-hidden />
+              开始实时控制
+            </Button>
+            <Button variant="outline" disabled className="min-h-11" title={issue}>
+              <Expand className="size-4" aria-hidden />
+              全屏
+            </Button>
+          </div>
+        </div>
+
+        <div className="surface-warn grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-start gap-2 p-3">
+          <WifiOff className="mt-0.5 size-4 shrink-0 text-warn" aria-hidden />
+          <div className="min-w-0">
+            <p className="break-words text-[0.8rem] leading-relaxed text-soft">{issue}</p>
+            <p className="mt-1 break-words text-[0.74rem] leading-relaxed text-faint">
+              {pollMode
+                ? "轮询模式下截图、文件、命令与历史画面仍可用；受控端恢复实时通道后会自动可用。"
+                : "截图、文件管理、命令下发与历史画面仍可正常使用。"}
+            </p>
+          </div>
         </div>
       </div>
     );
@@ -448,87 +528,149 @@ export function LiveView({ device }: Props) {
 
   const secondsLeft =
     session && now !== null ? Math.max(0, Math.round((serverTimeLeft(session.expiresAtMs) ?? 0) / 1000)) : null;
+  const streaming = status === "streaming";
 
   return (
-    <div className="space-y-2">
-      <div className="flex flex-wrap items-center gap-2">
-        {session ? (
-          <Button size="sm" variant="destructive" onClick={() => stop("已结束控制会话")}>
-            <Power className="size-3.5" />
-            结束控制
-          </Button>
-        ) : (
-          <Button size="sm" onClick={() => void start()} disabled={status === "granting" || status === "connecting"}>
-            <MousePointer2 className="size-3.5" />
-            开始实时控制
-          </Button>
-        )}
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => void start()}
-          disabled={status === "granting" || status === "connecting"}
-        >
-          <RefreshCw className="size-3.5" />
-          重新连接
-        </Button>
-        <Button size="sm" variant="outline" onClick={requestFullscreen}>
-          <Expand className="size-3.5" />
-          全屏
-        </Button>
-        <span
+    <div className={cn("min-w-0", watch ? "space-y-3" : "space-y-4")}>
+      {/* Compact toolbar: status left, actions right; the stage sits directly below. */}
+      <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+        <p
           className={cn(
-            "ml-auto text-xs",
-            status === "streaming" ? "text-ok" : status === "error" ? "text-danger" : "text-faint",
+            "grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2 text-[0.8rem] font-medium",
+            STATUS_TONE[status],
           )}
+          title={message || STATUS_LABEL[status]}
         >
-          {status === "streaming"
-            ? `${fps} fps · 质量 ${session?.quality ?? "—"} · 目标 ${session?.fps ?? "—"} fps`
-            : message || "未开始"}
-        </span>
-      </div>
-
-      <div
-        ref={stageRef}
-        tabIndex={0}
-        className="relative rounded-lg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
-        onPointerMove={onPointerMove}
-        onPointerDown={onPointerDown}
-        onPointerUp={onPointerUp}
-        onWheel={onWheel}
-        onKeyDown={onKeyDown}
-        onKeyUp={onKeyUp}
-        onContextMenu={(event) => event.preventDefault()}
-        aria-label="实时画面与输入区域"
-      >
-        <FrameStage className="h-[min(56.25vw,calc(100vh_-_15rem))] w-full cursor-crosshair select-none touch-none">
-          {frameUrl ? (
-            <img
-              src={frameUrl}
-              alt="实时画面"
-              draggable={false}
-              className="block h-full w-full object-contain"
-              onLoad={(event) => {
-                const image = event.currentTarget;
-                setNatural({ width: image.naturalWidth, height: image.naturalHeight });
-              }}
-            />
+          <span className={cn("size-2 shrink-0 rounded-full", STATUS_DOT[status])} aria-hidden />
+          <span className="truncate" role="status" aria-live="polite">
+            {message || STATUS_LABEL[status]}
+          </span>
+        </p>
+        <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center sm:gap-2">
+          {session ? (
+            <Button
+              variant="destructive"
+              className="col-span-2 min-h-11 sm:col-span-1"
+              onClick={() => stop("已结束控制会话")}
+            >
+              <Power className="size-4" aria-hidden />
+              结束控制
+            </Button>
           ) : (
-            <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-soft">
-              <MousePointer2 className="size-6 text-faint" />
-              <p className="text-xs">
-                {status === "idle" ? "点击“开始实时控制”建立会话" : message || "等待画面…"}
-              </p>
-            </div>
+            <Button
+              className="col-span-2 min-h-11 sm:col-span-1"
+              onClick={() => void start()}
+              disabled={status === "granting" || status === "connecting"}
+            >
+              <MousePointer2 className="size-4" aria-hidden />
+              开始实时控制
+            </Button>
           )}
-        </FrameStage>
+          <Button
+            variant="outline"
+            className="min-h-11"
+            onClick={() => void start()}
+            disabled={status === "granting" || status === "connecting"}
+          >
+            <RefreshCw
+              className={cn("size-4", (status === "granting" || status === "connecting") && "animate-spin")}
+              aria-hidden
+            />
+            重新连接
+          </Button>
+          <Button variant="outline" className="min-h-11" onClick={requestFullscreen}>
+            <Expand className="size-4" aria-hidden />
+            全屏
+          </Button>
+        </div>
       </div>
 
-      <div className="flex items-center gap-1.5">
-        <Keyboard className="size-3.5 shrink-0 text-soft" />
+      <GlowCard className="min-w-0" contentClassName="relative p-2 sm:p-2.5" tint="rgba(99, 146, 255, 0.2)">
+        <div
+          className={cn(
+            "relative flex min-w-0 justify-center",
+            isFullscreen && "h-full w-full items-center",
+          )}
+          style={isFullscreen ? { width: "100%", height: "100%" } : undefined}
+        >
+          <div
+            ref={stageRef}
+            tabIndex={0}
+            className={cn(
+              "ratio-16-9 relative mx-auto block w-full touch-none select-none overflow-hidden bg-sunken outline-none",
+              "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand",
+              session ? "cursor-crosshair" : "cursor-default",
+              !isFullscreen && "rounded-lg border border-line",
+              watch && "max-h-[48vh]",
+            )}
+            style={stageSizeStyle}
+            onPointerMove={onPointerMove}
+            onPointerDown={onPointerDown}
+            onPointerUp={onPointerUp}
+            onWheel={onWheel}
+            onKeyDown={onKeyDown}
+            onKeyUp={onKeyUp}
+            onContextMenu={(event) => event.preventDefault()}
+            aria-label="实时画面与输入区域"
+          >
+            <FrameStage className="h-full w-full">
+              {frameUrl ? (
+                <img
+                  src={frameUrl}
+                  alt="实时画面"
+                  draggable={false}
+                  className="block h-full w-full object-contain"
+                  onLoad={(event) => {
+                    const image = event.currentTarget;
+                    setNatural({ width: image.naturalWidth, height: image.naturalHeight });
+                  }}
+                />
+              ) : (
+                <div className="flex h-full w-full flex-col items-center justify-center bg-sunken px-3 text-center">
+                  <MousePointer2 className={cn("shrink-0 text-faint", watch ? "size-5" : "size-6")} aria-hidden />
+                  <p className="mt-2 break-words text-[0.8rem] text-soft">
+                    {status === "idle" ? "点击“开始实时控制”建立会话" : message || "等待画面…"}
+                  </p>
+                </div>
+              )}
+            </FrameStage>
+          </div>
+        </div>
+      </GlowCard>
+
+      {/* Status strip: every number is server-clock / measured, tabular. */}
+      <div className="surface-quiet min-w-0 p-2.5 sm:p-3">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <LiveMetric
+            label="帧率"
+            value={streaming ? String(fps) : "—"}
+            unit="fps"
+            hint={session ? `目标 ${session.fps} fps` : undefined}
+            tone={streaming ? "text-ok" : undefined}
+          />
+          <LiveMetric label="画质" value={session ? String(session.quality) : "—"} />
+          <LiveMetric
+            label="往返"
+            value={rttMs === null ? "—" : rttMs.toFixed(0)}
+            unit="ms"
+            tone={rttMs !== null && rttMs > 400 ? "text-warn" : undefined}
+          />
+          <LiveMetric
+            label="剩余"
+            value={secondsLeft === null ? "—" : String(secondsLeft)}
+            unit="s"
+            hint="服务端时钟"
+            tone={secondsLeft !== null && secondsLeft <= 60 ? "text-warn" : undefined}
+          />
+        </div>
+      </div>
+
+      {/* Keyboard text row: on a watch the send button drops to its own row. */}
+      <div className="surface-quiet grid grid-cols-[auto_minmax(0,1fr)] items-center gap-2 p-2.5 sm:grid-cols-[auto_minmax(0,1fr)_auto]">
+        <Keyboard className="size-4 shrink-0 text-soft" aria-hidden />
         <Input
           placeholder="在此输入文字并按回车，直接发送到受控端"
-          className="h-9 text-xs"
+          className="h-11 text-[0.82rem]"
           aria-label="发送文字到受控端"
           value={textValue}
           onChange={(event) => setTextValue(event.target.value)}
@@ -541,8 +683,8 @@ export function LiveView({ device }: Props) {
           }}
         />
         <Button
-          size="sm"
           variant="outline"
+          className="col-span-2 min-h-11 sm:col-span-1"
           onClick={() => {
             sendText(textValue);
             setTextValue("");
@@ -552,9 +694,8 @@ export function LiveView({ device }: Props) {
         </Button>
       </div>
 
-      <p className="text-xs leading-relaxed text-faint">
-        画面与输入都经过服务器中转，全程审计。会话剩余 {secondsLeft === null ? "—" : secondsLeft} 秒（服务端时钟）。
-        {rttMs !== null ? ` 通道往返约 ${rttMs.toFixed(0)}ms。` : ""}
+      <p className="text-[0.72rem] leading-relaxed text-faint">
+        画面与输入经服务器中转并全程审计；点击画面聚焦后键盘快捷键才生效。
       </p>
     </div>
   );

@@ -1,4 +1,4 @@
-import { Loader2 } from "lucide-react";
+import { Loader2, ShieldAlert } from "lucide-react";
 
 import {
   AlertDialog,
@@ -12,12 +12,9 @@ import {
 } from "@/components/ui/alert-dialog";
 
 /**
- * A controlled confirmation dialog for destructive actions.
- *
- * Replaces `window.confirm` (which blocks the event loop, cannot be styled and
- * is ignored by some embedded WebViews). The caller owns `open` because the
- * action itself is asynchronous: keep the dialog open until the mutation
- * settles, then close it.
+ * Controlled confirmation dialog for destructive actions. The caller owns
+ * `open` because the action is asynchronous: keep the dialog open until the
+ * mutation settles, then close it.
  */
 export function ConfirmDialog({
   open,
@@ -42,7 +39,14 @@ export function ConfirmDialog({
     <AlertDialog open={open} onOpenChange={onOpenChange}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>{title}</AlertDialogTitle>
+          <div className="flex items-center gap-2.5">
+            {destructive ? (
+              <span className="flex size-9 shrink-0 items-center justify-center rounded-xl border border-line bg-danger-soft text-danger">
+                <ShieldAlert className="size-4" />
+              </span>
+            ) : null}
+            <AlertDialogTitle>{title}</AlertDialogTitle>
+          </div>
           <AlertDialogDescription>{description}</AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>

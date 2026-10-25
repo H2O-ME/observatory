@@ -1,25 +1,19 @@
-/* Mobile, watch and touch refinements.
- *
- * Loaded after index.css. Two goals:
- *  1. Nothing is "crammed": on a 320-380px screen the console switches to a single
- *     column, larger type and full-width touch targets.
- *  2. Performance: the watch repaints poorly, so backdrop filters and the ambient
- *     aurora are dropped on small or low-power devices.
- */
+/* ----------------------------------------------------------------------------
+   Touch / small-screen refinements. Loaded after index.css.
+
+   The watch is not "a small desktop": it gets one column, larger touch targets,
+   no continuous ambient animation and no backdrop blur. Phones keep the glass
+   but lose the pointer-only affordances.
+   -------------------------------------------------------------------------- */
 
 @layer base {
-  html {
-    -webkit-text-size-adjust: 100%;
-    text-size-adjust: 100%;
-  }
-
   body {
     /* Avoid iOS rubber-band jitter inside the app shell. */
     overscroll-behavior-y: none;
   }
 
-  /* 100dvh keeps the bottom nav visible as mobile browser chrome collapses.
-     Older engines fall back to 100vh, which is what they can do. */
+  /* 100dvh keeps the bottom dock above mobile browser chrome; older engines
+     fall back to 100vh (index.css .app-vh does the same). */
   #root {
     height: 100vh;
   }
@@ -29,43 +23,39 @@
     }
   }
 
-  /* Coarse pointers (phones, watches): 44px minimum hit area and 16px inputs so
-     the browser never zooms on focus.
-     `!important` is deliberate: per-component Tailwind utilities (`text-xs`,
-     `text-[0.7rem]`) live in the utilities layer and would otherwise beat this
-     base rule, re-enabling iOS focus zoom — which is exactly what happened in
-     0.2.x where the rule silently did nothing on the file and settings inputs. */
+  /* iOS zooms the viewport when a focused input is below 16px. */
   @media (pointer: coarse) {
     input,
     select,
     textarea {
       font-size: 16px !important;
     }
-
-    button,
-    [role="button"],
-    a.tap-target {
-      min-height: 44px;
-    }
   }
 
-  /* The watch WebView struggles with large blurred layers; remove them there and
-     on anything that asks for reduced motion. */
-  @media (max-width: 420px), (prefers-reduced-motion: reduce) {
+  /* The watch WebView repaints poorly: strip the expensive layers. */
+  @media (max-width: 480px) and (max-height: 560px),
+    (max-width: 340px),
+    (prefers-reduced-motion: reduce) {
     body::before {
       display: none;
     }
-    .glass,
-    .glass-raised,
+    .surface,
+    .surface-strong,
+    .surface-danger,
+    .surface-warn,
+    .surface-ok,
     .glass-chrome {
       -webkit-backdrop-filter: none;
       backdrop-filter: none;
+    }
+    .surface,
+    .surface-strong {
+      background-color: var(--c-panel-strong);
     }
   }
 }
 
 @layer utilities {
-  /* Safe areas for notched phones and round watch faces. */
   .pb-safe {
     padding-bottom: env(safe-area-inset-bottom);
   }
@@ -77,18 +67,23 @@
     padding-right: env(safe-area-inset-right);
   }
 
-  /* Horizontal scrollers should not look like they hide content. */
-  .scroll-x {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
+  /* Content clears the floating dock. */
+  .pb-dock {
+    padding-bottom: 6.5rem;
   }
 
-  /* Applied to lists of tap rows so the pressed state is obvious on touch. */
   .tap-row {
-    min-height: 44px;
+    min-height: 48px;
     transition: background-color 0.12s ease;
   }
   .tap-row:active {
     background-color: var(--c-sunken);
+  }
+
+  /* Watch: slightly larger body copy than the old 11px era, but still fits
+     four rows of data on a 320px face. */
+  .watch-text {
+    font-size: 0.78rem;
+    line-height: 1.45;
   }
 }

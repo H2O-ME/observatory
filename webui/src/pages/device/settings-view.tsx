@@ -1,11 +1,16 @@
 import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Loader2, RotateCcw, Save, TriangleAlert } from "lucide-react";
+import { Check, Lock, RotateCcw, Save, SlidersHorizontal, TriangleAlert } from "lucide-react";
 
-import { Banner, ErrorBlock, LoadingBlock, PageHeader } from "@/components/async-state";
-import { Button } from "@/components/ui/button";
+import { GlowCard, ShimmerButton } from "@/components/aceternity";
+import { Banner, EmptyBlock, ErrorBlock, LoadingBlock } from "@/components/async-state";
+import { MetaChip } from "@/components/page-header";
+import { Section, SectionHeader } from "@/components/section";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { useViewport } from "@/hooks/use-viewport";
 import { api, isApiError } from "@/lib/api";
 import type { Device, SettingSpec } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -31,9 +36,18 @@ function showValue(value: unknown): string {
  * Server limit (reported as G7): `PATCH /devices/{uid}` can set an override but
  * cannot delete one. The page says so instead of pretending "restore default"
  * works.
+ *
+ * Presentation (0.4): responsive override rows (values left, control right,
+ * stacked on phones/watches) and a save bar that floats above the dock so the
+ * primary action is always reachable.
  */
 export function DeviceSettingsView({ device }: { device: Device }) {
   const queryClient = useQueryClient();
+  const viewport = useViewport();
+  const desktop = viewport === "desktop";
+  const watch = viewport === "watch";
+  const touch = !desktop;
+  const stack = watch ? "space-y-3" : "space-y-5";
   const uid = device.uid;
 
   const settingsQuery = useQuery({ queryKey: ["settings"], queryFn: api.getSettings, staleTime: 30_000 });
@@ -68,6 +82,7 @@ export function DeviceSettingsView({ device }: { device: Device }) {
   );
 
   const editCount = Object.keys(edits).length;
+  const canSave = !busy && editCount > 0;
 
   const setEdit = (key: string, value: unknown) => {
     setEdits((current) => {
@@ -125,21 +140,27 @@ export function DeviceSettingsView({ device }: { device: Device }) {
     Object.prototype.hasOwnProperty.call(effectiveValues, key) &&
     JSON.stringify(effectiveValues[key]) !== JSON.stringify(globalValues[key]);
 
+  const loadError =
+    settingsQuery.isError || effectiveQuery.isError
+      ? isApiError(settingsQuery.error)
+        ? settingsQuery.error.message
+        : isApiError(effectiveQuery.error)
+          ? effectiveQuery.error.message
+          : "无法读取设备设置"
+      : "";
+  const loading = settingsQuery.isLoading || effectiveQuery.isLoading;
+
   return (
-    <div className="space-y-3">
-      <PageHeader
-        title="本设备设置"
-        subtitle={
-          <>
-            只影响 <span className="font-mono">{device.name || uid}</span>；全局默认请到{" "}
-            <a href="/settings" className="text-brand no-underline">
-              设置
-            </a>{" "}
-            页修改。保存后服务端会立即推送配置给在线受控端。
-          </>
-        }
-        actions={
-          <>
+    <div className="w-full min-w-0">
+      <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-3">
+        <p className="min-w-0 text-[0.78rem] leading-relaxed text-soft">
+          只影响 <span className="font-mono break-all">{device.name || uid}</span>，留空 = 继承全局；全局默认在{" "}
+          <Link to="/settings" className="text-brand no-underline hover:underline">
+            设置
+          </Link>{" "}
+          页修改。
+        </p>
+        <div className="grid min-w-0 grid-cols-2 gap-2">
             <Button
               size="sm"
               variant="outline"
@@ -148,89 +169,120 @@ export function DeviceSettingsView({ device }: { device: Device }) {
                 setMessage("已放弃未保存的覆盖");
                 setError("");
               }}
-              disabled={busy || editCount === 0}
+              disabled={!canSave}
             >
               <RotateCcw className="size-3.5" />
               放弃修改
             </Button>
-            <Button size="sm" onClick={() => void save()} disabled={busy || editCount === 0}>
-              {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
+            <ShimmerButton busy={busy} disabled={!canSave} onClick={() => void save()}>
+              <Save className="mr-1.5 size-4" />
               保存覆盖{editCount > 0 ? `（${editCount} 项）` : ""}
-            </Button>
+            </ShimmerButton>
+        </div>
+      </div>
+
+      <div className={cn("mt-4 min-w-0 sm:mt-5", stack)}>
+        {message ? <Banner tone="ok">{message}</Banner> : null}
+        {error ? (
+          <Banner tone="error" title="保存失败">
+            {error}
+          </Banner>
+        ) : null}
+
+        {loadError ? (
+          <ErrorBlock
+            message={loadError}
+            retryable
+            onRetry={() => {
+              void settingsQuery.refetch();
+              void effectiveQuery.refetch();
+            }}
+          />
+        ) : loading ? (
+          <LoadingBlock label="正在读取设置与生效值…" rows={6} />
+        ) : (
+          <>
+            <GlowCard isStatic={!desktop} className="min-w-0" contentClassName="p-3 sm:p-5">
+              <SectionHeader
+                title="可按设备覆盖"
+                hint="留空 = 继承全局"
+                icon={SlidersHorizontal}
+                actions={<MetaChip tone="brand">{overridable.length} 项</MetaChip>}
+              />
+              {overridable.length === 0 ? (
+                <div className="mt-3">
+                  <EmptyBlock
+                    title="没有可按设备覆盖的设置"
+                    description="服务端当前没有声明 per_device 的设置键；全部配置都在全局设置页维护。"
+                    action={
+                      <Link
+                        to="/settings"
+                        className={cn(
+                          buttonVariants({ variant: "outline", size: "sm" }),
+                          "h-11 no-underline sm:h-9",
+                        )}
+                      >
+                        打开全局设置
+                      </Link>
+                    }
+                  />
+                </div>
+              ) : (
+                <div className="mt-2 grid min-w-0">
+                  {overridable.map(([key, spec]) => (
+                    <DeviceSettingRow
+                      key={key}
+                      name={key}
+                      spec={spec}
+                      globalValue={globalValues[key]}
+                      effectiveValue={effectiveValues[key]}
+                      overridden={isOverridden(key)}
+                      editValue={edits[key]}
+                      touch={touch}
+                      onChange={(value) => setEdit(key, value)}
+                      onFillGlobal={() => {
+                        const value = globalValues[key];
+                        if (spec.kind === "bool") setEdit(key, value ? "true" : "false");
+                        else setEdit(key, typeof value === "number" ? value : String(value ?? ""));
+                      }}
+                    />
+                  ))}
+                </div>
+              )}
+            </GlowCard>
+
+            <Section
+              title="只支持全局的设置"
+              hint={`${globalOnly.length} 项只能在设置页修改`}
+              icon={Lock}
+              tone="quiet"
+            >
+              <div className="flex min-w-0 flex-wrap">
+                {globalOnly.length === 0 ? (
+                  <p className="text-[0.78rem] text-soft">—</p>
+                ) : (
+                  globalOnly.map((key) => (
+                    <span
+                      key={key}
+                      className="mr-1.5 mt-1.5 min-w-0 break-all rounded-lg border border-line bg-sunken px-2 py-1 font-mono text-[0.68rem] leading-relaxed text-soft"
+                    >
+                      {key}
+                    </span>
+                  ))
+                )}
+              </div>
+            </Section>
+
+            <Section title="已知限制" icon={TriangleAlert} tone="warn">
+              <p className="text-[0.78rem] leading-relaxed text-soft">
+                服务端只支持写入/覆盖，暂不支持删除某条覆盖。要回到全局行为，可点该行的“填全局值”再保存（会留下一条与全局相同的覆盖）。
+              </p>
+            </Section>
           </>
-        }
-      />
+        )}
+      </div>
 
-      {message ? <Banner tone="ok">{message}</Banner> : null}
-      {error ? <Banner tone="error">{error}</Banner> : null}
 
-      <Banner tone="info">
-        每一行左侧是<b className="mx-0.5">全局默认</b>，右侧是<b className="mx-0.5">本设备当前有效值</b>。
-        输入框留空表示“继承全局”；填了值才会写入本设备覆盖。
-      </Banner>
-
-      {settingsQuery.isError || effectiveQuery.isError ? (
-        <ErrorBlock
-          message={
-            isApiError(settingsQuery.error) || isApiError(effectiveQuery.error)
-              ? (isApiError(settingsQuery.error) ? settingsQuery.error.message : (effectiveQuery.error as never))
-              : "无法读取设备设置"
-          }
-          retryable
-          onRetry={() => {
-            void settingsQuery.refetch();
-            void effectiveQuery.refetch();
-          }}
-        />
-      ) : settingsQuery.isLoading || effectiveQuery.isLoading ? (
-        <LoadingBlock label="正在读取设置与生效值…" rows={6} />
-      ) : (
-        <>
-          <section className="rounded-panel border border-line bg-panel p-4">
-            <h2 className="mb-2 text-sm font-medium text-soft">可按设备覆盖（{overridable.length} 项）</h2>
-            <div className="space-y-3">
-              {overridable.map(([key, spec]) => (
-                <DeviceSettingRow
-                  key={key}
-                  name={key}
-                  spec={spec}
-                  globalValue={globalValues[key]}
-                  effectiveValue={effectiveValues[key]}
-                  overridden={isOverridden(key)}
-                  editValue={edits[key]}
-                  onChange={(value) => setEdit(key, value)}
-                  onFillGlobal={() => {
-                    const value = globalValues[key];
-                    if (spec.kind === "bool") setEdit(key, value ? "true" : "false");
-                    else setEdit(key, typeof value === "number" ? value : String(value ?? ""));
-                  }}
-                />
-              ))}
-            </div>
-          </section>
-
-          <section className="rounded-panel border border-line bg-panel p-4">
-            <h2 className="mb-1.5 flex items-center gap-1.5 text-sm font-medium text-soft">
-              <TriangleAlert className="size-3.5 text-warn" />
-              只支持全局的设置（{globalOnly.length} 项）
-            </h2>
-            <p className="text-[0.7rem] leading-relaxed text-soft">
-              以下设置不支持按设备覆盖，只能在设置页修改：
-            </p>
-            <p className="mt-1 break-all font-mono text-[0.7rem] leading-relaxed text-faint">
-              {globalOnly.join(" · ") || "—"}
-            </p>
-          </section>
-
-          <section className="rounded-panel border border-line bg-panel p-4">
-            <h2 className="mb-1.5 text-sm font-medium text-soft">已知限制</h2>
-            <p className="text-[0.7rem] leading-relaxed text-soft">
-              服务端当前只支持“写入/覆盖”单设备设置，<b>不支持删除某条覆盖</b>（`PATCH /devices/{"{uid}"}` 没有删除分支）。
-              要回到全局行为，可点该行的“填全局值”再保存（这会留下一条与全局相同的覆盖），或等 server-console 提供删除接口。
-            </p>
-          </section>
-        </>
-      )}
     </div>
   );
 }
@@ -242,6 +294,7 @@ function DeviceSettingRow({
   effectiveValue,
   overridden,
   editValue,
+  touch,
   onChange,
   onFillGlobal,
 }: {
@@ -251,6 +304,7 @@ function DeviceSettingRow({
   effectiveValue: unknown;
   overridden: boolean;
   editValue: unknown;
+  touch: boolean;
   onChange: (value: unknown) => void;
   onFillGlobal: () => void;
 }) {
@@ -258,37 +312,43 @@ function DeviceSettingRow({
   const effectiveText = showValue(effectiveValue);
 
   return (
-    <div className="grid gap-1.5 border-b border-line/60 pb-2.5 last:border-b-0 last:pb-0 sm:grid-cols-[minmax(0,1fr)_minmax(0,20rem)] sm:items-center sm:gap-3">
+    <div className="grid min-w-0 gap-3 border-b border-line py-4 first:pt-0 last:border-b-0 last:pb-0 lg:grid-cols-[minmax(0,1fr)_minmax(0,18rem)] lg:items-center lg:gap-5">
       <div className="min-w-0">
-        <p className="flex flex-wrap items-center gap-1.5 text-xs text-ink">
-          <label htmlFor={id}>{spec.description || name}</label>
+        <div className="flex min-w-0 flex-wrap items-center">
+          <label htmlFor={id} className="mr-2 min-w-0 text-[0.84rem] font-medium leading-snug text-ink">
+            {spec.description || name}
+          </label>
           {overridden ? (
-            <span className="rounded border border-brand/30 bg-brand/10 px-1 py-0.5 text-[0.7rem] text-brand">
+            <span className="mt-0.5 rounded-full border border-line bg-brand-soft px-1.5 py-px text-[0.62rem] font-semibold text-brand">
               本设备已覆盖
             </span>
           ) : (
-            <span className="rounded border border-line bg-sunken px-1 py-0.5 text-[0.7rem] text-faint">
+            <span className="mt-0.5 rounded-full border border-line bg-sunken px-1.5 py-px text-[0.62rem] font-medium text-faint">
               继承全局
             </span>
           )}
-        </p>
-        <p className="text-[0.7rem] text-faint">
-          <span className="font-mono">{name}</span> · 全局默认{" "}
-          <span className="font-mono text-soft">{showValue(globalValue)}</span> · 本设备有效{" "}
-          <span className={cn("font-mono", overridden ? "text-brand" : "text-soft")}>{effectiveText}</span>
+        </div>
+        <p className="mt-1 min-w-0 break-all text-[0.7rem] leading-relaxed text-faint">
+          全局 <span className="font-mono text-soft">{showValue(globalValue)}</span>
+          <span className="ml-1.5">
+            · 有效{" "}
+            <span className={cn("font-mono", overridden ? "font-semibold text-brand" : "text-soft")}>
+              {effectiveText}
+            </span>
+          </span>
           {spec.kind === "int" && (spec.min !== null || spec.max !== null)
             ? ` · 范围 ${spec.min ?? "—"}..${spec.max ?? "—"}`
             : ""}
         </p>
       </div>
 
-      <div className="flex items-center gap-1.5">
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5">
         {spec.kind === "bool" ? (
           <Select
             value={editValue === undefined ? INHERIT : String(editValue)}
             onValueChange={(value) => onChange(String(value) === INHERIT ? INHERIT : String(value))}
           >
-            <SelectTrigger id={id} size="sm" className="w-full">
+            <SelectTrigger id={id} size="sm" className={cn("w-full", touch && "tap")}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -302,7 +362,7 @@ function DeviceSettingRow({
             value={editValue === undefined ? INHERIT : String(editValue)}
             onValueChange={(value) => onChange(String(value) === INHERIT ? INHERIT : String(value))}
           >
-            <SelectTrigger id={id} size="sm" className="w-full">
+            <SelectTrigger id={id} size="sm" className={cn("w-full", touch && "tap")}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -322,14 +382,17 @@ function DeviceSettingRow({
             value={editValue === undefined ? "" : String(editValue)}
             placeholder={`继承全局：${showValue(globalValue)}`}
             onChange={(event) =>
-              onChange(event.target.value === "" ? INHERIT : spec.kind === "int" ? Number(event.target.value) : event.target.value)
+              onChange(
+                event.target.value === "" ? INHERIT : spec.kind === "int" ? Number(event.target.value) : event.target.value,
+              )
             }
-            className="h-9"
+            className={cn("h-9", touch && "tap")}
           />
         )}
         <Button
           size="icon-sm"
           variant="ghost"
+          className={cn("shrink-0", touch && "size-11")}
           title="填入全局默认值（保存后成为覆盖）"
           aria-label={`填入 ${name} 的全局默认值`}
           onClick={onFillGlobal}

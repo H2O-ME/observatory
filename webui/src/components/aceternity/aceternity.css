@@ -1,0 +1,1516 @@
+/* ============================================================================
+   Aceternity kit · observatory edition
+   ----------------------------------------------------------------------------
+   All visual plumbing for `components/aceternity/*`. Imported by
+   `components/aceternity/index.ts`, so importing the barrel is enough.
+
+   Rules honoured here (Android watch WebView = Chromium 81):
+     · no `inset` / `inset-inline-*` shorthand — longhand only;
+     · no individual `translate` / `rotate` / `scale` properties — `transform`;
+     · no `aspect-ratio` (components use `.ratio-*` / fixed heights instead);
+     · no `color-mix()` / `oklch()` / `@property` / `@container` / `:has()`;
+     · no `100dvh`, no `overflow: clip`, no `text-wrap: balance`;
+     · every animation is disabled under `prefers-reduced-motion: reduce`;
+     · the watch media query additionally strips continuous ambient motion.
+   Colours come from the semantic tokens in `index.css` (`var(--c-*)`).
+   Decorative gradients may use literal rgba() — that is the documented escape
+   hatch for backgrounds.
+
+   Class prefix: `ace-`.
+   ========================================================================== */
+
+/* ==========================================================================
+   1. Aurora background
+   ========================================================================== */
+
+.ace-aurora {
+  --ace-aurora-c1: #7dd3fc;
+  --ace-aurora-c2: #a5b4fc;
+  --ace-aurora-c3: #c4b5fd;
+  --ace-aurora-c4: #f0abfc;
+  --ace-aurora-c5: #93c5fd;
+  --ace-aurora-opacity: 0.5;
+  --ace-aurora-dur: 34s;
+
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.ace-aurora--fixed {
+  position: fixed;
+}
+
+.dark .ace-aurora {
+  --ace-aurora-c1: #0ea5e9;
+  --ace-aurora-c2: #6366f1;
+  --ace-aurora-c3: #8b5cf6;
+  --ace-aurora-c4: #c026d3;
+  --ace-aurora-c5: #2563eb;
+  --ace-aurora-opacity: 0.3;
+  --ace-aurora-dur: 46s;
+}
+
+.ace-aurora__layer {
+  position: absolute;
+  top: -50%;
+  right: -50%;
+  bottom: -50%;
+  left: -50%;
+  background-image: var(--ace-aurora-band), var(--ace-aurora);
+  background-size: 300% 200%, 300% 200%;
+  background-position: 50% 50%, 50% 50%;
+  background-repeat: no-repeat, no-repeat;
+  opacity: var(--ace-aurora-opacity);
+  animation: ace-aurora-drift var(--ace-aurora-dur) linear infinite;
+  will-change: background-position;
+}
+
+.ace-aurora__layer--a {
+  -webkit-mask-image: radial-gradient(
+    62% 58% at 50% 4%,
+    #000 8%,
+    rgba(0, 0, 0, 0.55) 44%,
+    transparent 78%
+  );
+  mask-image: radial-gradient(
+    62% 58% at 50% 4%,
+    #000 8%,
+    rgba(0, 0, 0, 0.55) 44%,
+    transparent 78%
+  );
+}
+
+.ace-aurora__layer--b {
+  background-image: var(--ace-aurora-soft);
+  background-size: 260% 260%;
+  background-position: 50% 50%;
+  opacity: calc(var(--ace-aurora-opacity) * 0.7);
+  animation-direction: reverse;
+  animation-duration: calc(var(--ace-aurora-dur) * 1.35);
+  -webkit-mask-image: radial-gradient(
+    70% 60% at 88% 12%,
+    #000 0%,
+    transparent 72%
+  );
+  mask-image: radial-gradient(70% 60% at 88% 12%, #000 0%, transparent 72%);
+}
+
+/* The "band" mask turns the colour wash into ribbons: opaque black stripes
+   hide parts of the gradient underneath, transparent gaps let it through. */
+.ace-aurora {
+  --ace-aurora-band: repeating-linear-gradient(
+    100deg,
+    #000 0%,
+    #000 7%,
+    transparent 10%,
+    transparent 12%,
+    #000 16%
+  );
+  --ace-aurora: repeating-linear-gradient(
+    100deg,
+    var(--ace-aurora-c1) 10%,
+    var(--ace-aurora-c2) 15%,
+    var(--ace-aurora-c3) 20%,
+    var(--ace-aurora-c4) 25%,
+    var(--ace-aurora-c5) 30%
+  );
+  --ace-aurora-soft: linear-gradient(
+    100deg,
+    var(--ace-aurora-c3),
+    var(--ace-aurora-c1) 42%,
+    var(--ace-aurora-c5) 100%
+  );
+}
+
+@keyframes ace-aurora-drift {
+  from {
+    background-position: 50% 50%, 50% 50%;
+  }
+  to {
+    background-position: 350% 50%, 350% 50%;
+  }
+}
+
+/* ==========================================================================
+   2. Background beams
+   ========================================================================== */
+
+.ace-beams {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0%,
+    #000 18%,
+    #000 74%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0%,
+    #000 18%,
+    #000 74%,
+    transparent 100%
+  );
+}
+
+.ace-beams--fixed {
+  position: fixed;
+}
+
+.ace-beams__svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.ace-beam {
+  fill: none;
+  stroke-linecap: round;
+  stroke-width: 1.15;
+  stroke-dasharray: 3 97;
+  animation-name: ace-beam-dash;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+@keyframes ace-beam-dash {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: -100;
+  }
+}
+
+/* ==========================================================================
+   3. Lamp effect
+   ========================================================================== */
+
+.ace-lamp {
+  --ace-lamp-core: rgba(99, 146, 255, 0.5);
+  --ace-lamp-mid: rgba(99, 146, 255, 0.12);
+  --ace-lamp-line: rgba(99, 146, 255, 0.85);
+
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.dark .ace-lamp {
+  --ace-lamp-core: rgba(125, 170, 255, 0.42);
+  --ace-lamp-mid: rgba(125, 170, 255, 0.08);
+  --ace-lamp-line: rgba(186, 214, 255, 0.9);
+}
+
+.ace-lamp__cone {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: min(160%, 56rem);
+  height: 26rem;
+  transform: translateX(-50%);
+  background-image: conic-gradient(
+    from 0deg at 50% 0%,
+    transparent 0deg,
+    transparent 114deg,
+    var(--ace-lamp-mid) 146deg,
+    var(--ace-lamp-core) 180deg,
+    var(--ace-lamp-mid) 214deg,
+    transparent 246deg,
+    transparent 360deg
+  );
+  opacity: 0.9;
+  pointer-events: none;
+  animation: ace-lamp-on 0.95s cubic-bezier(0.16, 0.84, 0.44, 1) both;
+  -webkit-mask-image: radial-gradient(
+    54% 86% at 50% 0%,
+    #000 22%,
+    transparent 76%
+  );
+  mask-image: radial-gradient(54% 86% at 50% 0%, #000 22%, transparent 76%);
+}
+
+.ace-lamp__glow {
+  position: absolute;
+  top: -5rem;
+  left: 50%;
+  width: min(110%, 38rem);
+  height: 14rem;
+  transform: translateX(-50%);
+  background-image: radial-gradient(
+    50% 50% at 50% 50%,
+    var(--ace-lamp-core),
+    transparent 68%
+  );
+  opacity: 0.45;
+  pointer-events: none;
+  animation: ace-lamp-on 1.1s ease-out both;
+}
+
+.ace-lamp__line {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: min(92%, 46rem);
+  height: 1px;
+  transform: translateX(-50%);
+  background-image: linear-gradient(
+    90deg,
+    transparent,
+    var(--ace-lamp-line),
+    transparent
+  );
+  box-shadow: 0 0 22px 3px var(--ace-lamp-core);
+  opacity: 0.9;
+  pointer-events: none;
+  animation: ace-fade-in 0.7s ease-out both;
+}
+
+.ace-lamp__content {
+  position: relative;
+  z-index: 1;
+}
+
+@keyframes ace-lamp-on {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-14px);
+  }
+  to {
+    opacity: 0.9;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+@keyframes ace-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 0.9;
+  }
+}
+
+/* ==========================================================================
+   4. Bento grid
+   ========================================================================== */
+
+.ace-bento {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.75rem;
+  width: 100%;
+  min-width: 0;
+}
+
+.ace-bento__item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--c-line);
+  border-radius: var(--radius-panel, 1.125rem);
+  background-color: var(--c-panel);
+  box-shadow: var(--sh-card);
+  transition: transform 0.2s ease, border-color 0.2s ease,
+    box-shadow 0.2s ease, background-color 0.2s ease;
+}
+
+.ace-bento__header {
+  position: relative;
+  overflow: hidden;
+  border-bottom: 1px solid var(--c-line);
+}
+
+.ace-bento__body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 0.875rem 1rem 1rem;
+}
+
+.ace-bento__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  margin-bottom: 0.5rem;
+  border: 1px solid var(--c-line);
+  border-radius: 0.625rem;
+  background-color: var(--c-sunken);
+  color: var(--c-brand);
+}
+
+.ace-bento__icon > svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.ace-bento__title {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: -0.012em;
+  color: var(--c-ink);
+}
+
+.ace-bento__desc {
+  margin: 0.25rem 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--c-soft);
+}
+
+.ace-bento__footer {
+  margin-top: auto;
+  padding-top: 0.625rem;
+}
+
+@media (min-width: 560px) {
+  .ace-bento {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.875rem;
+  }
+}
+
+@media (min-width: 1100px) {
+  .ace-bento {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1rem;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .ace-bento__item:hover {
+    transform: translateY(-2px);
+    border-color: var(--c-line-strong);
+    box-shadow: var(--sh-raised);
+  }
+}
+
+/* ==========================================================================
+   5. Glow card
+   ========================================================================== */
+
+.ace-glow {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--c-line);
+  border-radius: var(--radius-panel, 1.125rem);
+  background-color: var(--c-panel);
+  box-shadow: var(--sh-card);
+  transition: border-color 0.22s ease, box-shadow 0.22s ease,
+    background-color 0.22s ease;
+}
+
+.ace-glow__spot {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  border-radius: inherit;
+  background-image: radial-gradient(
+    240px circle at var(--ace-mx, 50%) var(--ace-my, 50%),
+    var(--ace-glow-tint, rgba(99, 146, 255, 0.18)),
+    transparent 68%
+  );
+  opacity: 0;
+  transition: opacity 0.28s ease;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.ace-glow__content {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  height: 100%;
+}
+
+/* Gradient hairline border, drawn above the content but never clickable. */
+.ace-glow::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 2;
+  padding: 1px;
+  border-radius: inherit;
+  background-image: linear-gradient(
+    130deg,
+    var(--c-brand-3),
+    var(--c-brand),
+    var(--c-brand-2)
+  );
+  opacity: 0;
+  transition: opacity 0.24s ease;
+  pointer-events: none;
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+}
+
+.ace-glow--static .ace-glow__spot {
+  opacity: 0.5;
+  background-image: radial-gradient(
+    62% 62% at 50% 0%,
+    var(--ace-glow-tint, rgba(99, 146, 255, 0.18)),
+    transparent 72%
+  );
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .ace-glow:hover,
+  .ace-glow:focus-within {
+    border-color: var(--c-line-strong);
+    box-shadow: var(--sh-raised);
+  }
+  .ace-glow:hover .ace-glow__spot,
+  .ace-glow:focus-within .ace-glow__spot {
+    opacity: 1;
+  }
+  .ace-glow:hover::after,
+  .ace-glow:focus-within::after {
+    opacity: 0.9;
+  }
+}
+
+/* Touch: no pointer tracking, but keep a fixed top gradient so the card still
+   reads as "lit" without costing a repaint per finger move. */
+@media (hover: none) {
+  .ace-glow__spot {
+    opacity: 0.55;
+    background-image: radial-gradient(
+      62% 62% at 50% 0%,
+      var(--ace-glow-tint, rgba(99, 146, 255, 0.18)),
+      transparent 72%
+    );
+  }
+}
+
+/* ==========================================================================
+   6. Timeline
+   ========================================================================== */
+
+.ace-timeline {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  min-width: 0;
+}
+
+.ace-timeline__item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1.5rem minmax(0, 1fr);
+  column-gap: 0.75rem;
+  padding-bottom: 1.25rem;
+  min-width: 0;
+}
+
+.ace-timeline__item:last-child {
+  padding-bottom: 0;
+}
+
+.ace-timeline__marker {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+}
+
+.ace-timeline__marker::before {
+  content: "";
+  position: absolute;
+  top: 0.9rem;
+  bottom: -0.35rem;
+  left: 50%;
+  width: 1px;
+  margin-left: -0.5px;
+  background-color: var(--c-line-strong);
+}
+
+.ace-timeline__item:last-child .ace-timeline__marker::before {
+  display: none;
+}
+
+.ace-timeline__dot {
+  position: relative;
+  z-index: 1;
+  width: 0.5625rem;
+  height: 0.5625rem;
+  margin-top: 0.55rem;
+  border-radius: 999px;
+  background-color: var(--c-brand);
+  box-shadow: 0 0 0 3px var(--c-brand-soft), 0 0 10px var(--c-brand-soft);
+}
+
+.ace-timeline__item--quiet .ace-timeline__dot {
+  background-color: var(--c-faint);
+  box-shadow: 0 0 0 3px var(--c-sunken);
+}
+
+.ace-timeline__body {
+  min-width: 0;
+  padding-bottom: 0.25rem;
+}
+
+.ace-timeline__date {
+  display: block;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--c-faint);
+}
+
+.ace-timeline__title {
+  margin: 0.2rem 0 0;
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: -0.01em;
+  color: var(--c-ink);
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+.ace-timeline__desc {
+  margin: 0.2rem 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--c-soft);
+  overflow-wrap: break-word;
+}
+
+.ace-timeline__extra {
+  margin-top: 0.5rem;
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .ace-timeline__item {
+    grid-template-columns: 1.125rem minmax(0, 1fr);
+    column-gap: 0.625rem;
+    padding-bottom: 1rem;
+  }
+}
+
+/* ==========================================================================
+   7. Tracing beam
+   ========================================================================== */
+
+.ace-tracing {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1.75rem minmax(0, 1fr);
+  column-gap: 0.625rem;
+  min-width: 0;
+}
+
+.ace-tracing__rail {
+  position: relative;
+  min-height: 100%;
+}
+
+.ace-tracing__rail::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 999px;
+  background-image: linear-gradient(
+    to bottom,
+    transparent,
+    var(--c-brand-2) 10%,
+    var(--c-brand) 46%,
+    var(--c-brand-3) 82%,
+    transparent
+  );
+  opacity: 0.35;
+}
+
+/* Light pulse travelling down the rail — pure background-position animation,
+   which is compositor-friendly and needs no scroll listeners. */
+.ace-tracing__rail::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  margin-left: -1px;
+  background-image: linear-gradient(
+    to bottom,
+    transparent,
+    var(--c-brand-3),
+    transparent
+  );
+  background-size: 100% 42%;
+  background-repeat: no-repeat;
+  background-position: 0% -42%;
+  animation: ace-beam-travel 6.5s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+  opacity: 0.85;
+}
+
+.ace-tracing__node {
+  position: sticky;
+  top: 4.75rem;
+  width: 0.625rem;
+  height: 0.625rem;
+  margin: 0.5rem auto 0;
+  border-radius: 999px;
+  background-color: var(--c-brand);
+  box-shadow: 0 0 0 3px var(--c-brand-soft), 0 0 14px 2px var(--c-brand-soft);
+}
+
+.ace-tracing__content {
+  min-width: 0;
+}
+
+@keyframes ace-beam-travel {
+  from {
+    background-position: 0% -42%;
+  }
+  to {
+    background-position: 0% 142%;
+  }
+}
+
+@media (max-width: 900px) {
+  .ace-tracing {
+    grid-template-columns: 1.125rem minmax(0, 1fr);
+    column-gap: 0.5rem;
+  }
+  .ace-tracing__node {
+    top: 4rem;
+    width: 0.5rem;
+    height: 0.5rem;
+  }
+}
+
+/* ==========================================================================
+   8. Floating dock
+   ========================================================================== */
+
+.ace-dock {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 40;
+  padding: 0.375rem 0.5rem calc(0.375rem + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--c-line);
+  background-color: var(--c-glass, var(--c-panel-strong));
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  backdrop-filter: blur(20px) saturate(150%);
+}
+
+.ace-dock__list {
+  display: grid;
+  grid-template-columns: repeat(var(--ace-dock-cols, 5), minmax(0, 1fr));
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ace-dock__item {
+  min-width: 0;
+}
+
+.ace-dock__link {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 52px;
+  padding: 0.25rem 0.125rem;
+  border-radius: 0.8125rem;
+  color: var(--c-faint);
+  text-decoration: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: color 0.14s ease, background-color 0.14s ease;
+}
+
+.ace-dock__link:visited {
+  color: var(--c-faint);
+}
+
+.ace-dock__link:active {
+  background-color: var(--c-sunken);
+}
+
+.ace-dock__link.is-active {
+  color: var(--c-brand);
+  background-color: var(--c-brand-soft);
+}
+
+.ace-dock__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+}
+
+.ace-dock__icon > svg {
+  width: 20px;
+  height: 20px;
+}
+
+.ace-dock__label {
+  max-width: 100%;
+  margin-top: 2px;
+  overflow: hidden;
+  font-size: 10px;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+  text-align: center;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.ace-dock__badge {
+  position: absolute;
+  top: 3px;
+  right: 50%;
+  min-width: 15px;
+  height: 15px;
+  margin-right: -20px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background-color: var(--c-danger);
+  color: var(--c-on-danger, #fff);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+}
+
+/* Icon-only variant: forced by prop, or automatic on the watch. */
+.ace-dock--compact .ace-dock__label {
+  display: none;
+}
+
+.ace-dock--compact .ace-dock__link {
+  min-height: 44px;
+}
+
+/* ==========================================================================
+   9. Infinite moving cards
+   ========================================================================== */
+
+.ace-marquee {
+  position: relative;
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.ace-marquee__track {
+  display: flex;
+  align-items: stretch;
+  width: max-content;
+  animation-name: ace-marquee;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  animation-duration: var(--ace-marquee-dur, 38s);
+  will-change: transform;
+}
+
+.ace-marquee--right .ace-marquee__track {
+  animation-direction: reverse;
+}
+
+.ace-marquee__group {
+  display: flex;
+  align-items: stretch;
+  flex: none;
+  min-width: 0;
+}
+
+.ace-marquee__item {
+  flex: none;
+  max-width: 20rem;
+  margin-right: 0.75rem;
+  min-width: 0;
+}
+
+.ace-marquee--pause .ace-marquee:hover .ace-marquee__track,
+.ace-marquee--pause .ace-marquee:focus-within .ace-marquee__track {
+  animation-play-state: paused;
+}
+
+@keyframes ace-marquee {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+
+/* ==========================================================================
+   10. Animated tooltip
+   ========================================================================== */
+
+.ace-tip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.ace-tip__bubble {
+  position: absolute;
+  z-index: 60;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  max-width: 16rem;
+  padding: 0.3rem 0.55rem;
+  border: 1px solid var(--c-line-strong);
+  border-radius: 0.5rem;
+  background-color: var(--c-raised);
+  color: var(--c-ink);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  line-height: 1.35;
+  white-space: nowrap;
+  box-shadow: var(--sh-raised);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-50%) translateY(4px);
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+
+.ace-tip:hover .ace-tip__bubble,
+.ace-tip:focus-within .ace-tip__bubble {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.ace-tip--bottom .ace-tip__bubble {
+  top: calc(100% + 8px);
+  bottom: auto;
+  transform: translateX(-50%) translateY(-4px);
+}
+
+.ace-tip--bottom:hover .ace-tip__bubble,
+.ace-tip--bottom:focus-within .ace-tip__bubble {
+  transform: translateX(-50%) translateY(0);
+}
+
+.ace-tip--end .ace-tip__bubble {
+  top: 50%;
+  bottom: auto;
+  left: calc(100% + 8px);
+  transform: translateY(-50%) translateX(-4px);
+}
+
+.ace-tip--end:hover .ace-tip__bubble,
+.ace-tip--end:focus-within .ace-tip__bubble {
+  transform: translateY(-50%) translateX(0);
+}
+
+/* Touch devices get no hover tooltip: the label must come from the child. */
+@media (hover: none) {
+  .ace-tip__bubble {
+    display: none;
+  }
+}
+
+/* ==========================================================================
+   11. Shimmer button
+   ========================================================================== */
+
+.ace-shimmer {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  max-width: 100%;
+  padding: 0.625rem 1.125rem;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 0.8125rem;
+  background-image: linear-gradient(
+    100deg,
+    var(--c-brand),
+    var(--c-brand-2) 56%,
+    var(--c-brand-3)
+  );
+  color: var(--c-brand-ink);
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.005em;
+  text-decoration: none;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.18) inset,
+    0 10px 26px -12px rgba(37, 99, 235, 0.55);
+  transition: transform 0.16s ease, box-shadow 0.18s ease, filter 0.18s ease;
+}
+
+.ace-shimmer__sheen {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 45%;
+  background-image: linear-gradient(
+    100deg,
+    rgba(255, 255, 255, 0),
+    rgba(255, 255, 255, 0.38),
+    rgba(255, 255, 255, 0)
+  );
+  transform: translateX(-160%);
+  animation: ace-sheen 3.4s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.ace-shimmer__label {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+}
+
+.ace-shimmer--block {
+  display: flex;
+  width: 100%;
+}
+
+.ace-shimmer[disabled],
+.ace-shimmer[aria-disabled="true"],
+.ace-shimmer--busy {
+  opacity: 0.6;
+  cursor: not-allowed;
+  filter: saturate(0.7);
+}
+
+.ace-shimmer__spinner {
+  display: inline-block;
+  width: 0.875rem;
+  height: 0.875rem;
+  margin-right: 0.4rem;
+  border: 2px solid rgba(255, 255, 255, 0.45);
+  border-top-color: #fff;
+  border-radius: 999px;
+  animation: ace-spin 0.8s linear infinite;
+}
+
+@keyframes ace-sheen {
+  0% {
+    transform: translateX(-160%);
+  }
+  55%,
+  100% {
+    transform: translateX(340%);
+  }
+}
+
+@keyframes ace-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .ace-shimmer:not([disabled]):not([aria-disabled="true"]):hover {
+    transform: translateY(-1px);
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.22) inset,
+      0 14px 32px -12px rgba(37, 99, 235, 0.62);
+  }
+  .ace-shimmer:hover .ace-shimmer__sheen {
+    animation-duration: 1.4s;
+  }
+}
+
+/* ==========================================================================
+   12. Sparkles
+   ========================================================================== */
+
+.ace-sparkles {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.ace-sparkle {
+  position: absolute;
+  display: block;
+  color: var(--c-brand-3);
+  opacity: 0;
+  transform: translate(-50%, -50%);
+  animation-name: ace-twinkle;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  animation-duration: var(--ace-sparkle-dur, 4s);
+  animation-delay: var(--ace-sparkle-delay, 0s);
+}
+
+@keyframes ace-twinkle {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.5) rotate(0deg);
+  }
+  35% {
+    opacity: 0.95;
+    transform: translate(-50%, -50%) scale(1) rotate(16deg);
+  }
+  70% {
+    opacity: 0.4;
+    transform: translate(-50%, -50%) scale(0.82) rotate(32deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.5) rotate(48deg);
+  }
+}
+
+/* ==========================================================================
+   13. Meteors
+   ========================================================================== */
+
+.ace-meteors {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.ace-meteor {
+  position: absolute;
+  width: 2px;
+  height: 2px;
+  border-radius: 999px;
+  background-color: var(--c-soft);
+  opacity: 0;
+  transform: rotate(45deg);
+  animation-name: ace-meteor-fall;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  animation-duration: var(--ace-meteor-dur, 6s);
+  animation-delay: var(--ace-meteor-delay, 0s);
+}
+
+.ace-meteor::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 56px;
+  height: 1px;
+  transform-origin: 0 50%;
+  background-image: linear-gradient(
+    90deg,
+    var(--c-line-strong),
+    transparent
+  );
+}
+
+@keyframes ace-meteor-fall {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 0, 0) rotate(45deg);
+  }
+  8% {
+    opacity: 0.9;
+  }
+  55% {
+    opacity: 0.55;
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(-240px, 240px, 0) rotate(45deg);
+  }
+}
+
+/* ==========================================================================
+   14. Moving border (rotating conic ring)
+   ========================================================================== */
+
+/* A flowing gradient painted only into the 1.5px frame, via the xor mask
+   trick. Adequate for *any* aspect ratio (the conic + oversized rotating
+   layer breaks on wide pills) and far cheaper than a viewport-sized layer. */
+.ace-spin-border {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  padding: 1.5px;
+  border-radius: inherit;
+  background-repeat: repeat;
+  background-size: 300% 100%;
+  background-position: 0% 50%;
+  pointer-events: none;
+  animation-name: ace-ring-flow;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  animation-duration: var(--ace-spin-dur, 8s);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+}
+
+.ace-spin-border--reverse {
+  animation-direction: reverse;
+}
+
+/* Seamless because the gradient repeats every 300% and travels exactly one
+   period (150 percentage points of background-position). */
+@keyframes ace-ring-flow {
+  from {
+    background-position: 0% 50%;
+  }
+  to {
+    background-position: 150% 50%;
+  }
+}
+
+/* ==========================================================================
+   15. Text generate effect
+   ========================================================================== */
+
+.ace-word {
+  display: inline-block;
+  animation-name: ace-word-in;
+  animation-duration: 0.55s;
+  animation-timing-function: cubic-bezier(0.22, 0.68, 0.36, 1);
+  animation-fill-mode: both;
+  will-change: opacity, filter;
+}
+
+/* CJK tokens animate per character; keep them inline so line breaking still
+   works (inline-blocks would not wrap between Han characters). */
+.ace-word--char {
+  display: inline;
+}
+
+.ace-word--plain {
+  animation-name: ace-word-fade;
+}
+
+@keyframes ace-word-in {
+  from {
+    opacity: 0;
+    -webkit-filter: blur(8px);
+    filter: blur(8px);
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    -webkit-filter: blur(0);
+    filter: blur(0);
+    transform: translateY(0);
+  }
+}
+
+@keyframes ace-word-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ==========================================================================
+   16. Reduced motion — everything stops, nothing disappears into opacity 0
+   ========================================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+  .ace-aurora__layer,
+  .ace-beam,
+  .ace-lamp__cone,
+  .ace-lamp__glow,
+  .ace-lamp__line,
+  .ace-spin-border,
+  .ace-marquee__track,
+  .ace-sparkle,
+  .ace-meteor,
+  .ace-word,
+  .ace-shimmer__sheen,
+  .ace-tracing__rail::after,
+  .ace-lamp__content {
+    animation: none !important;
+  }
+
+  .ace-aurora__layer {
+    opacity: calc(var(--ace-aurora-opacity) * 0.75);
+  }
+
+  .ace-beam {
+    stroke-dasharray: none;
+    stroke-dashoffset: 0;
+    opacity: 0.35;
+  }
+
+  .ace-sparkle {
+    opacity: 0.4;
+    transform: translate(-50%, -50%);
+  }
+
+  .ace-word {
+    opacity: 1;
+    -webkit-filter: none;
+    filter: none;
+    transform: none;
+  }
+
+  .ace-marquee {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .ace-marquee__track {
+    transform: none;
+  }
+
+  .ace-glow,
+  .ace-bento__item,
+  .ace-shimmer,
+  .ace-tip__bubble {
+    transition: none;
+  }
+
+  .ace-bento__item:hover,
+  .ace-shimmer:hover {
+    transform: none;
+  }
+}
+
+/* ==========================================================================
+   17. Small screens: the watch gets a lighter kit (fewer layers, no blur,
+   no continuous ambient animation). Phones lose the extra beam tier.
+   ========================================================================== */
+
+@media (max-width: 900px) {
+  .ace-beams__path--opt {
+    display: none;
+  }
+  .ace-aurora__layer--b {
+    display: none;
+  }
+  .ace-lamp__cone {
+    height: 20rem;
+  }
+}
+
+/* watch: matches useViewport()'s rule (≤480×560, or ≤340 wide) */
+@media (max-width: 480px) and (max-height: 560px), (max-width: 340px) {
+  .ace-aurora__layer {
+    animation: none;
+    opacity: calc(var(--ace-aurora-opacity) * 0.8);
+  }
+
+  .ace-beams__path--opt,
+  .ace-beams__path--lite {
+    display: none;
+  }
+  .ace-beam {
+    animation: none;
+    stroke-dasharray: none;
+    stroke-dashoffset: 0;
+    opacity: 0.35;
+  }
+
+  .ace-meteors {
+    display: none;
+  }
+
+  .ace-sparkles {
+    display: none;
+  }
+
+  .ace-spin-border {
+    animation: none;
+  }
+
+  .ace-marquee__track {
+    animation: none;
+    transform: none;
+  }
+  .ace-marquee {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .ace-marquee::-webkit-scrollbar {
+    display: none;
+  }
+
+  .ace-dock {
+    padding: 0.25rem 0.25rem calc(0.25rem + env(safe-area-inset-bottom));
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background-color: var(--c-panel-strong);
+  }
+  .ace-dock__list {
+    gap: 0;
+  }
+  .ace-dock__link {
+    min-height: 44px;
+    border-radius: 0.625rem;
+  }
+  .ace-dock__label {
+    display: none;
+  }
+  .ace-dock__icon {
+    width: 20px;
+    height: 20px;
+  }
+  .ace-dock__icon > svg {
+    width: 19px;
+    height: 19px;
+  }
+
+  .ace-tracing {
+    grid-template-columns: 0.625rem minmax(0, 1fr);
+    column-gap: 0.375rem;
+  }
+  .ace-tracing__rail::before {
+    width: 1.5px;
+  }
+  .ace-tracing__node {
+    top: 3.25rem;
+    width: 0.375rem;
+    height: 0.375rem;
+  }
+
+  .ace-bento__body {
+    padding: 0.75rem 0.75rem 0.875rem;
+  }
+  .ace-glow__content {
+    height: auto;
+  }
+}
+
+/* Coarse pointers get one transition-free, big-target treatment everywhere. */
+@media (pointer: coarse) {
+  .ace-dock__link {
+    min-height: 48px;
+  }
+  .ace-shimmer {
+    min-height: 48px;
+  }
+}
+
+/* ==========================================================================
+   18. Small additions used by individual components
+   ========================================================================== */
+
+/* Chromium 81-safe fade masks for GridPattern (never use a mask-image
+   arbitrary utility for these: it compiles to the unprefixed property). */
+.ace-grid--fade-radial {
+  -webkit-mask-image: radial-gradient(
+    68% 62% at 50% 38%,
+    #000 0%,
+    rgba(0, 0, 0, 0.6) 56%,
+    transparent 82%
+  );
+  mask-image: radial-gradient(
+    68% 62% at 50% 38%,
+    #000 0%,
+    rgba(0, 0, 0, 0.6) 56%,
+    transparent 82%
+  );
+}
+
+.ace-grid--fade-top {
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, transparent 78%);
+  mask-image: linear-gradient(to bottom, #000 0%, transparent 78%);
+}
+
+/* TimelineItem with an icon instead of a plain dot. */
+.ace-timeline__item--icon .ace-timeline__marker::before {
+  top: 1.85rem;
+}
+
+.ace-timeline__item--icon .ace-timeline__dot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  margin-top: 0.15rem;
+  border: 1px solid var(--c-line);
+  background-color: var(--c-sunken);
+  color: var(--c-brand);
+  box-shadow: none;
+}
+
+.ace-timeline__glyph {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ace-timeline__glyph > svg {
+  width: 0.875rem;
+  height: 0.875rem;
+}
+
+/* Tooltip forced open (first-run hint / tests). */
+.ace-tip--open .ace-tip__bubble {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.ace-tip--open.ace-tip--end .ace-tip__bubble {
+  transform: translateY(-50%) translateX(0);
+}
+
+/* Beams and aurora are decoration: if a page needs a solid reading surface it
+   can add `ace-atmos--dim` to the wrapper. */
+.ace-atmos--dim {
+  opacity: 0.5;
+}
+

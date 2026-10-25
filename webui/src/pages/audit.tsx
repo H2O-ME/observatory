@@ -1,14 +1,16 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronDown, RefreshCw } from "lucide-react";
+import { ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
 
-import { Banner, EmptyBlock, ErrorBlock, LoadingBlock, Pager } from "@/components/async-state";
-import { PageShell } from "@/components/page-shell";
+import { Timeline, TimelineItem } from "@/components/aceternity";
+import { EmptyBlock, ErrorBlock, LoadingBlock, Pager } from "@/components/async-state";
+import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { useViewport } from "@/hooks/use-viewport";
 import { api, isApiError } from "@/lib/api";
-import { formatDateTime } from "@/lib/format";
+import { formatDate, formatTime } from "@/lib/format";
 import { parseDateTimeLocal } from "@/lib/time-window";
 import type { AuditEntry } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -43,11 +45,15 @@ const ACTION_LABEL: Record<string, string> = {
  * Audit trail.
  *
  * The server filters by `action` and `device_uid` only (no actor/time params), so
- * those two are server-side and the actor box filters *the current page* — it is
- * labelled as such instead of pretending to search the whole trail. Every
+ * those two are server-side and the actor/time boxes filter *the current page* —
+ * the toolbar says so instead of pretending to search the whole trail. Every
  * timestamp is the server's `ts_ms`.
  */
 export function AuditPage() {
+  const viewport = useViewport();
+  const watch = viewport === "watch";
+  const desktop = viewport === "desktop";
+  const touch = !desktop;
   const [action, setAction] = useState("");
   const [deviceUid, setDeviceUid] = useState("");
   const [actor, setActor] = useState("");
@@ -55,6 +61,7 @@ export function AuditPage() {
   const [timeTo, setTimeTo] = useState("");
   const [offset, setOffset] = useState(0);
   const [expanded, setExpanded] = useState<number | null>(null);
+  const [filtersOpen, setFiltersOpen] = useState(false);
 
   const devicesQuery = useQuery({
     queryKey: ["devices"],
@@ -77,108 +84,182 @@ export function AuditPage() {
     if (toMs !== null && entry.ts_ms >= toMs) return false;
     return true;
   });
-  const pageFilter = Boolean(actor || timeFrom || timeTo);
   const devices = devicesQuery.data?.devices ?? [];
+  const hasActiveFilter = Boolean(action || deviceUid || actor || timeFrom || timeTo);
+
+  /** Keep server order (newest first) while grouping consecutive days. */
+  const groups: Array<{ day: string; items: AuditEntry[] }> = [];
+  for (const entry of visible) {
+    const day = formatDate(entry.ts_ms);
+    const last = groups[groups.length - 1];
+    if (last && last.day === day) last.items.push(entry);
+    else groups.push({ day, items: [entry] });
+  }
 
   const changeFilter = (next: () => void) => {
     next();
     setOffset(0);
   };
 
+  const clearFilters = () =>
+    changeFilter(() => {
+      setAction("");
+      setDeviceUid("");
+      setActor("");
+      setTimeFrom("");
+      setTimeTo("");
+    });
+
+  const fieldClass = cn("h-9 w-full text-xs", touch && "h-11");
+
   return (
-    <PageShell
-      title="审计日志"
-      subtitle="所有登录、设置、命令、文件与归档操作；时间均为服务器时间"
-      actions={
-        <Button size="sm" variant="outline" onClick={() => void query.refetch()} disabled={query.isFetching}>
-          <RefreshCw className={cn("size-3.5", query.isFetching && "animate-spin")} />
-          刷新
-        </Button>
-      }
-    >
-
-      <div className="flex flex-wrap items-center gap-2">
-        <Select
-          value={action || null}
-          onValueChange={(value) => changeFilter(() => setAction(typeof value === "string" ? value : ""))}
-        >
-          <SelectTrigger size="sm" className="w-40">
-            <SelectValue placeholder="全部动作" />
-          </SelectTrigger>
-          <SelectContent>
-            {Object.entries(ACTION_LABEL).map(([value, label]) => (
-              <SelectItem key={value} value={value}>
-                {label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-
-        <Select
-          value={deviceUid || null}
-          onValueChange={(value) => changeFilter(() => setDeviceUid(typeof value === "string" ? value : ""))}
-        >
-          <SelectTrigger size="sm" className="w-44">
-            <SelectValue placeholder="全部设备" />
-          </SelectTrigger>
-          <SelectContent>
-            {devices.map((device) => (
-              <SelectItem key={device.uid} value={device.uid}>
-                {device.name || device.uid}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-
-        <Input
-          value={actor}
-          onChange={(event) => setActor(event.target.value)}
-          placeholder="操作者（当前页内筛选）"
-          className="h-8 w-48 text-xs"
-          aria-label="操作者（当前页内筛选）"
-        />
-        <Input
-          type="datetime-local"
-          value={timeFrom}
-          onChange={(event) => setTimeFrom(event.target.value)}
-          className="h-8 w-[10.5rem] text-xs"
-          aria-label="起始时间（当前页内筛选）"
-          title="起始时间（当前页内筛选）"
-        />
-        <span className="text-xs text-faint">至</span>
-        <Input
-          type="datetime-local"
-          value={timeTo}
-          onChange={(event) => setTimeTo(event.target.value)}
-          className="h-8 w-[10.5rem] text-xs"
-          aria-label="结束时间（当前页内筛选）"
-          title="结束时间（当前页内筛选）"
-        />
-
-        {action || deviceUid || pageFilter ? (
+    <div className={cn("w-full max-w-full min-w-0 space-y-5", watch && "space-y-3")}>
+      <PageHeader
+        title="审计日志"
+        description="登录、设置、命令、文件与归档操作；时间均为服务器时间。"
+        actions={
           <Button
             size="sm"
-            variant="ghost"
-            onClick={() =>
-              changeFilter(() => {
-                setAction("");
-                setDeviceUid("");
-                setActor("");
-                setTimeFrom("");
-                setTimeTo("");
-              })
-            }
+            variant="outline"
+            className={cn("w-full sm:w-auto", touch && "min-h-11")}
+            onClick={() => void query.refetch()}
+            disabled={query.isFetching}
           >
-            清除筛选
+            <RefreshCw className={cn("size-3.5", query.isFetching && "animate-spin")} aria-hidden />
+            刷新
           </Button>
-        ) : null}
-      </div>
+        }
+      />
 
-      {pageFilter ? (
-        <Banner tone="info">
-          “操作者/时间”只在当前页的 {entries.length} 条记录内筛选（服务端只提供 action 与 device_uid 参数）。
-        </Banner>
-      ) : null}
+      <div className="surface grid min-w-0 gap-2 p-3">
+        <div
+          className={cn(
+            "grid min-w-0 gap-2",
+            desktop
+              ? "grid-cols-[minmax(0,10rem)_minmax(0,12rem)_minmax(0,1fr)_auto] items-center"
+              : "grid-cols-2",
+          )}
+        >
+          <Select
+            value={action || null}
+            onValueChange={(value) => changeFilter(() => setAction(typeof value === "string" ? value : ""))}
+          >
+            <SelectTrigger size="sm" className={cn("w-full", touch && "min-h-11")} aria-label="按动作筛选">
+              <SelectValue placeholder="全部动作" />
+            </SelectTrigger>
+            <SelectContent>
+              {Object.entries(ACTION_LABEL).map(([value, label]) => (
+                <SelectItem key={value} value={value}>
+                  {label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          <Select
+            value={deviceUid || null}
+            onValueChange={(value) => changeFilter(() => setDeviceUid(typeof value === "string" ? value : ""))}
+          >
+            <SelectTrigger size="sm" className={cn("w-full", touch && "min-h-11")} aria-label="按设备筛选">
+              <SelectValue placeholder="全部设备" />
+            </SelectTrigger>
+            <SelectContent>
+              {devices.map((device) => (
+                <SelectItem key={device.uid} value={device.uid}>
+                  {device.name || device.uid}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          {desktop ? (
+            <Input
+              value={actor}
+              onChange={(event) => setActor(event.target.value)}
+              placeholder="操作者（当前页内）"
+              className={fieldClass}
+              aria-label="操作者（当前页内筛选）"
+            />
+          ) : null}
+
+          {desktop && hasActiveFilter ? (
+            <Button size="sm" variant="ghost" onClick={clearFilters}>
+              清除筛选
+            </Button>
+          ) : null}
+        </div>
+
+        {!desktop ? (
+          <div className="flex min-w-0 flex-wrap items-center">
+            <Button
+              size="sm"
+              variant="outline"
+              className="min-h-11"
+              onClick={() => setFiltersOpen((open) => !open)}
+              aria-expanded={filtersOpen}
+            >
+              {filtersOpen ? "收起筛选" : "更多筛选"}
+            </Button>
+            {hasActiveFilter ? (
+              <Button size="sm" variant="ghost" className="ml-2 min-h-11" onClick={clearFilters}>
+                清除筛选
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+
+        {desktop ? (
+          <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2">
+            <Input
+              type="datetime-local"
+              value={timeFrom}
+              onChange={(event) => setTimeFrom(event.target.value)}
+              className={fieldClass}
+              aria-label="起始时间（当前页内筛选）"
+              title="起始时间（当前页内筛选）"
+            />
+            <span className="text-center text-[0.75rem] text-faint">至</span>
+            <Input
+              type="datetime-local"
+              value={timeTo}
+              onChange={(event) => setTimeTo(event.target.value)}
+              className={fieldClass}
+              aria-label="结束时间（当前页内筛选）"
+              title="结束时间（当前页内筛选）"
+            />
+          </div>
+        ) : filtersOpen ? (
+          <div className="grid min-w-0 grid-cols-1 gap-2">
+            <Input
+              value={actor}
+              onChange={(event) => setActor(event.target.value)}
+              placeholder="操作者（当前页内）"
+              className={fieldClass}
+              aria-label="操作者（当前页内筛选）"
+            />
+            <Input
+              type="datetime-local"
+              value={timeFrom}
+              onChange={(event) => setTimeFrom(event.target.value)}
+              className={fieldClass}
+              aria-label="起始时间（当前页内筛选）"
+              title="起始时间（当前页内筛选）"
+            />
+            <Input
+              type="datetime-local"
+              value={timeTo}
+              onChange={(event) => setTimeTo(event.target.value)}
+              className={fieldClass}
+              aria-label="结束时间（当前页内筛选）"
+              title="结束时间（当前页内筛选）"
+            />
+          </div>
+        ) : null}
+
+        <p className="min-w-0 text-[0.7rem] leading-relaxed text-faint">
+          动作与设备由服务端筛选；操作者与时间只作用于当前页。
+        </p>
+      </div>
 
       {query.isError ? (
         <ErrorBlock
@@ -191,56 +272,91 @@ export function AuditPage() {
       ) : visible.length === 0 ? (
         <EmptyBlock
           title={entries.length === 0 ? "没有审计记录" : "当前页内没有匹配的操作者"}
-          description={entries.length === 0 ? "筛选条件越少越容易命中；审计从 0.3.0 首次启动开始记录。" : undefined}
+          description={
+            entries.length === 0
+              ? "筛选条件越少越容易命中；审计从首次启动开始记录。"
+              : "操作者与时间范围只作用于当前页；可以翻页或放宽条件。"
+          }
         />
       ) : (
-        <ul className="divide-y divide-line rounded-panel border border-line bg-panel">
-          {visible.map((entry) => (
-            <AuditRow
-              key={entry.id}
-              entry={entry}
-              open={expanded === entry.id}
-              onToggle={() => setExpanded(expanded === entry.id ? null : entry.id)}
-            />
+        <div className="grid min-w-0 gap-4 sm:gap-5">
+          {groups.map((group) => (
+            <div key={group.day} className="surface min-w-0 p-3.5 sm:p-4">
+              <h2 className="tnum min-w-0 truncate text-[0.85rem] font-semibold text-ink">{group.day}</h2>
+              <Timeline className="mt-3">
+                {group.items.map((entry) => (
+                  <AuditTimelineItem
+                    key={entry.id}
+                    entry={entry}
+                    open={expanded === entry.id}
+                    touch={touch}
+                    onToggle={() => setExpanded(expanded === entry.id ? null : entry.id)}
+                  />
+                ))}
+              </Timeline>
+            </div>
           ))}
-        </ul>
+        </div>
       )}
 
       <Pager total={query.data?.total ?? 0} limit={PAGE} offset={offset} onChange={setOffset} busy={query.isFetching} />
-    </PageShell>
+    </div>
   );
 }
 
-function AuditRow({ entry, open, onToggle }: { entry: AuditEntry; open: boolean; onToggle: () => void }) {
-  const detail = Object.keys(entry.detail ?? {}).length > 0;
+function AuditTimelineItem({
+  entry,
+  open,
+  touch,
+  onToggle,
+}: {
+  entry: AuditEntry;
+  open: boolean;
+  touch: boolean;
+  onToggle: () => void;
+}) {
+  const hasDetail = Object.keys(entry.detail ?? {}).length > 0;
+  const device = entry.device_name || entry.device_uid;
   return (
-    <li>
-      <button type="button" onClick={onToggle} className="flex w-full items-start gap-2 px-2.5 py-2 text-left" aria-expanded={open}>
-        {detail ? (
-          <ChevronDown
-            className={cn("mt-0.5 size-3.5 shrink-0 text-faint transition-transform", !open && "-rotate-90")}
-            aria-hidden
-          />
-        ) : (
-          <span className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-        )}
-        <span className="min-w-0 flex-1">
-          <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-            <span className="text-[0.78rem] font-medium text-ink">{ACTION_LABEL[entry.action] ?? entry.action}</span>
-            <span className="font-mono text-[0.7rem] text-faint">{entry.action}</span>
-          </span>
-          <span className="mt-0.5 block truncate text-[0.7rem] text-faint">
-            {formatDateTime(entry.ts_ms)} · {entry.actor || "console"}
-            {entry.device_name || entry.device_uid ? ` · ${entry.device_name || entry.device_uid}` : ""}
+    <TimelineItem
+      date={formatTime(entry.ts_ms)}
+      title={<span className="min-w-0 break-words">{ACTION_LABEL[entry.action] ?? entry.action}</span>}
+      description={
+        <span className="block min-w-0">
+          <span className="mt-0.5 block min-w-0 break-words">
+            {entry.actor || "console"}
+            {device ? ` · ${device}` : ""}
             {entry.ip ? ` · ${entry.ip}` : ""}
           </span>
+          <span className="mt-0.5 block min-w-0 break-all font-mono text-[0.68rem] text-faint">{entry.action}</span>
         </span>
-      </button>
-      {open && detail ? (
-        <pre className="mx-2.5 mb-2 max-h-56 overflow-auto rounded-md border border-line bg-sunken p-2 font-mono text-[0.7rem] leading-relaxed text-soft">
-          {JSON.stringify(entry.detail, null, 2)}
-        </pre>
+      }
+    >
+      {hasDetail ? (
+        <div className="grid min-w-0 gap-1.5">
+          <button
+            type="button"
+            onClick={onToggle}
+            aria-expanded={open}
+            className={cn(
+              "inline-flex w-fit min-w-0 items-center rounded-lg border border-line bg-sunken px-2.5 py-1 text-[0.72rem] font-medium text-soft transition-colors hover:text-ink",
+              touch && "min-h-11",
+            )}
+          >
+            {open ? (
+              <ChevronDown className="mr-1 size-3.5 shrink-0" aria-hidden />
+            ) : (
+              <ChevronRight className="mr-1 size-3.5 shrink-0" aria-hidden />
+            )}
+            {open ? "收起 JSON" : "查看 JSON"}
+          </button>
+          {open ? (
+            <pre className="hide-scrollbar max-h-56 w-full max-w-full overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words rounded-lg border border-line bg-sunken p-2 font-mono text-[0.7rem] leading-relaxed text-soft">
+              {JSON.stringify(entry.detail, null, 2)}
+            </pre>
+          ) : null}
+        </div>
       ) : null}
-    </li>
+    </TimelineItem>
   );
 }

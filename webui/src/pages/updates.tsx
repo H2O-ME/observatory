@@ -1,16 +1,19 @@
 import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { Download, PackagePlus, RefreshCw, Trash2, Upload, X } from "lucide-react";
+import { ChevronRight, Download, PackagePlus, RefreshCw, Trash2, Upload, X } from "lucide-react";
 
+import { GlowCard, GridPattern, ShimmerButton } from "@/components/aceternity";
 import { Banner, EmptyBlock, ErrorBlock, LoadingBlock } from "@/components/async-state";
 import { ConfirmDialog } from "@/components/confirm-dialog";
-import { PageShell } from "@/components/page-shell";
+import { MetaChip, PageHeader } from "@/components/page-header";
+import { Section } from "@/components/section";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
+import { useViewport } from "@/hooks/use-viewport";
 import { api, isApiError } from "@/lib/api";
 import { formatBytes, formatDateTime } from "@/lib/format";
-import type { Package } from "@/lib/types";
+import type { Package as PackageDto } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /**
@@ -18,10 +21,13 @@ import { cn } from "@/lib/utils";
  *
  * "Latest" is the highest semver among uploaded packages (`PackageService.latest`
  * sorts by version), not "the last file uploaded": uploading 0.2.9 while 0.3.0
- * exists does not downgrade the offer. The page states that rule instead of
+ * exists does not downgrade the offer. The hero states that rule instead of
  * inventing a "set as latest" button the server does not have.
  */
 export function UpdatesPage() {
+  const viewport = useViewport();
+  const watch = viewport === "watch";
+  const touch = viewport !== "desktop";
   const queryClient = useQueryClient();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -29,7 +35,7 @@ export function UpdatesPage() {
   const [progress, setProgress] = useState<{ loaded: number; total: number; name: string } | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
-  const [pendingDelete, setPendingDelete] = useState<Package | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<PackageDto | null>(null);
 
   const query = useQuery({ queryKey: ["updates"], queryFn: api.getUpdates, refetchInterval: 30_000 });
 
@@ -74,59 +80,47 @@ export function UpdatesPage() {
 
   const data = query.data;
   const packages = data?.packages ?? [];
+  const latest = data?.latest_agent_version ?? null;
+  const outdated = data?.outdated ?? [];
+  const outdatedCount = outdated.length;
+  const busy = query.isFetching;
+  const uploading = progress !== null;
+  const uploadPercent = progress && progress.total > 0 ? Math.round((progress.loaded / progress.total) * 100) : 0;
+  const tapClass = touch ? "min-h-11 min-w-11" : undefined;
 
   return (
-    <PageShell
-      title="版本与更新"
-      subtitle={`服务端 v${data?.server_version ?? "—"} · 最新受控端版本 ${
-        data?.latest_agent_version ? `v${data.latest_agent_version}` : "（还没有安装包）"
-      }`}
-      actions={
-        <>
-          <Button size="sm" variant="outline" onClick={() => void query.refetch()} disabled={query.isFetching}>
-            <RefreshCw className={cn("size-3.5", query.isFetching && "animate-spin")} />
+    <div className={cn("w-full max-w-full min-w-0 space-y-5", watch && "space-y-3")}>
+      <PageHeader
+        title="版本与更新"
+        description={data ? `服务端 v${data.server_version} · 每 30 秒刷新` : "正在读取更新状态…"}
+        actions={
+          <Button
+            size="sm"
+            variant="outline"
+            className={cn("w-full sm:w-auto", touch && "min-h-11")}
+            onClick={() => void query.refetch()}
+            disabled={busy}
+          >
+            <RefreshCw className={cn("size-3.5", busy && "animate-spin")} aria-hidden />
             刷新
           </Button>
-          <Button onClick={() => inputRef.current?.click()} disabled={progress !== null}>
-            <Upload className="size-3.5" />
-            上传安装包
-          </Button>
-          <input
-            ref={inputRef}
-            type="file"
-            accept=".zip,application/zip"
-            className="hidden"
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (file) void upload(file);
-            }}
-          />
-        </>
-      }
-    >
+        }
+      />
+
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".zip,application/zip"
+        className="hidden"
+        aria-label="选择受控端安装包"
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          if (file) void upload(file);
+        }}
+      />
 
       {message ? <Banner tone="ok">{message}</Banner> : null}
       {error ? <Banner tone="error">{error}</Banner> : null}
-
-      {progress ? (
-        <div className="rounded-panel border border-line bg-panel p-2.5">
-          <div className="mb-1 flex items-center justify-between gap-2 text-xs text-soft">
-            <span className="truncate">
-              上传 {progress.name} · {formatBytes(progress.loaded)} / {formatBytes(progress.total)}
-            </span>
-            <Button size="sm" variant="ghost" onClick={() => abortRef.current?.abort()}>
-              <X className="size-3.5" />
-              取消
-            </Button>
-          </div>
-          <Progress value={progress.total > 0 ? Math.round((progress.loaded / progress.total) * 100) : 0} />
-        </div>
-      ) : null}
-
-      <Banner tone="info">
-        “最新”是已上传安装包里<b className="mx-0.5 font-medium">语义版本最高</b>的那个；上传更高版本才会改变推送目标，
-        上传旧版本不会把在线设备降到旧版。安装包必须包含 sha256，否则服务器拒绝向受控端推送。
-      </Banner>
 
       {query.isError ? (
         <ErrorBlock
@@ -134,88 +128,181 @@ export function UpdatesPage() {
           retryable
           onRetry={() => void query.refetch()}
         />
-      ) : query.isLoading ? (
-        <LoadingBlock label="正在读取更新状态…" rows={4} />
-      ) : packages.length === 0 ? (
-        <EmptyBlock
-          title="还没有上传安装包"
-          description="上传 observatory-agent-<版本>.zip 后，版本高于受控端当前版本的设备会自动收到升级指令。"
-          action={
-            <Button onClick={() => inputRef.current?.click()}>
-              <PackagePlus className="size-3.5" />
-              上传第一个安装包
-            </Button>
-          }
-        />
-      ) : (
-        <ul className="divide-y divide-line rounded-panel border border-line bg-panel">
-          {packages.map((pkg) => {
-            const latest = pkg.version === data?.latest_agent_version;
-            return (
-              <li key={pkg.version} className="flex flex-wrap items-start gap-2 px-2.5 py-2">
-                <span className="min-w-0 flex-1">
-                  <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                    <span className="font-mono text-[0.82rem] font-medium text-ink">v{pkg.version}</span>
-                    {latest ? (
-                      <span className="rounded border border-ok/30 bg-ok/10 px-1.5 py-0.5 text-[0.7rem] text-ok">
-                        当前最新
-                      </span>
-                    ) : null}
-                  </span>
-                  <span className="mt-0.5 block truncate text-[0.7rem] text-faint">
-                    {pkg.filename} · {formatBytes(pkg.size_bytes)} · sha256 {pkg.sha256.slice(0, 16)}… ·{" "}
-                    {formatDateTime(pkg.created_at_ms)}
-                  </span>
-                  {pkg.notes ? <span className="mt-0.5 block text-[0.7rem] text-soft">{pkg.notes}</span> : null}
-                </span>
-                <span className="flex shrink-0 items-center gap-1">
-                  <a
-                    href={pkg.download_url}
-                    className={cn(buttonVariants({ variant: "ghost", size: "sm" }), "no-underline")}
-                    title="下载该版本安装包"
-                  >
-                    <Download className="size-3.5" />
-                    下载
-                  </a>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={remove.isPending}
-                    onClick={() => setPendingDelete(pkg)}
-                    title={latest ? "删除当前最新版本会回退到次高版本" : "删除该安装包"}
-                  >
-                    <Trash2 className="size-3.5 text-danger" />
-                    删除
-                  </Button>
-                </span>
-              </li>
-            );
-          })}
-        </ul>
-      )}
+      ) : null}
 
-      {data && data.outdated.length > 0 ? (
-        <section className="rounded-panel border border-line bg-panel p-4">
-          <h2 className="mb-2 text-sm font-semibold text-soft">
-            仍低于最新版本的设备（{data.outdated.length}）
-          </h2>
-          <ul className="space-y-1 text-xs">
-            {data.outdated.map((device) => (
-              <li key={device.uid} className="flex items-center justify-between gap-2">
-                <Link to={`/device/${device.uid}/overview`} className="truncate text-brand no-underline">
-                  {device.name || device.uid}
-                </Link>
-                <span className="shrink-0 font-mono text-faint">
-                  v{device.version}
-                  {data.latest_agent_version ? ` → v${data.latest_agent_version}` : ""}
+      {/* The hero keeps the upload target (drop or button) without a second card. */}
+      <div
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={(event) => {
+          event.preventDefault();
+          if (uploading) return;
+          const file = event.dataTransfer.files?.[0];
+          if (file) void upload(file);
+        }}
+      >
+        <GlowCard className="min-w-0" contentClassName="relative p-4 sm:p-5">
+          <GridPattern
+            className="pointer-events-none absolute inset-full opacity-20"
+            fade="radial"
+            stroke="var(--c-grid-line)"
+            strokeDasharray="4 8"
+          />
+          <div className="relative grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+            <div className="min-w-0">
+              <p className="display-title tnum break-all text-gradient">{latest ? `v${latest}` : "—"}</p>
+              <p className="mt-2 max-w-xl text-[0.8rem] leading-relaxed text-soft">
+                “最新”取已上传安装包里
+                <b className="mx-0.5 font-semibold text-ink">语义版本最高</b>
+                的一个；上传旧版本不会降低推送目标。
+              </p>
+            </div>
+
+            <div className="flex min-w-0 flex-wrap items-center">
+              <ShimmerButton
+                className="w-full sm:w-auto"
+                busy={uploading}
+                disabled={uploading}
+                onClick={() => inputRef.current?.click()}
+                title="选择 .zip 安装包"
+              >
+                <span className="inline-flex items-center">
+                  <Upload className="mr-1.5 size-4" aria-hidden />
+                  选择安装包
                 </span>
-              </li>
-            ))}
+              </ShimmerButton>
+              {uploading ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className={cn("mt-2 w-full sm:ml-2 sm:mt-0 sm:w-auto", touch && "min-h-11")}
+                  onClick={() => abortRef.current?.abort()}
+                >
+                  <X className="size-4" aria-hidden />
+                  取消
+                </Button>
+              ) : null}
+            </div>
+          </div>
+
+          {progress ? (
+            <div className="relative mt-3 min-w-0 rounded-xl border border-line bg-sunken p-3">
+              <div className="flex min-w-0 flex-wrap items-center justify-between">
+                <span className="min-w-0 truncate font-mono text-[0.75rem] text-soft">
+                  {progress.name} · {formatBytes(progress.loaded)} / {formatBytes(progress.total)}
+                </span>
+                <span className="tnum shrink-0 text-[0.78rem] font-semibold text-brand">{uploadPercent}%</span>
+              </div>
+              <Progress className="mt-2" value={uploadPercent} />
+            </div>
+          ) : null}
+        </GlowCard>
+      </div>
+
+      <Section title="安装包">
+        {query.isLoading ? (
+          <LoadingBlock label="正在读取更新状态…" rows={4} />
+        ) : packages.length === 0 ? (
+          <EmptyBlock
+            title="还没有上传安装包"
+            description="上传 observatory-agent-<版本>.zip 后，版本更高的受控端会自动收到升级指令。"
+            action={
+              <Button onClick={() => inputRef.current?.click()}>
+                <PackagePlus className="size-3.5" aria-hidden />
+                上传第一个安装包
+              </Button>
+            }
+          />
+        ) : (
+          <ul className="grid min-w-0 gap-3">
+            {packages.map((pkg) => {
+              const isLatest = pkg.version === latest;
+              return (
+                <li
+                  key={pkg.version}
+                  className={cn(
+                    "grid min-w-0 grid-cols-1 gap-2.5 rounded-xl border px-3.5 py-3.5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-3",
+                    isLatest ? "border-line bg-brand-soft" : "border-line bg-sunken",
+                  )}
+                >
+                  <div className="grid min-w-0 gap-1.5">
+                    <div className="flex min-w-0 flex-wrap items-center">
+                      <span className="tnum mr-2 text-[0.95rem] font-semibold text-ink">v{pkg.version}</span>
+                      {isLatest ? (
+                        <MetaChip tone="ok" className="shrink-0">
+                          当前最新
+                        </MetaChip>
+                      ) : null}
+                    </div>
+                    <p className="min-w-0 truncate font-mono text-[0.72rem] text-faint">
+                      {pkg.filename} · {formatBytes(pkg.size_bytes)} · sha256 {pkg.sha256.slice(0, 16)}…
+                    </p>
+                    <p className="min-w-0 truncate text-[0.72rem] text-faint">
+                      上传于 {formatDateTime(pkg.created_at_ms)}
+                    </p>
+                    {pkg.notes ? (
+                      <p className="min-w-0 break-words text-[0.78rem] leading-relaxed text-soft">{pkg.notes}</p>
+                    ) : null}
+                  </div>
+
+                  <div className="flex min-w-0 flex-wrap items-center justify-start sm:justify-end">
+                    <a
+                      href={pkg.download_url}
+                      className={cn(buttonVariants({ variant: "ghost", size: "sm" }), "no-underline", tapClass)}
+                      title="下载该版本安装包"
+                      aria-label={`下载 v${pkg.version} 安装包`}
+                    >
+                      <Download className="size-4" aria-hidden />
+                      <span className="ml-1.5 hidden sm:inline">下载</span>
+                    </a>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className={cn("text-danger", tapClass)}
+                      disabled={remove.isPending}
+                      onClick={() => setPendingDelete(pkg)}
+                      title={isLatest ? "删除当前最新版本会回退到次高版本" : "删除该安装包"}
+                      aria-label={`删除 v${pkg.version} 安装包`}
+                    >
+                      <Trash2 className="size-4" aria-hidden />
+                      <span className="ml-1.5 hidden sm:inline">删除</span>
+                    </Button>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
-          <p className="mt-2 text-[0.7rem] leading-relaxed text-faint">
-            低于 0.3.0 的受控端不在自动升级路径上（版本下限），需要重新运行安装脚本覆盖安装；这类设备在设备详情页会显示“无法自动升级”。
-          </p>
-        </section>
+        )}
+      </Section>
+
+      {data && latest ? (
+        <Section
+          title={`仍低于最新版本的设备（${outdatedCount}）`}
+          hint="低于 0.3.0 的受控端不在自动升级路径上，需要重新运行安装脚本覆盖安装。"
+        >
+          {outdatedCount === 0 ? (
+            <p className="text-[0.8rem] text-soft">所有受控端的版本都不低于当前最新版本 v{latest}。</p>
+          ) : (
+            <ul className="grid min-w-0 gap-2">
+              {outdated.map((device) => (
+                <li
+                  key={device.uid}
+                  className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-xl border border-line bg-sunken px-3 py-2"
+                >
+                  <Link
+                    to={`/device/${device.uid}/overview`}
+                    className="tap-row flex min-w-0 items-center text-[0.82rem] font-medium text-brand no-underline"
+                  >
+                    <span className="min-w-0 truncate">{device.name || device.uid}</span>
+                    <ChevronRight className="ml-1 size-3.5 shrink-0 opacity-70" aria-hidden />
+                  </Link>
+                  <span className="tnum shrink-0 font-mono text-[0.72rem] text-faint">
+                    v{device.version} → v{latest}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Section>
       ) : null}
 
       <ConfirmDialog
@@ -236,6 +323,6 @@ export function UpdatesPage() {
           remove.mutate(pendingDelete.version, { onSettled: () => setPendingDelete(null) });
         }}
       />
-    </PageShell>
+    </div>
   );
 }

@@ -1,18 +1,20 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { CalendarRange, ChevronLeft, ExternalLink, RefreshCw } from "lucide-react";
+import { ChevronLeft, ExternalLink, RefreshCw } from "lucide-react";
 
+import { TracingBeam } from "@/components/aceternity";
 import {
   Banner,
   EmptyBlock,
   ErrorBlock,
   LoadingBlock,
-  PageHeader,
   Pager,
 } from "@/components/async-state";
+import { FrameView } from "@/components/frame-view";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { useViewport } from "@/hooks/use-viewport";
 import { api, isApiError } from "@/lib/api";
 import { formatBytes, formatDateTime, frameTimeMs } from "@/lib/format";
 import { dayWindow, formatWindow, parseDateTimeLocal, toDateTimeLocal } from "@/lib/time-window";
@@ -22,8 +24,44 @@ import { cn } from "@/lib/utils";
 
 const BUCKETS_PER_PAGE = 96;
 
+const DAY_OPTIONS = [
+  { days: 0, label: "今天" },
+  { days: 1, label: "昨天" },
+  { days: 2, label: "前天" },
+] as const;
+
 interface DeviceLike {
   uid: string;
+}
+
+interface HourGroup {
+  key: string;
+  /** "MM-DD" of the group, for the header. */
+  dateLabel: string;
+  /** "HH" of the group, for the header. */
+  hourLabel: string;
+  buckets: TimelineBucket[];
+}
+
+/** Group consecutive server buckets by hour. Ordering is the server's. */
+function groupByHour(buckets: TimelineBucket[]): HourGroup[] {
+  const groups: HourGroup[] = [];
+  for (const bucket of buckets) {
+    const stamp = formatDateTime(bucket.ts_ms);
+    const key = stamp.slice(0, 13);
+    const last = groups[groups.length - 1];
+    if (last && last.key === key) {
+      last.buckets.push(bucket);
+      continue;
+    }
+    groups.push({
+      key,
+      dateLabel: stamp.slice(5, 10),
+      hourLabel: stamp.slice(11, 13),
+      buckets: [bucket],
+    });
+  }
+  return groups;
 }
 
 /**
@@ -40,6 +78,8 @@ interface DeviceLike {
 export function TimelineView({ device }: { device: DeviceLike }) {
   const uid = device.uid;
   const now = useServerNow();
+  const viewport = useViewport();
+  const watch = viewport === "watch";
   const anchor = now === null ? null : Math.floor(now / 60_000) * 60_000;
 
   const [daysAgo, setDaysAgo] = useState(0);
@@ -102,101 +142,122 @@ export function TimelineView({ device }: { device: DeviceLike }) {
   const visibleBuckets = buckets.slice(bucketOffset, bucketOffset + BUCKETS_PER_PAGE);
   const bucketMs = timelineQuery.data?.bucket_ms ?? 0;
   const firstFrameId = buckets.find((bucket) => bucket.frame_id)?.frame_id ?? null;
+  const hourGroups = useMemo(() => groupByHour(visibleBuckets), [buckets, bucketOffset]);
+
+  const bucketGridClass = watch
+    ? "grid-cols-1"
+    : "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5";
+  const frameGridClass = watch ? "grid-cols-1" : "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4";
 
   return (
-    <div className="space-y-3">
-      <PageHeader
-        title="时间线"
-        subtitle={
-          window
-            ? `${formatWindow(window)} · ${timelineQuery.data ? `共 ${timelineQuery.data.total_frames} 帧` : "读取中"}`
-            : "等待服务端校时…"
-        }
-        actions={
-          <>
+    <div className={cn("min-w-0", watch ? "space-y-3" : viewport === "mobile" ? "space-y-4" : "space-y-5")}>
+      {/* Compact filter bar: day chips + actions on one row, exact window on the next. */}
+      <div className="surface min-w-0 p-3">
+        <div className="grid min-w-0 gap-2 sm:flex sm:flex-wrap sm:items-center sm:gap-2">
+          <div className="grid grid-cols-3 gap-1.5 sm:flex sm:flex-wrap sm:items-center sm:gap-2">
+            {DAY_OPTIONS.map((item) => {
+              const active = !custom && daysAgo === item.days;
+              return (
+                <button
+                  key={item.days}
+                  type="button"
+                  onClick={() => pickDay(item.days)}
+                  aria-pressed={active}
+                  className={cn(
+                    "tap inline-flex min-h-11 items-center justify-center rounded-full border px-3.5 text-[0.82rem] font-medium transition-colors",
+                    active
+                      ? "border-transparent bg-brand text-brand-ink shadow-card"
+                      : "border-line bg-sunken text-soft hover:text-ink",
+                  )}
+                >
+                  {item.label}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 sm:ml-auto sm:flex sm:items-center sm:gap-2">
             <Button
               size="sm"
-              variant="outline"
+              variant="ghost"
+              className="min-h-11"
               onClick={() => void timelineQuery.refetch()}
               disabled={timelineQuery.isFetching || !window}
             >
-              <RefreshCw className={cn("size-3.5", timelineQuery.isFetching && "animate-spin")} />
+              <RefreshCw className={cn("size-4", timelineQuery.isFetching && "animate-spin")} aria-hidden />
               刷新
             </Button>
             {firstFrameId ? (
               <a
                 href={api.frameUrl(uid, firstFrameId, "full")}
-                className={cn(buttonVariants({ variant: "ghost", size: "sm" }), "no-underline")}
+                className={cn(buttonVariants({ variant: "ghost", size: "sm" }), "min-h-11 no-underline")}
                 title="在新标签页打开该范围第一张原图"
                 target="_blank"
                 rel="noreferrer"
               >
-                <ExternalLink className="size-3.5" />
+                <ExternalLink className="size-4" aria-hidden />
                 打开原图
               </a>
             ) : null}
-          </>
-        }
-      />
+          </div>
+        </div>
 
-      <div className="flex flex-wrap items-center gap-2">
-        {[
-          { days: 0, label: "今天" },
-          { days: 1, label: "昨天" },
-          { days: 2, label: "前天" },
-        ].map((item) => (
-          <button
-            key={item.days}
-            type="button"
-            onClick={() => pickDay(item.days)}
-            className={cn(
-              "rounded-full border px-3.5 py-1.5 text-xs font-medium transition-colors",
-              !custom && daysAgo === item.days
-                ? "border-transparent bg-brand text-brand-ink"
-                : "border-line bg-panel text-soft hover:bg-sunken",
-            )}
+        <div
+          className={cn(
+            "mt-2 grid min-w-0 gap-2",
+            watch ? "grid-cols-1" : "grid-cols-2 sm:flex sm:flex-wrap sm:items-center sm:gap-2",
+          )}
+        >
+          <Input
+            type="datetime-local"
+            className="h-11 w-full min-w-0 text-[0.8rem] sm:w-[10.5rem]"
+            value={fromText}
+            onChange={(event) => setFromText(event.target.value)}
+            aria-label="开始时间"
+          />
+          <Input
+            type="datetime-local"
+            className="h-11 w-full min-w-0 text-[0.8rem] sm:w-[10.5rem]"
+            value={toText}
+            onChange={(event) => setToText(event.target.value)}
+            aria-label="结束时间"
+          />
+          <Button
+            variant="outline"
+            className="min-h-11"
+            onClick={applyCustom}
+            disabled={!fromText || !toText}
           >
-            {item.label}
-          </button>
-        ))}
-        <span className="mx-1 hidden h-4 w-px bg-line sm:block" aria-hidden />
-        <CalendarRange className="size-4 text-faint" aria-hidden />
-        <Input
-          type="datetime-local"
-          className="h-9 w-[11.5rem] text-xs"
-          value={fromText}
-          onChange={(event) => setFromText(event.target.value)}
-          aria-label="开始时间"
-        />
-        <span className="text-xs text-faint">至</span>
-        <Input
-          type="datetime-local"
-          className="h-9 w-[11.5rem] text-xs"
-          value={toText}
-          onChange={(event) => setToText(event.target.value)}
-          aria-label="结束时间"
-        />
-        <Button size="sm" variant="outline" onClick={applyCustom} disabled={!fromText || !toText}>
-          应用范围
-        </Button>
-        {custom ? (
-          <Button size="sm" variant="ghost" onClick={() => pickDay(0)}>
-            回到今天
+            应用范围
           </Button>
-        ) : null}
-        {anchor !== null && window && !fromText && !toText ? (
-          <button
-            type="button"
-            className="text-xs text-faint underline-offset-2 hover:underline"
-            onClick={() => {
-              setFromText(toDateTimeLocal(window.fromMs));
-              setToText(toDateTimeLocal(window.toMs));
-            }}
-          >
-            用当前范围填充
-          </button>
-        ) : null}
+          {anchor !== null && window && !fromText && !toText ? (
+            <button
+              type="button"
+              className="tap inline-flex min-h-11 items-center text-left text-[0.78rem] text-faint underline-offset-2 hover:text-soft hover:underline"
+              onClick={() => {
+                setFromText(toDateTimeLocal(window.fromMs));
+                setToText(toDateTimeLocal(window.toMs));
+              }}
+            >
+              用当前范围填充
+            </button>
+          ) : null}
+        </div>
       </div>
+
+      {window ? (
+        <p className="min-w-0 break-words text-[0.8rem] text-soft">
+          <span className="tnum">{formatWindow(window)}</span>
+          <span className="text-faint"> · </span>
+          <span className="tnum">
+            {timelineQuery.isError
+              ? "读取失败"
+              : timelineQuery.data
+                ? `共 ${timelineQuery.data.total_frames} 帧`
+                : "读取中…"}
+          </span>
+        </p>
+      ) : null}
 
       {rangeError ? <Banner tone="error">{rangeError}</Banner> : null}
 
@@ -217,50 +278,65 @@ export function TimelineView({ device }: { device: DeviceLike }) {
         />
       ) : (
         <>
-          <Banner tone="info">
-            桶宽 {bucketMs / 1000} 秒（由服务端按跨度选择）· 共 {buckets.length} 个桶 · 点击卡片查看该时段全部画面
-          </Banner>
-          {/* 大卡片网格：缩略图必须可辨认（200px+），时间戳在图下实底条上，
-              不再叠在画面上。列数按视口收敛，告别 8 列邮票墙。 */}
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5">
-            {visibleBuckets.map((bucket) => (
-              <button
-                key={bucket.ts_ms}
-                type="button"
-                onClick={() => {
-                  setOpenFrame(null);
-                  setOpenBucket(bucket);
-                }}
-                className="group overflow-hidden rounded-lg border border-line bg-panel text-left shadow-card transition-transform duration-150 hover:-translate-y-0.5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
-                title={`${formatDateTime(bucket.ts_ms)} · ${bucket.frame_count} 帧`}
-              >
-                <span className="relative block">
-                  {bucket.frame_id ? (
-                    <img
-                      src={api.frameUrl(uid, bucket.frame_id, "thumb")}
-                      alt={`${formatDateTime(bucket.ts_ms)} 的画面`}
-                      loading="lazy"
-                      decoding="async"
-                      className="block h-auto w-full bg-sunken object-cover"
-                    />
-                  ) : (
-                    <span className="flex aspect-video w-full items-center justify-center text-xs text-faint">
-                      无缩略图
-                    </span>
-                  )}
-                  {bucket.frame_count > 1 ? (
-                    <span className="absolute right-1.5 top-1.5 rounded-md bg-black/70 px-1.5 py-0.5 text-xs font-medium text-white">
-                      {bucket.frame_count} 帧
-                    </span>
-                  ) : null}
-                </span>
-                <span className="flex items-center justify-between gap-2 border-t border-line bg-panel px-2.5 py-1.5">
-                  <span className="font-mono text-[0.8rem] font-medium text-ink">{formatDateTime(bucket.ts_ms).slice(11)}</span>
-                  <span className="text-xs text-soft">{formatDateTime(bucket.ts_ms).slice(5, 10)}</span>
-                </span>
-              </button>
-            ))}
-          </div>
+          <TracingBeam nodeOffset={watch ? 56 : 112} className="min-w-0">
+            <div className="min-w-0 space-y-4 sm:space-y-5">
+              {hourGroups.map((group) => (
+                <section key={group.key} className="min-w-0">
+                  <div className="flex min-w-0 items-baseline">
+                    <h2 className="tnum min-w-0 truncate text-[0.95rem] font-semibold tracking-tight text-ink">
+                      {group.hourLabel}:00
+                    </h2>
+                    <span className="tnum ml-2 shrink-0 text-[0.75rem] text-faint">{group.dateLabel}</span>
+                  </div>
+
+                  <div className={cn("mt-2 grid min-w-0 gap-2 sm:gap-3 lg:gap-4", bucketGridClass)}>
+                    {group.buckets.map((bucket) => (
+                      <button
+                        key={bucket.ts_ms}
+                        type="button"
+                        onClick={() => {
+                          setOpenFrame(null);
+                          setOpenBucket(bucket);
+                        }}
+                        className="surface-hover relative block w-full min-w-0 overflow-hidden rounded-xl border border-line bg-panel text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
+                        title={`${formatDateTime(bucket.ts_ms)} · ${bucket.frame_count} 帧`}
+                      >
+                        <span className="relative block w-full overflow-hidden">
+                          <span className="ratio-16-9 relative block w-full bg-sunken">
+                            <span className="inset-full block overflow-hidden">
+                              <FrameView
+                                uid={uid}
+                                frameId={bucket.frame_id}
+                                variant="thumb"
+                                alt={`${formatDateTime(bucket.ts_ms)} 的画面`}
+                              />
+                            </span>
+                            {bucket.frame_count > 1 ? (
+                              <span
+                                className="tnum absolute right-1.5 top-1.5 rounded-md px-1.5 py-0.5 text-[0.68rem] font-semibold text-white shadow-card"
+                                style={{ backgroundColor: "rgba(2, 6, 23, 0.72)" }}
+                              >
+                                {bucket.frame_count} 帧
+                              </span>
+                            ) : null}
+                          </span>
+                        </span>
+                        <span className="flex min-w-0 items-center justify-between border-t border-line bg-panel px-2.5 py-2">
+                          <span className="tnum min-w-0 truncate text-[0.82rem] font-semibold text-ink">
+                            {formatDateTime(bucket.ts_ms).slice(11)}
+                          </span>
+                          <span className="tnum ml-2 shrink-0 text-[0.75rem] text-soft">
+                            {formatDateTime(bucket.ts_ms).slice(5, 10)}
+                          </span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+              ))}
+            </div>
+          </TracingBeam>
+
           <Pager total={buckets.length} limit={BUCKETS_PER_PAGE} offset={bucketOffset} onChange={setBucketOffset} />
         </>
       )}
@@ -274,32 +350,53 @@ export function TimelineView({ device }: { device: DeviceLike }) {
           }
         }}
       >
-        <DialogContent className="max-h-[88vh] w-[calc(100%-1rem)] overflow-y-auto sm:max-w-4xl">
+        <DialogContent size="xl" className="overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>{openBucket ? formatDateTime(openBucket.ts_ms) : ""}</DialogTitle>
+            <DialogTitle className="tnum">{openBucket ? formatDateTime(openBucket.ts_ms) : ""}</DialogTitle>
             <DialogDescription>
               {openBucket
                 ? `${openBucket.frame_count} 帧 · 窗口 ${bucketMs / 1000} 秒${
-                    openFrame ? " · 点击下方缩略图切换" : " · 点击任意画面查看原图"
+                    openFrame ? " · 已打开单帧原图" : " · 点击任意画面查看原图"
                   }`
                 : ""}
             </DialogDescription>
           </DialogHeader>
 
           {openFrame ? (
-            <div className="space-y-2">
-              <Button size="sm" variant="outline" onClick={() => setOpenFrame(null)}>
-                <ChevronLeft className="size-3.5" />
-                返回该时段
-              </Button>
-              <img
-                src={api.frameUrl(uid, openFrame.id, "full")}
-                alt={`${formatDateTime(frameTimeMs(openFrame))} 的原图`}
-                className="max-h-[62vh] w-full rounded-md bg-black object-contain"
-              />
-              <p className="text-xs text-soft">
-                设备时间 {formatDateTime(openFrame.device_time_ms)} · 服务端时间 {formatDateTime(openFrame.ts_ms)} ·{" "}
-                {openFrame.width}×{openFrame.height} · {formatBytes(openFrame.size_bytes)}
+            <div className="grid min-w-0 gap-2.5">
+              <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center sm:gap-2">
+                <Button variant="outline" className="min-h-11" onClick={() => setOpenFrame(null)}>
+                  <ChevronLeft className="size-4" aria-hidden />
+                  返回该时段
+                </Button>
+                <a
+                  href={api.frameUrl(uid, openFrame.id, "full")}
+                  className={cn(buttonVariants({ variant: "ghost", size: "sm" }), "min-h-11 no-underline")}
+                  title="在新标签页打开这张原图"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <ExternalLink className="size-4" aria-hidden />
+                  打开原图
+                </a>
+              </div>
+              <div className="relative overflow-hidden rounded-xl border border-line bg-black">
+                <FrameView
+                  uid={uid}
+                  frameId={openFrame.id}
+                  variant="full"
+                  alt={`${formatDateTime(frameTimeMs(openFrame))} 的原图`}
+                  className="max-h-[62vh] w-full"
+                  eager
+                />
+              </div>
+              <p className="text-[0.78rem] leading-relaxed text-soft">
+                设备时间 <span className="tnum">{formatDateTime(openFrame.device_time_ms)}</span> · 服务端时间{" "}
+                <span className="tnum">{formatDateTime(openFrame.ts_ms)}</span> ·{" "}
+                <span className="tnum">
+                  {openFrame.width}×{openFrame.height}
+                </span>{" "}
+                · {formatBytes(openFrame.size_bytes)}
               </p>
             </div>
           ) : framesQuery.isLoading ? (
@@ -316,22 +413,25 @@ export function TimelineView({ device }: { device: DeviceLike }) {
               description="可能已被保留策略清理，或只存在于归档仓库（见备份页）。"
             />
           ) : (
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+            <div className={cn("grid min-w-0 gap-2", frameGridClass)}>
               {(framesQuery.data?.frames ?? []).map((frame) => (
                 <button
                   key={frame.id}
                   type="button"
                   onClick={() => setOpenFrame(frame)}
-                  className="overflow-hidden rounded-lg border border-line bg-panel transition-transform duration-150 hover:-translate-y-0.5"
+                  className="surface-hover relative block w-full min-w-0 overflow-hidden rounded-lg border border-line bg-sunken focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
                   title={formatDateTime(frameTimeMs(frame))}
                 >
-                  <img
-                    src={api.frameUrl(uid, frame.id, "thumb")}
-                    alt={formatDateTime(frameTimeMs(frame))}
-                    loading="lazy"
-                    decoding="async"
-                    className="block h-auto w-full bg-sunken object-cover"
-                  />
+                  <span className="ratio-16-9 relative block w-full">
+                    <span className="inset-full block overflow-hidden">
+                      <FrameView
+                        uid={uid}
+                        frameId={frame.id}
+                        variant="thumb"
+                        alt={formatDateTime(frameTimeMs(frame))}
+                      />
+                    </span>
+                  </span>
                 </button>
               ))}
             </div>

@@ -2,8 +2,10 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, RefreshCw } from "lucide-react";
 
-import { Banner, EmptyBlock, ErrorBlock, LoadingBlock, PageHeader } from "@/components/async-state";
+import { Timeline, TimelineItem } from "@/components/aceternity";
+import { Banner, EmptyBlock, ErrorBlock, LoadingBlock } from "@/components/async-state";
 import { Button } from "@/components/ui/button";
+import { useViewport } from "@/hooks/use-viewport";
 import { api, isApiError } from "@/lib/api";
 import { formatDateTime, formatDuration } from "@/lib/format";
 import type { Command, CommandStatus, Device } from "@/lib/types";
@@ -34,13 +36,24 @@ const STATUS_LABEL: Record<CommandStatus, string> = {
   cancelled: "已取消",
 };
 
+/** Token surfaces only — Tailwind alpha utilities are dropped on Chromium 81. */
 const STATUS_TONE: Record<CommandStatus, string> = {
   pending: "border-line bg-sunken text-soft",
-  dispatched: "border-brand/30 bg-brand/10 text-brand",
-  ok: "border-ok/30 bg-ok/10 text-ok",
-  error: "border-danger/30 bg-danger/10 text-danger",
-  timeout: "border-warn/40 bg-warn/10 text-warn",
+  dispatched: "border-line bg-brand-soft text-brand",
+  ok: "border-line bg-ok-soft text-ok",
+  error: "border-line bg-danger-soft text-danger",
+  timeout: "border-line bg-warn-soft text-warn",
   cancelled: "border-line bg-sunken text-faint",
+};
+
+/** Timeline marker colour per status (dot tone). */
+const STATUS_DOT: Record<CommandStatus, string> = {
+  pending: "bg-faint animate-sm-pulse",
+  dispatched: "bg-brand",
+  ok: "bg-ok",
+  error: "bg-danger",
+  timeout: "bg-warn",
+  cancelled: "bg-faint",
 };
 
 /** `error_code` is the machine-readable reason from the unified error contract. */
@@ -68,8 +81,13 @@ function elapsedOf(command: Command): string {
  * total, so "next page" is enabled by a full page). While anything is still in
  * flight the page polls, and the console socket additionally invalidates this
  * query on `command_created` / `command_updated`.
+ *
+ * The device shell already shows identity/liveness, so this view deliberately
+ * has no page header: one compact toolbar, then the journal.
  */
 export function CommandsView({ device }: { device: Device }) {
+  const viewport = useViewport();
+  const watch = viewport === "watch";
   const [offset, setOffset] = useState(0);
   const [expanded, setExpanded] = useState<string | null>(null);
 
@@ -81,19 +99,30 @@ export function CommandsView({ device }: { device: Device }) {
 
   const commands = query.data?.commands ?? [];
   const busy = query.isFetching;
+  const page = Math.floor(offset / PAGE) + 1;
 
   return (
-    <div className="space-y-3">
-      <PageHeader
-        title="命令记录"
-        subtitle={`第 ${Math.floor(offset / PAGE) + 1} 页 · 本页 ${commands.length} 条 · 每 5 秒刷新`}
-        actions={
-          <Button size="sm" variant="outline" onClick={() => void query.refetch()} disabled={busy}>
-            <RefreshCw className={cn("size-3.5", busy && "animate-spin")} />
-            刷新
-          </Button>
-        }
-      />
+    <div
+      className={cn(
+        "w-full max-w-full min-w-0 overflow-x-hidden",
+        watch ? "space-y-3" : "space-y-5",
+      )}
+    >
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
+        <p className="min-w-0 truncate text-[0.74rem] text-soft">
+          第 {page} 页 · 本页 {commands.length} 条 · 每 5 秒刷新
+        </p>
+        <Button
+          size="sm"
+          variant="outline"
+          className="tap"
+          onClick={() => void query.refetch()}
+          disabled={busy}
+        >
+          <RefreshCw className={cn("mr-2 size-4", busy && "animate-spin")} aria-hidden />
+          刷新
+        </Button>
+      </div>
 
       {query.isError ? (
         <ErrorBlock
@@ -109,96 +138,138 @@ export function CommandsView({ device }: { device: Device }) {
           description="截图、文件操作、升级与卸载都会在这里留下一条带 deadline 与错误码的记录。"
           action={
             offset > 0 ? (
-              <Button size="sm" variant="outline" onClick={() => setOffset(Math.max(0, offset - PAGE))}>
+              <Button
+                size="sm"
+                variant="outline"
+                className="tap"
+                onClick={() => setOffset(Math.max(0, offset - PAGE))}
+              >
                 返回上一页
               </Button>
             ) : undefined
           }
         />
       ) : (
-        <ul className="divide-y divide-line rounded-panel border border-line bg-panel">
-          {commands.map((command) => {
-            const open = expanded === command.id;
-            const status = (command.status ?? "pending") as CommandStatus;
-            return (
-              <li key={command.id}>
-                <button
-                  type="button"
-                  onClick={() => setExpanded(open ? null : command.id)}
-                  className="flex w-full items-start gap-2 px-2.5 py-2 text-left"
-                  aria-expanded={open}
+        <div className="surface min-w-0 p-4 sm:p-5">
+          <Timeline>
+            {commands.map((command) => {
+              const open = expanded === command.id;
+              const status = (command.status ?? "pending") as CommandStatus;
+              const errorText = command.error
+                ? `${command.error_code ? `${ERROR_CODE_TEXT[command.error_code] ?? command.error_code}：` : ""}${command.error}`
+                : null;
+              return (
+                <TimelineItem
+                  key={command.id}
+                  className="pt-2"
+                  date={formatDateTime(command.created_at_ms)}
+                  icon={<span className={cn("size-2 rounded-full", STATUS_DOT[status])} aria-hidden />}
+                  title={
+                    <button
+                      type="button"
+                      onClick={() => setExpanded(open ? null : command.id)}
+                      aria-expanded={open}
+                      className="tap-row grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start rounded-lg px-0.5 text-left"
+                    >
+                      <span className="min-w-0">
+                        <span className="flex min-w-0 flex-wrap items-center">
+                          <span
+                            className={cn(
+                              "mr-2 min-w-0 font-semibold text-ink",
+                              watch ? "text-[0.82rem]" : "text-[0.88rem]",
+                            )}
+                          >
+                            {TYPE_LABEL[command.type] ?? command.type}
+                          </span>
+                          <span
+                            className={cn(
+                              "mr-2 shrink-0 rounded-md border px-2 py-0.5 text-[0.7rem] font-medium",
+                              STATUS_TONE[status],
+                            )}
+                          >
+                            {STATUS_LABEL[status] ?? status}
+                          </span>
+                          {command.attempts > 1 ? (
+                            <span className="mr-2 shrink-0 text-[0.7rem] text-warn">
+                              重投 {command.attempts} 次
+                            </span>
+                          ) : null}
+                        </span>
+                        <span className="mt-1.5 block min-w-0 truncate text-[0.72rem] text-faint">
+                          预算 {command.deadline_ms / 1000}s · 耗时 {elapsedOf(command)} ·{" "}
+                          <span className="font-mono">{command.id.slice(0, 8)}</span>
+                        </span>
+                        {errorText ? (
+                          <span
+                            className={cn(
+                              "mt-1 block text-[0.72rem] leading-relaxed text-danger",
+                              !open && "truncate",
+                            )}
+                          >
+                            {errorText}
+                          </span>
+                        ) : null}
+                      </span>
+                      <ChevronDown
+                        className="ml-2 mt-0.5 size-4 shrink-0 text-faint transition-transform"
+                        style={{ transform: open ? "rotate(0deg)" : "rotate(-90deg)" }}
+                        aria-hidden
+                      />
+                    </button>
+                  }
                 >
-                  <ChevronDown
-                    className={cn("mt-0.5 size-3.5 shrink-0 text-faint transition-transform", !open && "-rotate-90")}
-                    aria-hidden
-                  />
-                  <span className="min-w-0 flex-1">
-                    <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                      <span className="text-[0.8rem] font-medium text-ink">
-                        {TYPE_LABEL[command.type] ?? command.type}
-                      </span>
-                      <span className={cn("rounded border px-1.5 py-0.5 text-[0.7rem]", STATUS_TONE[status])}>
-                        {STATUS_LABEL[status] ?? status}
-                      </span>
-                      {command.attempts > 1 ? (
-                        <span className="text-[0.7rem] text-warn">重投 {command.attempts} 次</span>
+                  {open ? (
+                    <div className="animate-sm-in space-y-2.5 rounded-xl border border-line bg-sunken p-2.5 sm:p-3.5">
+                      <dl
+                        className={cn(
+                          "grid min-w-0 gap-x-3 gap-y-1.5 text-[0.74rem]",
+                          watch ? "grid-cols-1" : "grid-cols-[5.5rem_minmax(0,1fr)]",
+                        )}
+                      >
+                        <dt className="text-faint">命令 id</dt>
+                        <dd className="break-all font-mono text-soft">{command.id}</dd>
+                        <dt className="text-faint">下发时间</dt>
+                        <dd className="text-soft">{formatDateTime(command.dispatched_at_ms ?? 0)}</dd>
+                        <dt className="text-faint">结束时间</dt>
+                        <dd className="text-soft">{formatDateTime(command.finished_at_ms ?? 0)}</dd>
+                        <dt className="text-faint">错误码</dt>
+                        <dd className="break-words text-soft">
+                          {command.error_code
+                            ? `${command.error_code} · ${ERROR_CODE_TEXT[command.error_code] ?? "未知"}`
+                            : "—"}
+                        </dd>
+                      </dl>
+                      {command.error ? <Banner tone="error">{command.error}</Banner> : null}
+                      <JsonBlock label="请求参数" value={command.payload} />
+                      {command.result !== null && command.result !== undefined ? (
+                        <JsonBlock label="执行结果" value={command.result} />
                       ) : null}
-                    </span>
-                    <span className="mt-0.5 block truncate text-[0.7rem] text-faint">
-                      {formatDateTime(command.created_at_ms)} · 预算 {command.deadline_ms / 1000}s · 耗时{" "}
-                      {elapsedOf(command)} · <span className="font-mono">{command.id.slice(0, 8)}</span>
-                    </span>
-                    {command.error && !open ? (
-                      <span className="mt-0.5 block truncate text-[0.7rem] text-danger">
-                        {command.error_code ? `${ERROR_CODE_TEXT[command.error_code] ?? command.error_code}：` : ""}
-                        {command.error}
-                      </span>
-                    ) : null}
-                  </span>
-                </button>
-
-                {open ? (
-                  <div className="space-y-2 border-t border-line px-2.5 py-2">
-                    <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-                      <dt className="text-faint">命令 id</dt>
-                      <dd className="break-all font-mono text-soft">{command.id}</dd>
-                      <dt className="text-faint">下发时间</dt>
-                      <dd className="text-soft">{formatDateTime(command.dispatched_at_ms ?? 0)}</dd>
-                      <dt className="text-faint">结束时间</dt>
-                      <dd className="text-soft">{formatDateTime(command.finished_at_ms ?? 0)}</dd>
-                      <dt className="text-faint">错误码</dt>
-                      <dd className="text-soft">
-                        {command.error_code
-                          ? `${command.error_code} · ${ERROR_CODE_TEXT[command.error_code] ?? "未知" }`
-                          : "—"}
-                      </dd>
-                    </dl>
-                    {command.error ? <Banner tone="error">{command.error}</Banner> : null}
-                    <JsonBlock label="请求参数" value={command.payload} />
-                    {command.result !== null && command.result !== undefined ? (
-                      <JsonBlock label="执行结果" value={command.result} />
-                    ) : null}
-                  </div>
-                ) : null}
-              </li>
-            );
-          })}
-        </ul>
+                    </div>
+                  ) : null}
+                </TimelineItem>
+              );
+            })}
+          </Timeline>
+        </div>
       )}
 
-      <div className="flex items-center justify-between text-xs text-soft">
+      <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2">
         <Button
           size="sm"
           variant="outline"
+          className="tap"
           disabled={busy || offset <= 0}
           onClick={() => setOffset(Math.max(0, offset - PAGE))}
         >
           上一页
         </Button>
-        <span>本页 {commands.length} / {PAGE} 条</span>
+        <span className="tnum min-w-0 truncate text-center text-[0.72rem] text-soft">
+          第 {page} 页 · {commands.length} / {PAGE} 条
+        </span>
         <Button
           size="sm"
           variant="outline"
+          className="tap"
           disabled={busy || commands.length < PAGE}
           onClick={() => setOffset(offset + PAGE)}
         >
@@ -218,9 +289,9 @@ function JsonBlock({ label, value }: { label: string; value: unknown }) {
   }
   if (text.length > 4000) text = `${text.slice(0, 4000)}\n…（已截断）`;
   return (
-    <div>
-      <p className="mb-1 text-[0.7rem] text-faint">{label}</p>
-      <pre className="max-h-56 overflow-auto rounded-md border border-line bg-sunken p-2 font-mono text-[0.7rem] leading-relaxed text-soft">
+    <div className="min-w-0">
+      <p className="mb-1 text-[0.72rem] font-medium text-faint">{label}</p>
+      <pre className="max-h-56 max-w-full overflow-auto rounded-lg border border-line bg-panel p-2.5 font-mono text-[0.7rem] leading-relaxed text-soft">
         {text}
       </pre>
     </div>

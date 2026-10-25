@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUp,
+  ChevronRight,
   Copy,
   Download,
   File as FileIcon,
@@ -9,6 +10,7 @@ import {
   FolderInput,
   FolderPlus,
   HardDrive,
+  MoreHorizontal,
   Pencil,
   RefreshCw,
   Search,
@@ -17,13 +19,23 @@ import {
   X,
 } from "lucide-react";
 
+import { BentoGrid, BentoGridItem, GlowCard, ShimmerButton } from "@/components/aceternity";
 import { Banner, EmptyBlock, ErrorBlock, LoadingBlock } from "@/components/async-state";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { Meter } from "@/components/meter";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
+import { useViewport } from "@/hooks/use-viewport";
 import { api, isApiError } from "@/lib/api";
 import { dirname, formatBytes, formatDateTime, joinPath } from "@/lib/format";
 import { capabilitiesOf } from "@/lib/presence";
@@ -132,6 +144,8 @@ interface ActionState {
  */
 export function FilesView({ device }: { device: Device }) {
   const queryClient = useQueryClient();
+  const viewport = useViewport();
+  const watch = viewport === "watch";
   const capabilities = capabilitiesOf(device.presence);
   const uid = device.uid;
 
@@ -336,105 +350,162 @@ export function FilesView({ device }: { device: Device }) {
 
   if (!capabilities.files) {
     return (
-      <div className="space-y-2">
+      <div className="w-full max-w-full min-w-0 space-y-3 overflow-x-hidden">
         <Banner tone="warn">
-          <p className="font-medium">文件管理当前不可用</p>
-          <p className="mt-0.5 font-normal">
-            服务端 capability 已关闭：{device.presence.reason || "设备没有活动链路"}。文件管理需要受控端有活动通道；
-            恢复后本页会自动可用。
-          </p>
+          文件管理当前不可用：{device.presence.reason || "设备没有活动链路"}
         </Banner>
         <EmptyBlock
           title="没有可浏览的文件"
-          description="受控端当前不在线（或仅能被服务器轮询但未建立命令通道），因此不会展示可能过期的目录内容。"
+          description="受控端恢复活动通道后本页会自动可用。"
         />
       </div>
     );
   }
 
   const listing = search ?? null;
+  const crumbList = crumbs(path);
+  const progressPercent =
+    progress && progress.total > 0 ? Math.min(100, Math.round((progress.loaded / progress.total) * 100)) : 0;
 
   return (
-    <div className="space-y-2">
-      {message ? <Banner tone="ok">{message}</Banner> : null}
-      {error ? <Banner tone="error">{error}</Banner> : null}
-      {progress ? (
-        <div className="rounded-panel border border-line bg-panel p-2.5">
-          <div className="mb-1 flex items-center justify-between gap-2 text-xs text-soft">
-            <span className="truncate">
-              {progress.label} · {formatBytes(progress.loaded)} / {formatBytes(progress.total)}
-            </span>
-            <Button size="sm" variant="ghost" onClick={() => abortRef.current?.abort()}>
-              <X className="size-3.5" />
-              取消
-            </Button>
-          </div>
-          <Progress value={progress.total > 0 ? Math.round((progress.loaded / progress.total) * 100) : 0} />
+    <div
+      className={cn(
+        "w-full max-w-full min-w-0 overflow-x-hidden",
+        watch ? "space-y-3" : "space-y-4 sm:space-y-5",
+      )}
+    >
+      {/* Toolbar: the only controls, one compact row per breakpoint. */}
+      <div className="surface min-w-0 p-3 sm:p-4">
+        <div className="grid grid-cols-3 gap-2 sm:grid-cols-5">
+          <Button
+            size="sm"
+            variant="outline"
+            className="tap w-full justify-start"
+            onClick={() => void refresh()}
+            disabled={listQuery.isFetching || Boolean(busy)}
+          >
+            <RefreshCw className={cn("mr-2 size-4", listQuery.isFetching && "animate-spin")} aria-hidden />
+            刷新
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="tap w-full justify-start"
+            onClick={() => setPath(parent ?? "")}
+            disabled={!path}
+          >
+            <ArrowUp className="mr-2 size-4" aria-hidden />
+            上级
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="tap w-full justify-start"
+            onClick={() => openAction("mkdir")}
+            disabled={Boolean(busy)}
+          >
+            <FolderPlus className="mr-2 size-4" aria-hidden />
+            新建
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="tap w-full justify-start"
+            onClick={() => openAction("search")}
+            disabled={Boolean(busy)}
+          >
+            <Search className="mr-2 size-4" aria-hidden />
+            搜索
+          </Button>
+          <ShimmerButton
+            block
+            type="button"
+            title="上传文件"
+            className="col-span-2 w-full sm:col-span-1"
+            disabled={Boolean(busy) || !path}
+            busy={busy === "上传"}
+            onClick={() => uploadRef.current?.click()}
+          >
+            <Upload className="mr-2 size-4" aria-hidden />
+            上传
+          </ShimmerButton>
+          <input
+            ref={uploadRef}
+            type="file"
+            className="hidden"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) void upload(file);
+            }}
+          />
         </div>
-      ) : null}
 
-      <div className="flex flex-wrap items-center gap-1.5">
-        <Button size="sm" variant="outline" onClick={() => void refresh()} disabled={listQuery.isFetching || Boolean(busy)}>
-          <RefreshCw className={cn("size-3.5", listQuery.isFetching && "animate-spin")} />
-          刷新
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => setPath(parent ?? "")}
-          disabled={!path}
-        >
-          <ArrowUp className="size-3.5" />
-          上级
-        </Button>
-        <Button size="sm" variant="outline" onClick={() => openAction("mkdir")} disabled={Boolean(busy)}>
-          <FolderPlus className="size-3.5" />
-          新建文件夹
-        </Button>
-        <Button size="sm" variant="outline" onClick={() => openAction("search")} disabled={Boolean(busy)}>
-          <Search className="size-3.5" />
-          搜索
-        </Button>
-        <Button size="sm" onClick={() => uploadRef.current?.click()} disabled={Boolean(busy) || !path}>
-          <Upload className="size-3.5" />
-          上传
-        </Button>
-        <input
-          ref={uploadRef}
-          type="file"
-          className="hidden"
-          onChange={(event) => {
-            const file = event.target.files?.[0];
-            if (file) void upload(file);
-          }}
-        />
         {search ? (
-          <Button size="sm" variant="ghost" onClick={() => setSearch(null)}>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="tap mt-2 w-full justify-center"
+            onClick={() => setSearch(null)}
+          >
             退出搜索结果
           </Button>
         ) : null}
       </div>
 
-      <div className="flex flex-wrap items-center gap-1 text-xs text-soft">
-        {crumbs(path).map((crumb, index) => (
-          <span key={`${crumb.path}-${index}`} className="flex items-center gap-1">
-            {index > 0 ? <span className="text-faint">›</span> : null}
-            <button
-              type="button"
-              onClick={() => {
-                setSearch(null);
-                setPath(crumb.path);
-              }}
-              className={cn(
-                "rounded px-1 py-0.5 hover:bg-sunken",
-                index === crumbs(path).length - 1 && "font-medium text-ink",
-              )}
-            >
-              {crumb.label}
-            </button>
-          </span>
-        ))}
-      </div>
+      {/* In-flight transfer: progress + the only cancel affordance. */}
+      {progress ? (
+        <GlowCard contentClassName={watch ? "p-2.5" : "p-3 sm:p-4"}>
+          <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+            <div className="min-w-0">
+              <p className={cn("truncate font-medium text-ink", watch ? "text-[0.78rem]" : "text-[0.82rem]")}>
+                {progress.label}
+              </p>
+              <p className="tnum mt-0.5 truncate text-[0.7rem] text-soft">
+                {formatBytes(progress.loaded)} / {formatBytes(progress.total)} · {progressPercent}%
+              </p>
+            </div>
+            <Button size="sm" variant="outline" className="tap" onClick={() => abortRef.current?.abort()}>
+              <X className="mr-1.5 size-4" aria-hidden />
+              取消
+            </Button>
+          </div>
+          <Progress className="mt-2.5" value={progressPercent} />
+        </GlowCard>
+      ) : null}
+
+      {message ? <Banner tone="ok">{message}</Banner> : null}
+      {error ? <Banner tone="error">{error}</Banner> : null}
+
+      {/* The only horizontally scrolling row on this page: the breadcrumb. */}
+      <nav aria-label="当前路径" className="flex min-w-0 max-w-full items-center px-0.5">
+        <FolderClosed className="mr-1 size-3.5 shrink-0 text-faint" aria-hidden />
+        <div className="hide-scrollbar min-w-0 flex-1 overflow-x-auto">
+          <ol className="flex min-w-max items-center">
+            {crumbList.map((crumb, index) => {
+              const last = index === crumbList.length - 1;
+              return (
+                <li key={`${crumb.path}-${index}`} className="flex shrink-0 items-center">
+                  {index > 0 ? <ChevronRight className="mx-0.5 size-3.5 shrink-0 text-faint" aria-hidden /> : null}
+                  <button
+                    type="button"
+                    aria-current={last ? "location" : undefined}
+                    onClick={() => {
+                      setSearch(null);
+                      setPath(crumb.path);
+                    }}
+                    className={cn(
+                      "tap inline-flex items-center rounded-lg px-2 text-[0.78rem] transition-colors hover:bg-sunken",
+                      last ? "font-semibold text-ink" : "text-soft hover:text-ink",
+                    )}
+                  >
+                    <span className="max-w-[10rem] truncate">{crumb.label}</span>
+                  </button>
+                </li>
+              );
+            })}
+          </ol>
+        </div>
+      </nav>
 
       {listQuery.isError ? (
         <ErrorBlock
@@ -473,25 +544,45 @@ export function FilesView({ device }: { device: Device }) {
         drives.length === 0 ? (
           <EmptyBlock title="没有可用的驱动器" description="受控端没有返回任何逻辑驱动器。" />
         ) : (
-          <div className="grid gap-2 sm:grid-cols-2">
-            {drives.map((drive) => (
-              <button
-                key={drive.path}
-                type="button"
-                onClick={() => setPath(drive.path)}
-                className="flex items-center gap-2.5 rounded-panel border border-line bg-panel p-4 text-left hover:bg-sunken"
-              >
-                <HardDrive className="size-5 shrink-0 text-soft" aria-hidden />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm font-medium text-ink">{drive.name}</span>
-                  <span className="block text-xs text-soft">
-                    {drive.filesystem || "—"} · 剩余 {drive.free === null ? "—" : formatBytes(drive.free)}
-                    {drive.total === null ? "" : ` / ${formatBytes(drive.total)}`}
-                  </span>
-                </span>
-              </button>
-            ))}
-          </div>
+          <BentoGrid>
+            {drives.map((drive) => {
+              const percent =
+                drive.free !== null && drive.total !== null && drive.total > 0
+                  ? (drive.free / drive.total) * 100
+                  : null;
+              return (
+                <BentoGridItem
+                  key={drive.path}
+                  icon={<HardDrive aria-hidden />}
+                  title={<span className="block truncate">{drive.name}</span>}
+                  description={`${drive.filesystem || "未知文件系统"} · 逻辑驱动器`}
+                  footer={
+                    <Button
+                      variant="outline"
+                      className="tap w-full justify-between"
+                      onClick={() => setPath(drive.path)}
+                    >
+                      <span className="truncate">浏览此驱动器</span>
+                      <ChevronRight className="ml-2 size-4 shrink-0" aria-hidden />
+                    </Button>
+                  }
+                >
+                  <div className="mt-2 min-w-0">
+                    {percent === null ? (
+                      <p className="text-[0.72rem] text-faint">剩余空间：受控端未上报</p>
+                    ) : (
+                      <Meter
+                        compact
+                        label="剩余空间"
+                        value={percent}
+                        hint={`${formatBytes(drive.free ?? 0)} 可用 / ${formatBytes(drive.total ?? 0)}`}
+                      />
+                    )}
+                  </div>
+                </BentoGridItem>
+              );
+            })}
+          </BentoGrid>
         )
       ) : entries.length === 0 ? (
         <EmptyBlock title="这个目录是空的" description={path ? `路径：${path}` : undefined} />
@@ -512,9 +603,8 @@ export function FilesView({ device }: { device: Device }) {
 
       {listQuery.data?.truncated ? <Banner tone="warn">目录条目过多，受控端已截断返回。</Banner> : null}
 
-      <p className="text-[0.7rem] leading-relaxed text-faint">
-        当前路径：<span className="font-mono">{path || "（驱动器列表）"}</span> · 分片 {CHUNK_BYTES / 1024} KiB ·
-        单文件上传上限由服务端设置（默认 512 MiB）
+      <p className="px-0.5 text-[0.7rem] leading-relaxed text-faint">
+        分片 {CHUNK_BYTES / 1024} KiB · 单文件上传上限由服务端设置（默认 512 MiB）
       </p>
 
       <ActionDialog
@@ -548,6 +638,44 @@ export function FilesView({ device }: { device: Device }) {
   );
 }
 
+/** Small toolbar-sized icon button with a real label for accessibility. */
+function IconAction({
+  label,
+  icon: Icon,
+  disabled,
+  danger = false,
+  onClick,
+}: {
+  label: string;
+  icon: typeof Download;
+  disabled?: boolean;
+  danger?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      disabled={disabled}
+      onClick={onClick}
+      className={cn(
+        "tap inline-flex size-9 items-center justify-center rounded-lg text-soft transition-colors hover:bg-sunken hover:text-ink disabled:pointer-events-none disabled:opacity-40",
+        danger && "text-danger hover:text-danger",
+      )}
+    >
+      <Icon className="size-4" aria-hidden />
+    </button>
+  );
+}
+
+/**
+ * One directory listing.
+ *
+ * Desktop keeps a compact table-like row with direct actions; phone/watch get a
+ * full-width tappable card whose actions live in a bottom sheet (`.ui-dialog`
+ * turns into one automatically), so no row squeezes five tiny icons.
+ */
 function EntryList({
   entries,
   onOpen,
@@ -567,56 +695,257 @@ function EntryList({
   onDownload: (entry: Entry) => void;
   busy: boolean;
 }) {
+  const viewport = useViewport();
+  const desktop = viewport === "desktop";
+  const watch = viewport === "watch";
+  const [sheetEntry, setSheetEntry] = useState<Entry | null>(null);
+
   return (
-    <ul className="divide-y divide-line rounded-panel border border-line bg-panel">
-      {entries.map((entry) => (
-        <li key={entry.path} className="flex items-center gap-2 px-2.5 py-2">
-          <button
-            type="button"
-            onClick={() => onOpen(entry)}
-            className="flex min-w-0 flex-1 items-center gap-2 text-left"
-            title={entry.path}
-          >
-            {entry.is_dir ? (
-              <FolderClosed className="size-4 shrink-0 text-warn" aria-hidden />
-            ) : (
-              <FileIcon className="size-4 shrink-0 text-faint" aria-hidden />
-            )}
-            <span className="min-w-0 flex-1">
-              <span className={cn("block truncate text-[0.8rem]", entry.hidden ? "text-faint" : "text-ink")}>
-                {entry.name}
-              </span>
-              <span className="block truncate text-[0.7rem] text-faint">
-                {entry.is_dir ? "文件夹" : formatBytes(entry.size)} · 设备时间 {formatDateTime(entry.deviceTimeMs)}
-              </span>
-            </span>
-          </button>
-          <div className="flex shrink-0 items-center gap-0.5">
-            {!entry.is_dir ? (
-              <Button size="icon-sm" variant="ghost" title="下载" disabled={busy} onClick={() => onDownload(entry)}>
-                <Download className="size-3.5" />
-              </Button>
-            ) : (
-              <Button size="icon-sm" variant="ghost" title="打开" disabled={busy} onClick={() => onOpen(entry)}>
-                <FolderClosed className="size-3.5" />
-              </Button>
-            )}
-            <Button size="icon-sm" variant="ghost" title="重命名" disabled={busy} onClick={() => onRename(entry)}>
-              <Pencil className="size-3.5" />
-            </Button>
-            <Button size="icon-sm" variant="ghost" title="复制" disabled={busy} onClick={() => onCopy(entry)}>
-              <Copy className="size-3.5" />
-            </Button>
-            <Button size="icon-sm" variant="ghost" title="移动" disabled={busy} onClick={() => onMove(entry)}>
-              <FolderInput className="size-3.5" />
-            </Button>
-            <Button size="icon-sm" variant="ghost" title="删除" disabled={busy} onClick={() => onDelete(entry)}>
-              <Trash2 className="size-3.5 text-danger" />
-            </Button>
-          </div>
-        </li>
-      ))}
-    </ul>
+    <>
+      {desktop ? (
+        <div className="surface min-w-0 overflow-hidden">
+          <ul className="min-w-0">
+            {entries.map((entry) => (
+              <li
+                key={entry.path}
+                className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b border-line px-3 py-2 last:border-b-0 hover:bg-sunken"
+              >
+                <button
+                  type="button"
+                  title={entry.path}
+                  onClick={() => (entry.is_dir ? onOpen(entry) : setSheetEntry(entry))}
+                  className="tap-row flex min-w-0 items-center rounded-lg px-1 text-left"
+                >
+                  <span
+                    className={cn(
+                      "mr-2.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-line bg-sunken",
+                      entry.is_dir ? "text-warn" : "text-faint",
+                    )}
+                  >
+                    {entry.is_dir ? (
+                      <FolderClosed className="size-4" aria-hidden />
+                    ) : (
+                      <FileIcon className="size-4" aria-hidden />
+                    )}
+                  </span>
+                  <span className="min-w-0">
+                    <span
+                      className={cn(
+                        "block truncate text-[0.84rem] font-medium",
+                        entry.hidden ? "text-faint" : "text-ink",
+                      )}
+                    >
+                      {entry.name}
+                    </span>
+                    <span className="mt-0.5 block truncate text-[0.72rem] text-faint">
+                      {entry.is_dir ? "文件夹" : formatBytes(entry.size)} · 设备时间{" "}
+                      {formatDateTime(entry.deviceTimeMs)}
+                      {entry.hidden ? " · 隐藏" : ""}
+                    </span>
+                  </span>
+                </button>
+                <div className="flex shrink-0 items-center space-x-0.5">
+                  {entry.is_dir ? (
+                    <IconAction label="打开" icon={FolderClosed} disabled={busy} onClick={() => onOpen(entry)} />
+                  ) : (
+                    <IconAction label="下载" icon={Download} disabled={busy} onClick={() => onDownload(entry)} />
+                  )}
+                  <IconAction label="重命名" icon={Pencil} disabled={busy} onClick={() => onRename(entry)} />
+                  <IconAction label="复制" icon={Copy} disabled={busy} onClick={() => onCopy(entry)} />
+                  <IconAction label="移动" icon={FolderInput} disabled={busy} onClick={() => onMove(entry)} />
+                  <IconAction label="删除" icon={Trash2} danger disabled={busy} onClick={() => onDelete(entry)} />
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : (
+        <ul className="min-w-0 space-y-2.5 sm:space-y-3">
+          {entries.map((entry) => (
+            <li key={entry.path} className={cn("surface min-w-0 overflow-hidden", watch ? "p-2.5" : "p-3")}>
+              <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+                <button
+                  type="button"
+                  title={entry.path}
+                  onClick={() => (entry.is_dir ? onOpen(entry) : setSheetEntry(entry))}
+                  className="tap-row flex min-w-0 items-center rounded-xl px-1 text-left"
+                >
+                  <span
+                    className={cn(
+                      "mr-2.5 flex shrink-0 items-center justify-center rounded-xl border border-line bg-sunken",
+                      watch ? "size-9" : "size-10",
+                      entry.is_dir ? "text-warn" : "text-faint",
+                    )}
+                  >
+                    {entry.is_dir ? (
+                      <FolderClosed className={watch ? "size-4" : "size-[1.1rem]"} aria-hidden />
+                    ) : (
+                      <FileIcon className={watch ? "size-4" : "size-[1.1rem]"} aria-hidden />
+                    )}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span
+                      className={cn(
+                        "block truncate font-medium",
+                        watch ? "text-[0.8rem]" : "text-[0.86rem]",
+                        entry.hidden ? "text-faint" : "text-ink",
+                      )}
+                    >
+                      {entry.name}
+                    </span>
+                    <span
+                      className={cn(
+                        "mt-0.5 block truncate text-faint",
+                        watch ? "text-[0.72rem]" : "text-[0.74rem]",
+                      )}
+                    >
+                      {entry.is_dir ? "文件夹" : formatBytes(entry.size)}
+                      {entry.hidden ? " · 隐藏" : ""} · {formatDateTime(entry.deviceTimeMs)}
+                    </span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  aria-label={`${entry.name} 的更多操作`}
+                  title="更多操作"
+                  onClick={() => setSheetEntry(entry)}
+                  disabled={busy}
+                  className="tap flex size-11 shrink-0 items-center justify-center rounded-xl border border-line bg-sunken text-soft disabled:pointer-events-none disabled:opacity-40"
+                >
+                  <MoreHorizontal className="size-4" aria-hidden />
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <EntryActionsSheet
+        entry={sheetEntry}
+        busy={busy}
+        onClose={() => setSheetEntry(null)}
+        onOpen={onOpen}
+        onRename={onRename}
+        onCopy={onCopy}
+        onMove={onMove}
+        onDelete={onDelete}
+        onDownload={onDownload}
+      />
+    </>
+  );
+}
+
+function SheetAction({
+  icon: Icon,
+  label,
+  disabled,
+  danger = false,
+  onClick,
+}: {
+  icon: typeof Download;
+  label: string;
+  disabled?: boolean;
+  danger?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className={cn(
+        "tap-row flex w-full min-w-0 items-center rounded-xl border px-3 text-left transition-colors disabled:pointer-events-none disabled:opacity-40",
+        danger
+          ? "border-line bg-danger-soft text-danger"
+          : "border-line bg-sunken text-ink hover:border-line-strong",
+      )}
+    >
+      <Icon className="mr-2.5 size-4 shrink-0" aria-hidden />
+      <span className="min-w-0 flex-1 truncate text-[0.82rem] font-medium">{label}</span>
+    </button>
+  );
+}
+
+/** Bottom sheet (phone/watch) / small dialog (desktop) with every entry action. */
+function EntryActionsSheet({
+  entry,
+  busy,
+  onClose,
+  onOpen,
+  onRename,
+  onCopy,
+  onMove,
+  onDelete,
+  onDownload,
+}: {
+  entry: Entry | null;
+  busy: boolean;
+  onClose: () => void;
+  onOpen: (entry: Entry) => void;
+  onRename: (entry: Entry) => void;
+  onCopy: (entry: Entry) => void;
+  onMove: (entry: Entry) => void;
+  onDelete: (entry: Entry) => void;
+  onDownload: (entry: Entry) => void;
+}) {
+  const viewport = useViewport();
+  const watch = viewport === "watch";
+
+  const run = (handler: (entry: Entry) => void) => {
+    if (!entry) return;
+    const target = entry;
+    onClose();
+    handler(target);
+  };
+
+  return (
+    <Dialog
+      open={entry !== null}
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      <DialogContent size="sm" className={watch ? "p-4" : undefined}>
+        <DialogHeader>
+          <DialogTitle className="truncate pr-6">{entry?.name ?? ""}</DialogTitle>
+          <DialogDescription className="break-all">{entry?.path ?? ""}</DialogDescription>
+        </DialogHeader>
+        {entry ? (
+          <>
+            <dl className="grid min-w-0 grid-cols-2 gap-2 rounded-xl border border-line bg-sunken p-2.5 text-[0.72rem]">
+              <div className="min-w-0">
+                <dt className="text-faint">类型</dt>
+                <dd className="mt-0.5 truncate text-ink">
+                  {entry.is_dir ? "文件夹" : "文件"}
+                  {entry.hidden ? " · 隐藏" : ""}
+                </dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-faint">大小</dt>
+                <dd className="tnum mt-0.5 truncate text-ink">
+                  {entry.is_dir ? "—" : formatBytes(entry.size)}
+                </dd>
+              </div>
+              <div className="col-span-2 min-w-0">
+                <dt className="text-faint">设备时间</dt>
+                <dd className="tnum mt-0.5 truncate text-ink">{formatDateTime(entry.deviceTimeMs)}</dd>
+              </div>
+            </dl>
+            <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+              {entry.is_dir ? (
+                <SheetAction icon={FolderClosed} label="打开文件夹" disabled={busy} onClick={() => run(onOpen)} />
+              ) : (
+                <SheetAction icon={Download} label="下载" disabled={busy} onClick={() => run(onDownload)} />
+              )}
+              <SheetAction icon={Pencil} label="重命名" disabled={busy} onClick={() => run(onRename)} />
+              <SheetAction icon={Copy} label="复制到…" disabled={busy} onClick={() => run(onCopy)} />
+              <SheetAction icon={FolderInput} label="移动到…" disabled={busy} onClick={() => run(onMove)} />
+              <SheetAction icon={Trash2} label="删除" danger disabled={busy} onClick={() => run(onDelete)} />
+            </div>
+          </>
+        ) : null}
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -684,20 +1013,25 @@ function ActionDialog({
               if (event.key === "Enter") onSubmit();
             }}
             autoFocus
-            className="h-9"
+            className="h-11"
           />
           {kind === "search" ? (
-            <label className="flex items-center gap-1.5 text-xs text-soft">
-              <input type="checkbox" checked={recursive} onChange={(event) => onRecursiveChange(event.target.checked)} />
+            <label className="tap flex items-center rounded-lg border border-line bg-sunken px-3 text-xs text-soft">
+              <input
+                type="checkbox"
+                className="mr-2 size-4"
+                checked={recursive}
+                onChange={(event) => onRecursiveChange(event.target.checked)}
+              />
               递归搜索子目录
             </label>
           ) : null}
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={onCancel} disabled={busy}>
+          <Button variant="outline" className="tap" onClick={onCancel} disabled={busy}>
             取消
           </Button>
-          <Button onClick={onSubmit} disabled={busy || !value.trim()}>
+          <Button className="tap" onClick={onSubmit} disabled={busy || !value.trim()}>
             {busy ? "处理中…" : kind === "search" ? "搜索" : "确定"}
           </Button>
         </DialogFooter>

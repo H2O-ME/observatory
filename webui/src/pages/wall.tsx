@@ -1,9 +1,21 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { MonitorSmartphone, Plus, RefreshCw } from "lucide-react";
+import {
+  Activity,
+  MonitorSmartphone,
+  Plus,
+  RadioTower,
+  RefreshCw,
+  ShieldAlert,
+  WifiOff,
+} from "lucide-react";
 
 import { DeviceCard } from "@/components/device-card";
-import { PageShell } from "@/components/page-shell";
+import { PageHeader } from "@/components/page-header";
+import { StatCard, StatGrid } from "@/components/stat-card";
+import { ErrorBlock } from "@/components/async-state";
+import { GridPattern } from "@/components/aceternity/grid-pattern";
+import { Sparkles } from "@/components/aceternity/sparkles";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, isApiError } from "@/lib/api";
@@ -13,7 +25,7 @@ import { useLive } from "@/store/live";
 import { cn } from "@/lib/utils";
 
 /**
- * The wall（0.3.3 重写外壳）：统计改为胶囊芯片，卡片栅格三端分档。
+ * The wall（0.4 重写）：任务控制台式的设备墙。
  *
  * Every number and label here comes from the server's `presence` block: state
  * counts are `presence.state` tallies, "poll only" is `presence.transport`, and
@@ -23,6 +35,8 @@ import { cn } from "@/lib/utils";
 export function WallPage() {
   const viewport = useViewport();
   const connected = useLive((state) => state.connected);
+  const watch = viewport === "watch";
+  const desktop = viewport === "desktop";
 
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ["devices"],
@@ -42,84 +56,122 @@ export function WallPage() {
   };
   const pollOnly = devices.filter((device) => isPollMode(device.presence)).length;
 
-  const columns =
-    viewport === "watch"
-      ? "grid-cols-1"
-      : viewport === "mobile"
-        ? "grid-cols-2"
-        : devices.length >= 3
-          ? "grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4"
-          : "grid-cols-2 xl:grid-cols-3";
+  // Desktop reads as a 3-up instrument shelf at the acceptance width; phones and
+  // the watch are strictly single column so nothing horizontally overflows.
+  const columns = desktop ? "grid-cols-2 xl:grid-cols-3" : "grid-cols-1";
+  const retryable = isApiError(error) && Boolean(error.retryable);
 
-  const chips = [
-    { tone: "bg-ok", label: `在线 ${counts.online}` },
-    { tone: "bg-warn", label: `受限 ${counts.degraded}` },
-    { tone: "bg-faint", label: `离线 ${counts.offline}` },
-  ];
+  const description = (
+    <span className="flex min-w-0 flex-wrap items-baseline">
+      <span className="tnum mr-2">v{data?.server_version ?? "—"}</span>
+      <span className="mr-2 text-faint" aria-hidden>
+        ·
+      </span>
+      <span className="tnum">{isLoading ? "…" : `${devices.length} 台受控端`}</span>
+      {pollOnly > 0 ? (
+        <>
+          <span className="mx-2 text-faint" aria-hidden>
+            ·
+          </span>
+          <span className="tnum text-warn">{pollOnly} 台仅轮询</span>
+        </>
+      ) : null}
+    </span>
+  );
 
   return (
-    <PageShell
-      title="设备"
-      subtitle={
-        <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
-          <span className="font-mono text-[0.7rem] text-faint">v{data?.server_version ?? "—"}</span>
-          {pollOnly > 0 ? (
-            <span className="text-warn">{pollOnly} 台仅轮询：实时控制不可用，其余功能正常</span>
-          ) : null}
-          {!connected ? <span className="text-warn">实时连接断开，正在每 8 秒轮询一次</span> : null}
-        </span>
-      }
-      actions={
-        <Button variant="outline" size="sm" onClick={() => void refetch()} disabled={isFetching}>
-          <RefreshCw className={cn("size-3.5", isFetching && "animate-spin")} />
-          刷新
-        </Button>
-      }
-    >
-      <div className="flex flex-wrap gap-2">
-        {chips.map((chip) => (
-          <span
-            key={chip.label}
-            className="inline-flex items-center gap-1.5 rounded-full border border-line bg-panel px-3 py-1 text-xs font-medium text-soft shadow-card"
+    <div className="min-w-0 space-y-3 sm:space-y-4">
+      <PageHeader
+        title="设备墙"
+        description={description}
+        actions={
+          <Button
+            variant="outline"
+            size="sm"
+            className={cn(!desktop && "tap")}
+            onClick={() => void refetch()}
+            disabled={isFetching}
+            aria-label="刷新设备列表"
+            title="刷新设备列表"
           >
-            <span className={cn("inline-block size-1.5 rounded-full align-middle", chip.tone)} />
-            {chip.label}
-          </span>
-        ))}
-      </div>
+            <RefreshCw className={cn("size-3.5", isFetching && "animate-spin")} aria-hidden />
+            刷新
+          </Button>
+        }
+      />
+
+      <StatGrid columns={4}>
+        <StatCard label="在线" value={isLoading ? "—" : counts.online} tone="ok" icon={Activity} />
+        <StatCard label="受限" value={isLoading ? "—" : counts.degraded} tone="warn" icon={ShieldAlert} />
+        <StatCard label="离线" value={isLoading ? "—" : counts.offline} tone="neutral" icon={WifiOff} />
+        <StatCard label="仅轮询" value={isLoading ? "—" : pollOnly} tone="brand" icon={RadioTower} />
+      </StatGrid>
 
       {isError ? (
-        <div role="alert" className="rounded-panel border border-danger/30 bg-danger/10 p-3 text-xs text-danger">
-          无法读取设备列表：{isApiError(error) ? error.message : "未知错误"}
-          {isApiError(error) && error.retryable ? "（可点击刷新重试）" : null}
-        </div>
+        <ErrorBlock
+          message={`无法读取设备列表：${isApiError(error) ? error.message : "未知错误"}${
+            retryable ? "（可点击重试）" : ""
+          }`}
+          retryable={retryable}
+          onRetry={() => void refetch()}
+        />
       ) : null}
 
       {isLoading ? (
-        <div className={cn("grid gap-3", columns)}>
+        <div className={cn("grid min-w-0 gap-4 sm:gap-5", columns)}>
           {[0, 1, 2].map((index) => (
-            <Skeleton key={index} className="h-52 w-full rounded-panel" />
+            <div key={index} className="surface min-w-0 overflow-hidden">
+              <div className="ratio-16-10 w-full animate-pulse bg-sunken" />
+              <div className="space-y-2 p-3.5">
+                <Skeleton className="h-3.5 w-2/3" />
+                <Skeleton className="h-3 w-1/2" />
+                <div className="grid grid-cols-2 gap-3 pt-1">
+                  <Skeleton className="h-2 w-full" />
+                  <Skeleton className="h-2 w-full" />
+                </div>
+              </div>
+            </div>
           ))}
         </div>
       ) : devices.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-3 rounded-panel border border-dashed border-line py-14 text-center">
-          <MonitorSmartphone className="size-8 text-faint" />
-          <div>
-            <p className="text-sm font-medium text-ink">还没有受控端</p>
-            <p className="mt-1 text-xs text-soft">在设置页获取安装程序，在目标机器上运行即可。</p>
+        <div className="surface relative flex min-w-0 flex-col items-center justify-center overflow-hidden px-4 py-10 text-center sm:py-14">
+          <GridPattern fade="radial" className="opacity-60" stroke="var(--c-grid-line)" strokeDasharray="4 6" />
+          <Sparkles count={watch ? 8 : 18} className="opacity-80" />
+          <div className="relative z-10 flex min-w-0 flex-col items-center">
+            <span
+              className={cn(
+                "flex items-center justify-center rounded-2xl border border-line bg-brand-soft text-brand",
+                watch ? "size-11" : "size-12",
+              )}
+            >
+              <MonitorSmartphone className={watch ? "size-5" : "size-6"} aria-hidden />
+            </span>
+            <p className={cn("mt-3 font-semibold text-ink", watch ? "text-[0.9rem]" : "text-[0.95rem]")}>
+              还没有受控端
+            </p>
+            <p className={cn("mt-1 max-w-sm leading-relaxed text-soft", watch ? "text-[0.72rem]" : "text-[0.8rem]")}>
+              在设置页获取安装程序，在目标机器上运行即可接入控制台。
+            </p>
+            <Link
+              to="/settings"
+              className={cn(buttonVariants({ size: "sm" }), "mt-4 no-underline", !desktop && "tap")}
+            >
+              <Plus className="size-4" aria-hidden />
+              获取安装程序
+            </Link>
           </div>
-          <Link to="/settings" className={buttonVariants({ variant: "default", size: "sm" })}>
-            <Plus className="size-3.5" />
-            获取安装程序
-          </Link>
         </div>
       ) : (
-        <div className={cn("grid gap-3", columns)}>
+        <div className={cn("grid min-w-0 gap-4 sm:gap-5", columns)}>
           {devices.map((device) => (
-            <DeviceCard key={device.uid} device={device} variant={viewport === "watch" ? "compact" : "full"} />
+            <DeviceCard
+              key={device.uid}
+              device={device}
+              variant={watch ? "compact" : "full"}
+            />
           ))}
         </div>
       )}
-    </PageShell>
+    </div>
   );
 }

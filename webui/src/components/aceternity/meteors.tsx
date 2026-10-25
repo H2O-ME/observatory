@@ -1,44 +1,59 @@
-import { useEffect, useState } from "react";
+import { useMemo } from "react";
+import type { CSSProperties } from "react";
 
 import { cn } from "@/lib/utils";
 
-interface MeteorsProps {
+import "./aceternity.css";
+
+export interface MeteorsProps {
+  /** Number of meteors, clamped to 1–40. */
   number?: number;
   className?: string;
+  /** Base fall duration in seconds; each meteor varies around it. */
+  duration?: number;
+  /** Fixed seed so the field is stable across renders. */
+  seed?: number;
+}
+
+/** Deterministic pseudo-random in [0, 1). */
+function hash(index: number, salt: number, seed: number): number {
+  const value = Math.sin((index + seed) * 127.1 + salt * 311.7) * 43758.5453;
+  return value - Math.floor(value);
 }
 
 /**
- * Aceternity Meteors：流星雨背景层。
+ * Aceternity meteors, rebuilt for the watch.
  *
- * Chromium 81 安全：纯 CSS 线性渐变 + transform 动画；prefers-reduced-motion
- * 时整体隐藏（在 index.css 的 meteor 规则里）。
+ * Positions/timing are generated from a seeded hash instead of `Math.random()`,
+ * so a re-render (or a React StrictMode double render) never re-scatters the
+ * field. The whole layer is hidden on the watch and under reduced motion in
+ * `aceternity.css` — the GPU cost is not worth it there.
  */
-export const Meteors = ({ number = 12, className }: MeteorsProps) => {
-  const [meteors, setMeteors] = useState<React.CSSProperties[]>([]);
-
-  useEffect(() => {
-    const styles: React.CSSProperties[] = [];
-    for (let i = 0; i < number; i++) {
-      styles.push({
-        left: `${Math.floor(Math.random() * 100 - 20)}%`,
-        top: `${Math.floor(Math.random() * 30 - 10)}%`,
-        animationDelay: `${(Math.random() * 4).toFixed(2)}s`,
-        animationDuration: `${Math.floor(Math.random() * 8 + 4)}s`,
-      });
-    }
-    setMeteors(styles);
-  }, [number]);
+export function Meteors({ number = 12, className, duration = 6, seed = 7 }: MeteorsProps) {
+  const meteors = useMemo(() => {
+    const total = Math.max(1, Math.min(Math.round(number), 40));
+    return Array.from({ length: total }, (_, index) => {
+      const left = hash(index, 2, seed) * 120 - 20;
+      const top = hash(index, 3, seed) * 40 - 10;
+      const delay = -(hash(index, 5, seed) * 8);
+      const fall = duration * (0.7 + hash(index, 7, seed) * 0.9);
+      return {
+        key: `meteor-${seed}-${index}`,
+        style: {
+          left: `${left}%`,
+          top: `${top}%`,
+          animationDelay: `${delay.toFixed(2)}s`,
+          animationDuration: `${fall.toFixed(2)}s`,
+        } as CSSProperties,
+      };
+    });
+  }, [number, duration, seed]);
 
   return (
-    <>
-      {meteors.map((style, index) => (
-        <span
-          key={index}
-          style={style}
-          aria-hidden="true"
-          className={cn("meteor pointer-events-none absolute h-0.5 w-0.5 rounded-full bg-ink", className)}
-        />
+    <div className={cn("ace-meteors", className)} aria-hidden="true">
+      {meteors.map((meteor) => (
+        <span key={meteor.key} className="ace-meteor" style={meteor.style} />
       ))}
-    </>
+    </div>
   );
-};
+}
