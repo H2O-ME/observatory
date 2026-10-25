@@ -113,7 +113,7 @@ export function AuditPage() {
   const fieldClass = cn("h-9 w-full text-xs", touch && "h-11");
 
   return (
-    <div className={cn("w-full max-w-full min-w-0 space-y-5", watch && "space-y-3")}>
+    <div className={cn("w-full max-w-full min-w-0 space-y-5", watch && "space-y-3", desktop && "mx-auto max-w-[72rem]")}>
       <PageHeader
         title="审计日志"
         description="登录、设置、命令、文件与归档操作；时间均为服务器时间。"
@@ -136,7 +136,7 @@ export function AuditPage() {
           className={cn(
             "grid min-w-0 gap-2",
             desktop
-              ? "grid-cols-[minmax(0,10rem)_minmax(0,12rem)_minmax(0,1fr)_auto] items-center"
+              ? "grid-cols-[minmax(0,10rem)_minmax(0,12rem)_minmax(0,17rem)_auto] items-center"
               : "grid-cols-2",
           )}
         >
@@ -209,21 +209,21 @@ export function AuditPage() {
         ) : null}
 
         {desktop ? (
-          <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             <Input
               type="datetime-local"
               value={timeFrom}
               onChange={(event) => setTimeFrom(event.target.value)}
-              className={fieldClass}
+              className={cn(fieldClass, "w-[15.5rem]")}
               aria-label="起始时间（当前页内筛选）"
               title="起始时间（当前页内筛选）"
             />
-            <span className="text-center text-[0.75rem] text-faint">至</span>
+            <span className="text-[0.75rem] text-faint">至</span>
             <Input
               type="datetime-local"
               value={timeTo}
               onChange={(event) => setTimeTo(event.target.value)}
-              className={fieldClass}
+              className={cn(fieldClass, "w-[15.5rem]")}
               aria-label="结束时间（当前页内筛选）"
               title="结束时间（当前页内筛选）"
             />

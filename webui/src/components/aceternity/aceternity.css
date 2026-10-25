@@ -342,6 +342,7 @@
 
 .ace-timeline__body {
   min-width: 0;
+  max-width: 46rem;
   padding-bottom: 0.25rem;
 }
 
@@ -460,6 +461,7 @@
 
 .ace-tracing__content {
   min-width: 0;
+  max-width: 46rem;
 }
 
 @keyframes ace-beam-travel {

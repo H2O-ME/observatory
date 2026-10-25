@@ -147,7 +147,7 @@ export function UpdatesPage() {
             stroke="var(--c-grid-line)"
             strokeDasharray="4 8"
           />
-          <div className="relative grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end sm:gap-6">
+          <div className="relative grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-[minmax(0,auto)_auto] sm:items-end sm:gap-8">
             <div className="min-w-0">
               <p className="tnum text-gradient break-all text-[1.65rem] font-semibold leading-tight tracking-tight sm:text-[1.85rem]">
                 {latest ? `v${latest}` : "—"}
