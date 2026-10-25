@@ -46,7 +46,7 @@ copy_certs() {
 BEFORE="$(fingerprint)"
 log "certbot renew（webroot: $ACME_WEBROOT）"
 if ! certbot renew --cert-name "$CERT_NAME" --webroot -w "$ACME_WEBROOT" --quiet \
-     --deploy-hook "systemctl reload nginx"; then
+     --deploy-hook "systemctl reload nginx 2>/dev/null || nginx -s reload"; then
   die "certbot renew 失败（证书未续期；cron 会收到非 0 退出码）"
 fi
 AFTER="$(fingerprint)"

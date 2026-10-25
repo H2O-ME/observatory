@@ -38,6 +38,11 @@ server {
     ssl_session_cache shared:SSL:10m;
     ssl_session_timeout 1d;
 
+    # 521 排查（CDN→源站）：没有这两行时，源站到底有没有收到 CDN 请求、
+    # 还是 nginx/容器在重启，日志里都看不见（2026-10-24 的 20 分钟 521）。
+    access_log /var/log/nginx/observatory-console.access.log;
+    error_log  /var/log/nginx/observatory-console.error.log warn;
+
     client_max_body_size 600m;
     proxy_read_timeout 3600s;
     proxy_send_timeout 3600s;

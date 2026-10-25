@@ -22,6 +22,10 @@ server {
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_session_cache shared:SSL:10m;
 
+    # 受控端域名也必须记日志：设备连不上时先看源站有没有收到请求。
+    access_log /var/log/nginx/observatory-agent.access.log;
+    error_log  /var/log/nginx/observatory-agent.error.log warn;
+
     client_max_body_size 600m;
     proxy_read_timeout 3600s;
     proxy_send_timeout 3600s;
