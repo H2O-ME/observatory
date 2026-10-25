@@ -15,8 +15,8 @@ if [[ "${EUID}" -ne 0 ]]; then
   echo "请用 root 运行：sudo bash deploy/install-auto-update.sh" >&2
   exit 1
 fi
-[[ -x "$APP_DIR/deploy/auto-update.sh" ]] || {
-  echo "$APP_DIR/deploy/auto-update.sh 不存在或不可执行" >&2
+[[ -f "$APP_DIR/deploy/auto-update.sh" ]] || {
+  echo "$APP_DIR/deploy/auto-update.sh 不存在" >&2
   exit 1
 }
 [[ -d "$APP_DIR/deploy/systemd" ]] || {
