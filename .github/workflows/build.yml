@@ -224,7 +224,11 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
         with:
-          files: agent/dist/observatory-agent-*.zip
+          # SHA256SUMS 一并发布：deploy/build-agent.sh --from-release 靠它做
+          # 完整性校验，登记通道（会被推给全部受控端执行）绝不容许未校验二进制。
+          files: |
+            agent/dist/observatory-agent-*.zip
+            agent/dist/SHA256SUMS
           generate_release_notes: true
 
   deploy-static:
@@ -266,8 +270,9 @@ jobs:
         run: python tools/check_deploy.py
 
   nginx-config-test:
-    name: nginx -t（手动）
-    if: github.event_name == 'workflow_dispatch'
+    name: nginx -t
+    # 改 nginx 模板的 PR 不该等到手动 dispatch 才发现配置非法——push/PR 也跑
+    # （docker 起 nginx -t，约 1 分钟）。
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

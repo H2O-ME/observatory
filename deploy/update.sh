@@ -332,10 +332,15 @@ main() {
   # 只读/幂等预检：不构建、不换镜像，可在生产上随时跑。
   if [[ "${1:-}" == "--preflight" ]]; then
     acquire_lock
-    log "预检模式：只检查属主、容器与健康，不构建/不替换镜像"
+    log "预检模式：只检查属主、容器、健康与 origin 通道，不构建/不替换镜像"
     ensure_volume_owner || die "数据卷属主预检失败"
     ensure_cert_owner || die "证书属主预检失败"
     compose ps || true
+    # origin 凭据/网络坏了的话，auto-update 会每 2 分钟空转——在这里提前暴露。
+    if ! git fetch --dry-run origin >/dev/null 2>&1; then
+      die "git fetch origin 失败（凭据/网络）；自动更新链路当前不可用，请检查 origin remote 与 SSH alias"
+    fi
+    log "origin 通道正常"
     if curl -fsSk --max-time 10 https://127.0.0.1:8443/api/v1/health >/dev/null 2>&1; then
       log "本机健康检查通过：https://127.0.0.1:8443/api/v1/health"
     else

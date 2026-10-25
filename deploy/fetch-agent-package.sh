@@ -82,7 +82,8 @@ if [[ -n "$EXPECTED" ]]; then
   [[ "$EXPECTED" == "$ACTUAL" ]] || die "sha256 不匹配：分支=$EXPECTED 实际=$ACTUAL"
   log "sha256 校验通过：$ACTUAL"
 else
-  warn "分支里没有 SHA256SUMS，跳过校验（实际 sha256=$ACTUAL）"
+  # CI 自 0.3.1 起必定生成 SHA256SUMS；缺失说明分支状态异常，fail-closed。
+  die "分支里没有 SHA256SUMS，拒绝登记未校验的二进制（实际 sha256=$ACTUAL）"
 fi
 
 log "大小：$(du -h "${OUT_DIR}/${NAME}" | cut -f1)"

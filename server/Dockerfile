@@ -11,8 +11,10 @@
 FROM node:20-alpine AS webui
 
 WORKDIR /build
-COPY webui/package.json webui/package-lock.json* ./
-RUN npm ci --no-audit --no-fund 2>/dev/null || npm install --no-audit --no-fund
+COPY webui/package.json webui/package-lock.json ./
+# lockfile 失配必须让构建失败（与 CI 的 F62 红线一致）——npm install 回退会
+# 在生产镜像里拉入 CI 从未验证过的依赖树（供应链漂移），绝不允许静默发生。
+RUN npm ci --no-audit --no-fund
 COPY webui/ ./
 # F44: dist 版本戳——启动时数据卷副本与镜像内副本比对，不一致则以镜像为准覆盖
 RUN npm run build && printf '%s' "$BUILD_VERSION" > dist/.version

@@ -49,25 +49,55 @@ mkdir -p "$OUT_DIR"
 
 register_package() {
   local zip="$1"
-  local name
+  local name expected actual
   name="$(basename "$zip")"
   [[ "$name" == observatory-agent-*.zip ]] || die "包名必须形如 observatory-agent-<版本>.zip"
+
+  # 完整性：这个 zip 会被推给所有在线受控端自动执行，登记前必须校验。
+  # 优先与 agent-dist 分支的 SHA256SUMS 比对（fetch-agent-package.sh 同源）；
+  # 分支不可用时退化为本地重算 + 明示指纹（人工核对），绝不静默跳过。
+  expected="$(git show "refs/remotes/origin/agent-dist:SHA256SUMS" 2>/dev/null \
+    | awk -v n="$name" '{ f=$2; sub(/^\*/,"",f); if (f==n) { print $1; exit } }' || true)"
+  actual="$(sha256sum "$zip" | cut -d' ' -f1)"
+  if [[ -n "$expected" ]]; then
+    [[ "$expected" == "$actual" ]] || die "sha256 与 agent-dist 分支不匹配：分支=$expected 本地=$actual"
+    log "sha256 与 agent-dist 一致：$actual"
+  else
+    warn "agent-dist 无 SHA256SUMS 可比对。本地 sha256=$actual（请人工核对后再信任）"
+  fi
+
   log "登记 $name"
-  docker cp "$zip" observatory-api:/data/packages/
-  docker exec -w /srv observatory-api python -m observatory.cli package-add "/data/packages/$name"
-  log "受控端将自动更新到 $(cat VERSION)"
+  # 不能直接 docker cp 到 /data/packages：文件会归 root，而容器以 10001 运行，
+  # package-add 复制时会 PermissionError（与 fetch-agent-package.sh 的教训一致）。
+  # 走 /data/tmp 中转 + 预清理同名的旧 root 属主文件。
+  local remote_tmp="/data/tmp/${name}"
+  docker cp "$zip" "observatory-api:${remote_tmp}" \
+    || die "docker cp 失败（容器 observatory-api 是否在运行？）"
+  docker exec observatory-api rm -f "/data/packages/${name}" >/dev/null 2>&1 || true
+  if docker exec -w /srv observatory-api python -m observatory.cli package-add "${remote_tmp}" >/dev/null; then
+    docker exec observatory-api rm -f "${remote_tmp}" >/dev/null 2>&1 || true
+    log "已登记 ${name}；受控端将自动更新到 $(cat VERSION)"
+  else
+    docker exec observatory-api rm -f "${remote_tmp}" >/dev/null 2>&1 || true
+    die "登记 ${name} 失败（查看 docker exec observatory-api python -m observatory.cli package-add 的输出）"
+  fi
 }
 
 build_with_release() {
   [[ -n "$RELEASE_TAG" ]] || die "--from-release 需要一个 tag，例如 --from-release v$VERSION"
-  local url=""
   if command -v gh >/dev/null 2>&1; then
     log "用 gh 下载 release 资产 $RELEASE_TAG"
-    gh release download "$RELEASE_TAG" --pattern 'observatory-agent-*.zip' --dir "$OUT_DIR" --clobber
+    gh release download "$RELEASE_TAG" \
+      --pattern 'observatory-agent-*.zip' --pattern 'SHA256SUMS' \
+      --dir "$OUT_DIR" --clobber
   else
-    url="https://github.com/$(git config --get remote.origin.url | sed -E 's#.*[:/]([^/]+/[^/.]+)(\.git)?$#\1#')/releases/download/$RELEASE_TAG/observatory-agent-$VERSION.zip"
-    log "下载 $url"
-    curl -fL --retry 3 -o "$OUT_DIR/observatory-agent-$VERSION.zip" "$url"
+    local slug
+    slug="$(git config --get remote.origin.url | sed -nE 's#.*[:/]([^/]+/[^/.]+)(\.git)?/?$#\1#p')"
+    local base="https://github.com/${slug}/releases/download/$RELEASE_TAG"
+    log "下载 $base/observatory-agent-$VERSION.zip（含 SHA256SUMS）"
+    curl -fL --retry 3 -o "$OUT_DIR/observatory-agent-$VERSION.zip" "$base/observatory-agent-$VERSION.zip"
+    curl -fL --retry 3 -o "$OUT_DIR/SHA256SUMS" "$base/SHA256SUMS" \
+      || die "Release 缺少 SHA256SUMS 资产；拒绝登记未校验的二进制"
   fi
   local zip="$OUT_DIR/observatory-agent-$VERSION.zip"
   [[ -f "$zip" ]] || die "没有拿到 $zip"

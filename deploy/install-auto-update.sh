@@ -30,8 +30,22 @@ install -m 0644 "$APP_DIR/deploy/systemd/observatory-auto-update.service" \
 install -m 0644 "$APP_DIR/deploy/systemd/observatory-auto-update.timer" \
   /etc/systemd/system/observatory-auto-update.timer
 
+# CI 结论校验的凭据：私有仓库必须提供只读 PAT，否则 auto-update 会
+# fail-closed（拒绝部署而非盲目部署）。示例文件只在缺失时创建。
+ENV_FILE=/etc/observatory-auto-update.env
+if [[ ! -f "$ENV_FILE" ]]; then
+  install -m 0600 /dev/null "$ENV_FILE"
+  cat > "$ENV_FILE" <<'ENVEOF'
+# 私有仓库查 GitHub check-runs 需要只读 token（contents:read 即可）。
+# 填好后：systemctl restart observatory-auto-update.service
+# 公共仓库可整行删除本文件。
+OBS_GITHUB_TOKEN=
+ENVEOF
+  echo "已创建 $ENV_FILE（私有仓库请填入 OBS_GITHUB_TOKEN，否则自动更新会拒绝部署）"
+fi
+
 systemctl daemon-reload
 systemctl enable --now observatory-auto-update.timer
 systemctl start observatory-auto-update.service || true
 systemctl --no-pager --full status observatory-auto-update.timer || true
-echo "已启用：observatory-auto-update.timer（每 2 分钟检查一次）"
+echo "已启用：observatory-auto-update.timer（每 2 分钟检查一次；CI 红灯的提交不会部署）"

@@ -8,6 +8,10 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=/opt/observatory
 ExecStart=/opt/observatory/deploy/auto-update.sh
+# 部署前校验 GitHub Actions 结论：私有仓库 check-runs 需要只读 token。
+# 生成一个 contents:read 的 PAT 放进下面的文件（0600），或删掉 EnvironmentFile
+# 行（公共仓库匿名可查）。
+EnvironmentFile=-/etc/observatory-auto-update.env
 # A rebuild + container recreate is CPU/IO heavy; keep it out of the way.
 Nice=10
 IOSchedulingClass=idle
