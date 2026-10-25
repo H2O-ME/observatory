@@ -300,13 +300,23 @@ register_agent_packages() {
       continue
     fi
     found=1
-    log "登记受控端安装包：$(basename "$candidate")"
-    docker cp "$candidate" observatory-api:/data/packages/
-    if docker exec -w /srv observatory-api python -m observatory.cli package-add "/data/packages/$(basename "$candidate")" >/dev/null; then
-      log "已登记 $(basename "$candidate")"
-    else
-      warn "登记失败（可能已存在同版本）"
+    name="$(basename "$candidate")"
+    log "登记受控端安装包：${name}"
+    # 容器 rootfs 只读，/data/packages 由 observatory 用户拥有；docker cp 到
+    # /data/packages 会留下 root 属主文件，CLI 随后无法覆盖写入。统一经
+    # /data/tmp 中转，并先 unlink 旧目标（目录 owner 可以 unlink）。
+    remote_tmp="/data/tmp/${name}"
+    if ! docker cp "$candidate" "observatory-api:${remote_tmp}"; then
+      warn "docker cp 失败，跳过登记 ${name}"
+      continue
     fi
+    docker exec observatory-api rm -f "/data/packages/${name}" >/dev/null 2>&1 || true
+    if docker exec -w /srv observatory-api python -m observatory.cli package-add "${remote_tmp}" >/dev/null; then
+      log "已登记 ${name}"
+    else
+      warn "登记失败：${name}"
+    fi
+    docker exec observatory-api rm -f "${remote_tmp}" >/dev/null 2>&1 || true
   done
   shopt -u nullglob
   if [[ "$found" -eq 0 ]]; then
