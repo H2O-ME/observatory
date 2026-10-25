@@ -2,7 +2,8 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, RefreshCw } from "lucide-react";
 
-import { Banner, EmptyBlock, ErrorBlock, LoadingBlock, PageHeader, Pager } from "@/components/async-state";
+import { Banner, EmptyBlock, ErrorBlock, LoadingBlock, Pager } from "@/components/async-state";
+import { PageShell } from "@/components/page-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -85,17 +86,16 @@ export function AuditPage() {
   };
 
   return (
-    <div className="space-y-3">
-      <PageHeader
-        title="审计日志"
-        subtitle="所有登录、设置、命令、文件与归档操作；时间均为服务器时间"
-        actions={
-          <Button size="sm" variant="outline" onClick={() => void query.refetch()} disabled={query.isFetching}>
-            <RefreshCw className={cn("size-3.5", query.isFetching && "animate-spin")} />
-            刷新
-          </Button>
-        }
-      />
+    <PageShell
+      title="审计日志"
+      subtitle="所有登录、设置、命令、文件与归档操作；时间均为服务器时间"
+      actions={
+        <Button size="sm" variant="outline" onClick={() => void query.refetch()} disabled={query.isFetching}>
+          <RefreshCw className={cn("size-3.5", query.isFetching && "animate-spin")} />
+          刷新
+        </Button>
+      }
+    >
 
       <div className="flex flex-wrap items-center gap-2">
         <Select
@@ -141,16 +141,16 @@ export function AuditPage() {
           type="datetime-local"
           value={timeFrom}
           onChange={(event) => setTimeFrom(event.target.value)}
-          className="h-8 w-[10.5rem] text-[0.7rem]"
+          className="h-8 w-[10.5rem] text-xs"
           aria-label="起始时间（当前页内筛选）"
           title="起始时间（当前页内筛选）"
         />
-        <span className="text-[0.7rem] text-faint">至</span>
+        <span className="text-xs text-faint">至</span>
         <Input
           type="datetime-local"
           value={timeTo}
           onChange={(event) => setTimeTo(event.target.value)}
-          className="h-8 w-[10.5rem] text-[0.7rem]"
+          className="h-8 w-[10.5rem] text-xs"
           aria-label="结束时间（当前页内筛选）"
           title="结束时间（当前页内筛选）"
         />
@@ -207,7 +207,7 @@ export function AuditPage() {
       )}
 
       <Pager total={query.data?.total ?? 0} limit={PAGE} offset={offset} onChange={setOffset} busy={query.isFetching} />
-    </div>
+    </PageShell>
   );
 }
 
@@ -227,9 +227,9 @@ function AuditRow({ entry, open, onToggle }: { entry: AuditEntry; open: boolean;
         <span className="min-w-0 flex-1">
           <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
             <span className="text-[0.78rem] font-medium text-ink">{ACTION_LABEL[entry.action] ?? entry.action}</span>
-            <span className="font-mono text-[0.62rem] text-faint">{entry.action}</span>
+            <span className="font-mono text-[0.7rem] text-faint">{entry.action}</span>
           </span>
-          <span className="mt-0.5 block truncate text-[0.66rem] text-faint">
+          <span className="mt-0.5 block truncate text-[0.7rem] text-faint">
             {formatDateTime(entry.ts_ms)} · {entry.actor || "console"}
             {entry.device_name || entry.device_uid ? ` · ${entry.device_name || entry.device_uid}` : ""}
             {entry.ip ? ` · ${entry.ip}` : ""}
@@ -237,7 +237,7 @@ function AuditRow({ entry, open, onToggle }: { entry: AuditEntry; open: boolean;
         </span>
       </button>
       {open && detail ? (
-        <pre className="mx-2.5 mb-2 max-h-56 overflow-auto rounded-md border border-line bg-sunken p-2 font-mono text-[0.64rem] leading-relaxed text-soft">
+        <pre className="mx-2.5 mb-2 max-h-56 overflow-auto rounded-md border border-line bg-sunken p-2 font-mono text-[0.7rem] leading-relaxed text-soft">
           {JSON.stringify(entry.detail, null, 2)}
         </pre>
       ) : null}

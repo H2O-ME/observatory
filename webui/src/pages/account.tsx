@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { Check, Copy, KeyRound, Loader2, ShieldCheck, ShieldOff } from "lucide-react";
 
-import { Banner, PageHeader } from "@/components/async-state";
+import { Banner } from "@/components/async-state";
+import { PageShell } from "@/components/page-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -137,11 +138,10 @@ export function AccountPage() {
   };
 
   return (
-    <div className="space-y-3">
-      <PageHeader
-        title="账户与安全"
-        subtitle="修改控制台密码、管理二次验证（TOTP）。服务端规则：密码至少 10 位；开启/关闭二次验证都需要有效验证码。"
-      />
+    <PageShell
+      title="账户与安全"
+      subtitle="修改控制台密码、管理二次验证（TOTP）。服务端规则：密码至少 10 位；开启/关闭二次验证都需要有效验证码。"
+    >
 
       <section className="rounded-panel border border-line bg-panel p-3">
         <h2 className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-soft">
@@ -151,7 +151,7 @@ export function AccountPage() {
         <form className="space-y-2" onSubmit={submitPassword}>
           <div className="grid gap-2 sm:grid-cols-3">
             <div className="space-y-1">
-              <Label htmlFor="current-password" className="text-[0.7rem] text-faint">
+              <Label htmlFor="current-password" className="text-xs text-faint">
                 当前密码
               </Label>
               <Input
@@ -165,7 +165,7 @@ export function AccountPage() {
               />
             </div>
             <div className="space-y-1">
-              <Label htmlFor="new-password" className="text-[0.7rem] text-faint">
+              <Label htmlFor="new-password" className="text-xs text-faint">
                 新密码（至少 10 位）
               </Label>
               <Input
@@ -179,7 +179,7 @@ export function AccountPage() {
               />
             </div>
             <div className="space-y-1">
-              <Label htmlFor="confirm-password" className="text-[0.7rem] text-faint">
+              <Label htmlFor="confirm-password" className="text-xs text-faint">
                 确认新密码
               </Label>
               <Input
@@ -200,7 +200,7 @@ export function AccountPage() {
               {passwordBusy ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
               保存新密码
             </Button>
-            <span className="text-[0.66rem] text-faint">
+            <span className="text-[0.7rem] text-faint">
               修改后当前会话保持有效；下次登录使用新密码。密码哈希由服务端保存。
             </span>
           </div>
@@ -215,7 +215,7 @@ export function AccountPage() {
           </h2>
           <span
             className={cn(
-              "rounded border px-1.5 py-0.5 text-[0.62rem]",
+              "rounded border px-1.5 py-0.5 text-[0.7rem]",
               totpEnabled ? "border-ok/30 bg-ok/10 text-ok" : "border-line bg-sunken text-faint",
             )}
           >
@@ -228,7 +228,7 @@ export function AccountPage() {
 
         {!totpEnabled && !setup ? (
           <>
-            <p className="mb-2 text-[0.7rem] leading-relaxed text-soft">
+            <p className="mb-2 text-xs leading-relaxed text-soft">
               开启后，每次登录都需要输入手机验证器上的 6 位验证码。启用过程中会显示一次性密钥，请立即保存到验证器。
             </p>
             <Button size="sm" onClick={() => void startSetup()} disabled={totpBusy}>
@@ -245,9 +245,9 @@ export function AccountPage() {
               然后输入验证器显示的 6 位验证码完成启用。
             </Banner>
             <div className="space-y-1">
-              <p className="text-[0.66rem] text-faint">密钥（一次性显示，请立即保存）</p>
+              <p className="text-[0.7rem] text-faint">密钥（一次性显示，请立即保存）</p>
               <div className="flex items-center gap-1.5">
-                <code className="min-w-0 flex-1 break-all rounded border border-line bg-sunken px-2 py-1 font-mono text-[0.68rem]">
+                <code className="min-w-0 flex-1 break-all rounded border border-line bg-sunken px-2 py-1 font-mono text-[0.7rem]">
                   {setup.secret}
                 </code>
                 <Button size="icon-sm" variant="ghost" aria-label="复制密钥" onClick={() => void copy(setup.secret, "secret")}>
@@ -256,9 +256,9 @@ export function AccountPage() {
               </div>
             </div>
             <div className="space-y-1">
-              <p className="text-[0.66rem] text-faint">otpauth URI</p>
+              <p className="text-[0.7rem] text-faint">otpauth URI</p>
               <div className="flex items-center gap-1.5">
-                <code className="min-w-0 flex-1 truncate rounded border border-line bg-sunken px-2 py-1 font-mono text-[0.66rem]">
+                <code className="min-w-0 flex-1 truncate rounded border border-line bg-sunken px-2 py-1 font-mono text-[0.7rem]">
                   {setup.uri}
                 </code>
                 <Button size="icon-sm" variant="ghost" aria-label="复制 otpauth URI" onClick={() => void copy(setup.uri, "uri")}>
@@ -268,7 +268,7 @@ export function AccountPage() {
             </div>
             <div className="flex flex-wrap items-end gap-2">
               <div className="space-y-1">
-                <Label htmlFor="setup-code" className="text-[0.7rem] text-faint">
+                <Label htmlFor="setup-code" className="text-xs text-faint">
                   验证器上的 6 位验证码
                 </Label>
                 <Input
@@ -301,12 +301,12 @@ export function AccountPage() {
 
         {totpEnabled ? (
           <div className="mt-2 space-y-2 border-t border-line pt-2">
-            <p className="text-[0.7rem] leading-relaxed text-soft">
+            <p className="text-xs leading-relaxed text-soft">
               关闭二次验证需要当前验证器上的有效验证码（服务端拒绝无验证码的关闭请求）。关闭后仅密码即可登录。
             </p>
             <div className="flex flex-wrap items-end gap-2">
               <div className="space-y-1">
-                <Label htmlFor="disable-code" className="text-[0.7rem] text-faint">
+                <Label htmlFor="disable-code" className="text-xs text-faint">
                   当前 6 位验证码
                 </Label>
                 <Input
@@ -334,7 +334,7 @@ export function AccountPage() {
 
       <section className="rounded-panel border border-line bg-panel p-3">
         <h2 className="mb-2 text-xs font-semibold text-soft">会话</h2>
-        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[0.72rem]">
+        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
           <dt className="text-faint">控制台版本</dt>
           <dd className="font-mono text-soft">v{version || "—"}</dd>
           <dt className="text-faint">控制台域名</dt>
@@ -353,10 +353,10 @@ export function AccountPage() {
         </div>
       </section>
 
-      <p className="text-[0.66rem] leading-relaxed text-faint">
+      <p className="text-[0.7rem] leading-relaxed text-faint">
         二次验证密钥只在绑定过程中出现在本页；启用后服务端只保存密钥、不再回传。丢失验证器时需要通过服务端运维手段重置
         （当前版本不提供恢复码）。
       </p>
-    </div>
+    </PageShell>
   );
 }

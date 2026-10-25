@@ -3,8 +3,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { Download, PackagePlus, RefreshCw, Trash2, Upload, X } from "lucide-react";
 
-import { Banner, EmptyBlock, ErrorBlock, LoadingBlock, PageHeader } from "@/components/async-state";
+import { Banner, EmptyBlock, ErrorBlock, LoadingBlock } from "@/components/async-state";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { PageShell } from "@/components/page-shell";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { api, isApiError } from "@/lib/api";
@@ -75,42 +76,41 @@ export function UpdatesPage() {
   const packages = data?.packages ?? [];
 
   return (
-    <div className="space-y-3">
-      <PageHeader
-        title="版本与更新"
-        subtitle={`服务端 v${data?.server_version ?? "—"} · 最新受控端版本 ${
-          data?.latest_agent_version ? `v${data.latest_agent_version}` : "（还没有安装包）"
-        }`}
-        actions={
-          <>
-            <Button size="sm" variant="outline" onClick={() => void query.refetch()} disabled={query.isFetching}>
-              <RefreshCw className={cn("size-3.5", query.isFetching && "animate-spin")} />
-              刷新
-            </Button>
-            <Button size="sm" onClick={() => inputRef.current?.click()} disabled={progress !== null}>
-              <Upload className="size-3.5" />
-              上传安装包
-            </Button>
-            <input
-              ref={inputRef}
-              type="file"
-              accept=".zip,application/zip"
-              className="hidden"
-              onChange={(event) => {
-                const file = event.target.files?.[0];
-                if (file) void upload(file);
-              }}
-            />
-          </>
-        }
-      />
+    <PageShell
+      title="版本与更新"
+      subtitle={`服务端 v${data?.server_version ?? "—"} · 最新受控端版本 ${
+        data?.latest_agent_version ? `v${data.latest_agent_version}` : "（还没有安装包）"
+      }`}
+      actions={
+        <>
+          <Button size="sm" variant="outline" onClick={() => void query.refetch()} disabled={query.isFetching}>
+            <RefreshCw className={cn("size-3.5", query.isFetching && "animate-spin")} />
+            刷新
+          </Button>
+          <Button onClick={() => inputRef.current?.click()} disabled={progress !== null}>
+            <Upload className="size-3.5" />
+            上传安装包
+          </Button>
+          <input
+            ref={inputRef}
+            type="file"
+            accept=".zip,application/zip"
+            className="hidden"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) void upload(file);
+            }}
+          />
+        </>
+      }
+    >
 
       {message ? <Banner tone="ok">{message}</Banner> : null}
       {error ? <Banner tone="error">{error}</Banner> : null}
 
       {progress ? (
         <div className="rounded-panel border border-line bg-panel p-2.5">
-          <div className="mb-1 flex items-center justify-between gap-2 text-[0.72rem] text-soft">
+          <div className="mb-1 flex items-center justify-between gap-2 text-xs text-soft">
             <span className="truncate">
               上传 {progress.name} · {formatBytes(progress.loaded)} / {formatBytes(progress.total)}
             </span>
@@ -141,7 +141,7 @@ export function UpdatesPage() {
           title="还没有上传安装包"
           description="上传 observatory-agent-<版本>.zip 后，版本高于受控端当前版本的设备会自动收到升级指令。"
           action={
-            <Button size="sm" onClick={() => inputRef.current?.click()}>
+            <Button onClick={() => inputRef.current?.click()}>
               <PackagePlus className="size-3.5" />
               上传第一个安装包
             </Button>
@@ -157,16 +157,16 @@ export function UpdatesPage() {
                   <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
                     <span className="font-mono text-[0.82rem] font-medium text-ink">v{pkg.version}</span>
                     {latest ? (
-                      <span className="rounded border border-ok/30 bg-ok/10 px-1.5 py-0.5 text-[0.62rem] text-ok">
+                      <span className="rounded border border-ok/30 bg-ok/10 px-1.5 py-0.5 text-[0.7rem] text-ok">
                         当前最新
                       </span>
                     ) : null}
                   </span>
-                  <span className="mt-0.5 block truncate text-[0.66rem] text-faint">
+                  <span className="mt-0.5 block truncate text-[0.7rem] text-faint">
                     {pkg.filename} · {formatBytes(pkg.size_bytes)} · sha256 {pkg.sha256.slice(0, 16)}… ·{" "}
                     {formatDateTime(pkg.created_at_ms)}
                   </span>
-                  {pkg.notes ? <span className="mt-0.5 block text-[0.68rem] text-soft">{pkg.notes}</span> : null}
+                  {pkg.notes ? <span className="mt-0.5 block text-[0.7rem] text-soft">{pkg.notes}</span> : null}
                 </span>
                 <span className="flex shrink-0 items-center gap-1">
                   <a
@@ -195,11 +195,11 @@ export function UpdatesPage() {
       )}
 
       {data && data.outdated.length > 0 ? (
-        <section className="rounded-panel border border-line bg-panel p-3">
-          <h2 className="mb-2 text-xs font-semibold text-soft">
+        <section className="rounded-panel border border-line bg-panel p-4">
+          <h2 className="mb-2 text-sm font-semibold text-soft">
             仍低于最新版本的设备（{data.outdated.length}）
           </h2>
-          <ul className="space-y-1 text-[0.72rem]">
+          <ul className="space-y-1 text-xs">
             {data.outdated.map((device) => (
               <li key={device.uid} className="flex items-center justify-between gap-2">
                 <Link to={`/device/${device.uid}/overview`} className="truncate text-brand no-underline">
@@ -212,7 +212,7 @@ export function UpdatesPage() {
               </li>
             ))}
           </ul>
-          <p className="mt-2 text-[0.66rem] leading-relaxed text-faint">
+          <p className="mt-2 text-[0.7rem] leading-relaxed text-faint">
             低于 0.3.0 的受控端不在自动升级路径上（版本下限），需要重新运行安装脚本覆盖安装；这类设备在设备详情页会显示“无法自动升级”。
           </p>
         </section>
@@ -236,6 +236,6 @@ export function UpdatesPage() {
           remove.mutate(pendingDelete.version, { onSettled: () => setPendingDelete(null) });
         }}
       />
-    </div>
+    </PageShell>
   );
 }

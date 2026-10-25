@@ -75,11 +75,11 @@ function RenameCard({ device, onSaved }: { device: Device; onSaved: () => void }
   });
 
   return (
-    <section className="rounded-panel border border-line bg-panel p-3">
-      <h2 className="mb-2 text-xs font-semibold text-soft">重命名</h2>
+    <section className="rounded-panel border border-line bg-panel p-4">
+      <h2 className="mb-2 text-sm font-medium text-soft">重命名</h2>
       <div className="space-y-2">
         <div className="space-y-1">
-          <Label htmlFor="device-name" className="text-[0.7rem] text-faint">
+          <Label htmlFor="device-name" className="text-xs text-faint">
             显示名称
           </Label>
           <Input
@@ -93,7 +93,7 @@ function RenameCard({ device, onSaved }: { device: Device; onSaved: () => void }
           />
         </div>
         <div className="space-y-1">
-          <Label htmlFor="device-note" className="text-[0.7rem] text-faint">
+          <Label htmlFor="device-note" className="text-xs text-faint">
             备注
           </Label>
           <Input
@@ -110,7 +110,7 @@ function RenameCard({ device, onSaved }: { device: Device; onSaved: () => void }
           <Button size="sm" onClick={() => save.mutate()} disabled={save.isPending}>
             保存
           </Button>
-          {save.isError ? <span className="text-[0.7rem] text-danger">{errorText(save.error, "保存失败")}</span> : null}
+          {save.isError ? <span className="text-xs text-danger">{errorText(save.error, "保存失败")}</span> : null}
         </div>
       </div>
     </section>
@@ -209,68 +209,72 @@ export function OverviewView({ device, onRefresh }: Props) {
   const canDeleteRecord = device.presence.state === "offline" || device.presence.state === "uninstalled";
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
       {message ? (
-        <p role="status" aria-live="polite" className="rounded-md border border-ok/30 bg-ok/10 px-2.5 py-1.5 text-xs text-ok">
+        <p role="status" aria-live="polite" className="rounded-md border border-ok/30 bg-ok/10 px-2.5 py-1.5 text-[0.8rem] text-ok">
           {message}
         </p>
       ) : null}
       {error ? (
-        <p role="alert" aria-live="polite" className="rounded-md border border-danger/30 bg-danger/10 px-2.5 py-1.5 text-xs text-danger">
+        <p role="alert" aria-live="polite" className="rounded-md border border-danger/30 bg-danger/10 px-2.5 py-1.5 text-[0.8rem] text-danger">
           {error}
         </p>
       ) : null}
 
       {captureBlocked ? (
-        <section className="rounded-panel border border-warn/40 bg-warn/10 p-3">
-          <h2 className="mb-1 flex items-center gap-1.5 text-xs font-semibold text-warn">
+        <section className="rounded-panel border border-warn/40 bg-warn/10 p-4">
+          <h2 className="mb-1 flex items-center gap-1.5 text-sm font-medium text-warn">
             <Camera className="size-3.5" aria-hidden />
             无法采集屏幕
           </h2>
-          <p className="text-[0.72rem] leading-relaxed text-soft">
+          <p className="text-xs leading-relaxed text-soft">
             {capture?.reason || device.presence.reason || "受控端当前没有可采集的桌面"}
           </p>
-          <p className="mt-1 text-[0.68rem] leading-relaxed text-faint">
+          <p className="mt-1 text-[0.7rem] leading-relaxed text-faint">
             受控端服务运行在会话 0，只有用户登录并保持桌面会话时才能截屏。请在该机器上登录桌面（远程桌面窗口
             断开也会停止采集），随后画面会自动恢复。
           </p>
         </section>
       ) : null}
 
-      <section className="rounded-panel border border-line bg-panel p-3">
-        <h2 className="mb-2 text-xs font-semibold text-soft">资源占用</h2>
-        <div className="grid grid-cols-2 gap-3">
-          <Meter label="CPU" value={cpu} />
-          <Meter label="内存" value={memory} />
-        </div>
-        <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[0.7rem] text-soft">
-          <span className="truncate">内存 {formatBytes(num(device.sysinfo, "mem_total"))}</span>
-          <span className="truncate">运行 {formatDuration(num(device.sysinfo, "uptime_s"))}</span>
-          <span className="truncate">{text(device.sysinfo, "cpu_model") || "—"}</span>
-          <span className="truncate">{text(device.sysinfo, "username") || "—"}</span>
-        </div>
-      </section>
-
-      {disks.length > 0 ? (
-        <section className="rounded-panel border border-line bg-panel p-3">
-          <h2 className="mb-2 text-xs font-semibold text-soft">磁盘</h2>
-          <div className="space-y-2.5">
-            {disks.map((disk, index) => (
-              <div key={`${disk.mount ?? index}`}>
-                <Meter
-                  label={`${disk.mount ?? "?"} · 剩余 ${formatBytes(disk.free)} / ${formatBytes(disk.total)}`}
-                  value={disk.percent}
-                />
-              </div>
-            ))}
+      {/* 桌面端把“资源占用”与“磁盘”并排（md:grid-cols-2）；手表/窄屏自动回落单列。
+          用 grid + gap-4 而不是 flex gap（Chromium 81 上 grid gap 更稳）。 */}
+      <div className="grid gap-4 md:grid-cols-2">
+        <section className={cn("rounded-panel border border-line bg-panel p-4", disks.length === 0 && "md:col-span-2")}>
+          <h2 className="mb-2 text-sm font-medium text-soft">资源占用</h2>
+          <div className="grid grid-cols-2 gap-3">
+            <Meter label="CPU" value={cpu} />
+            <Meter label="内存" value={memory} />
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-soft">
+            <span className="truncate">内存 {formatBytes(num(device.sysinfo, "mem_total"))}</span>
+            <span className="truncate">运行 {formatDuration(num(device.sysinfo, "uptime_s"))}</span>
+            <span className="truncate">{text(device.sysinfo, "cpu_model") || "—"}</span>
+            <span className="truncate">{text(device.sysinfo, "username") || "—"}</span>
           </div>
         </section>
-      ) : null}
+
+        {disks.length > 0 ? (
+          <section className="rounded-panel border border-line bg-panel p-4">
+            <h2 className="mb-2 text-sm font-medium text-soft">磁盘</h2>
+            <div className="space-y-2.5">
+              {disks.map((disk, index) => (
+                <div key={`${disk.mount ?? index}`}>
+                  <Meter
+                    label={`${disk.mount ?? "?"} · 剩余 ${formatBytes(disk.free)} / ${formatBytes(disk.total)}`}
+                    value={disk.percent}
+                  />
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
+      </div>
 
       {sessions.length > 0 ? (
-        <section className="rounded-panel border border-line bg-panel p-3">
-          <h2 className="mb-2 text-xs font-semibold text-soft">登录会话</h2>
-          <ul className="space-y-1 text-[0.72rem] text-soft">
+        <section className="rounded-panel border border-line bg-panel p-4">
+          <h2 className="mb-2 text-sm font-medium text-soft">登录会话</h2>
+          <ul className="space-y-1 text-xs text-soft">
             {sessions.map((session) => (
               <li key={session.session_id} className="flex items-center justify-between gap-2">
                 <span className="truncate">
@@ -283,52 +287,55 @@ export function OverviewView({ device, onRefresh }: Props) {
         </section>
       ) : null}
 
-      <section className="rounded-panel border border-line bg-panel p-3">
-        <h2 className="mb-2 text-xs font-semibold text-soft">设备信息</h2>
-        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[0.72rem]">
-          <dt className="text-faint">设备标识</dt>
-          <dd className="truncate font-mono text-soft">{device.uid}</dd>
-          <dt className="text-faint">系统</dt>
-          <dd className="truncate text-soft">
-            {device.os_name} {device.os_version}
-          </dd>
-          <dt className="text-faint">架构</dt>
-          <dd className="truncate text-soft">{device.arch}</dd>
-          <dt className="text-faint">受控端</dt>
-          <dd className="truncate font-mono text-soft">
-            v{device.agent_version || "?"}
-            {device.protocol ? ` · 协议 ${device.protocol}` : ""}
-          </dd>
-          <dt className="text-faint">注册时间</dt>
-          <dd className="truncate text-soft">{formatDateTime(device.enrolled_at_ms)}</dd>
-          <dt className="text-faint">最近上报</dt>
-          <dd className="truncate text-soft">
-            {formatDateTime(device.last_seen_ms)}（{formatAge(device.presence.age_ms)}）
-          </dd>
-          <dt className="text-faint">通道</dt>
-          <dd className="truncate text-soft">
-            {transport === "ws" ? "WebSocket（实时）" : transport === "poll" ? "HTTP 轮询（无实时控制）" : "无活动通道"}
-          </dd>
-        </dl>
-      </section>
+      {/* “设备信息”与“重命名”并排；窄屏（手表/手机）自动回落单列。 */}
+      <div className="grid gap-4 md:grid-cols-2">
+        <section className="rounded-panel border border-line bg-panel p-4">
+          <h2 className="mb-2 text-sm font-medium text-soft">设备信息</h2>
+          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+            <dt className="text-faint">设备标识</dt>
+            <dd className="truncate font-mono text-soft">{device.uid}</dd>
+            <dt className="text-faint">系统</dt>
+            <dd className="truncate text-soft">
+              {device.os_name} {device.os_version}
+            </dd>
+            <dt className="text-faint">架构</dt>
+            <dd className="truncate text-soft">{device.arch}</dd>
+            <dt className="text-faint">受控端</dt>
+            <dd className="truncate font-mono text-soft">
+              v{device.agent_version || "?"}
+              {device.protocol ? ` · 协议 ${device.protocol}` : ""}
+            </dd>
+            <dt className="text-faint">注册时间</dt>
+            <dd className="truncate text-soft">{formatDateTime(device.enrolled_at_ms)}</dd>
+            <dt className="text-faint">最近上报</dt>
+            <dd className="truncate text-soft">
+              {formatDateTime(device.last_seen_ms)}（{formatAge(device.presence.age_ms)}）
+            </dd>
+            <dt className="text-faint">通道</dt>
+            <dd className="truncate text-soft">
+              {transport === "ws" ? "WebSocket（实时）" : transport === "poll" ? "HTTP 轮询（无实时控制）" : "无活动通道"}
+            </dd>
+          </dl>
+        </section>
+
+        <RenameCard device={device} onSaved={onRefresh} />
+      </div>
 
       {selfUpdateBlocked ? (
-        <section className="rounded-panel border border-warn/40 bg-warn/10 p-3">
-          <h2 className="mb-1 flex items-center gap-1.5 text-xs font-semibold text-warn">
+        <section className="rounded-panel border border-warn/40 bg-warn/10 p-4">
+          <h2 className="mb-1 flex items-center gap-1.5 text-sm font-medium text-warn">
             <TriangleAlert className="size-3.5" aria-hidden />
             无法自动升级
           </h2>
-          <p className="text-[0.72rem] leading-relaxed text-soft">{selfUpdateBlocked}</p>
-          <p className="mt-1 text-[0.68rem] leading-relaxed text-faint">
+          <p className="text-xs leading-relaxed text-soft">{selfUpdateBlocked}</p>
+          <p className="mt-1 text-[0.7rem] leading-relaxed text-faint">
             该版本不在自动更新路径上，服务器不会向它推送新版本。请在目标机器上重新运行最新的安装脚本（覆盖安装，设备标识与历史记录都会保留）。
           </p>
         </section>
       ) : null}
 
-      <RenameCard device={device} onSaved={onRefresh} />
-
-      <section className="rounded-panel border border-line bg-panel p-3">
-        <h2 className="mb-2 text-xs font-semibold text-soft">远程操作</h2>
+      <section className="rounded-panel border border-line bg-panel p-4">
+        <h2 className="mb-2 text-sm font-medium text-soft">远程操作</h2>
         <div className="flex flex-wrap gap-2">
           <Button
             size="sm"
@@ -371,15 +378,15 @@ export function OverviewView({ device, onRefresh }: Props) {
             远程卸载
           </Button>
         </div>
-        <p className={cn("mt-2 text-[0.68rem] leading-relaxed", capabilities.uninstall ? "text-faint" : "text-warn")}>
+        <p className={cn("mt-2 text-[0.7rem] leading-relaxed", capabilities.uninstall ? "text-faint" : "text-warn")}>
           {capabilities.uninstall
             ? "远程卸载不弹 UAC：受控端服务本身以 SYSTEM 运行，会自行停止、删除并使记录标记为已卸载。"
             : `设备当前不可下发卸载指令（${device.presence.reason}）`}
         </p>
       </section>
 
-      <section className="rounded-panel border border-line bg-panel p-3">
-        <h2 className="mb-2 text-xs font-semibold text-soft">数据清理</h2>
+      <section className="rounded-panel border border-line bg-panel p-4">
+        <h2 className="mb-2 text-sm font-medium text-soft">数据清理</h2>
         <div className="flex flex-wrap gap-2">
           <Button
             size="sm"
@@ -402,7 +409,7 @@ export function OverviewView({ device, onRefresh }: Props) {
           </Button>
         </div>
         <Separator className="my-2" />
-        <p className="text-[0.68rem] leading-relaxed text-faint">
+        <p className="text-[0.7rem] leading-relaxed text-faint">
           删除记录会同时清除本地画面与该设备在归档仓库中的文件；在线设备必须先远程卸载，避免留下仍会尝试上报的机器。
         </p>
       </section>

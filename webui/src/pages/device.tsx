@@ -35,11 +35,12 @@ function isTabValue(value: string): value is TabValue {
 }
 
 /**
- * Device shell.
+ * Device shell（0.3.3 重写外壳）。
  *
  * The active tab lives in the URL (`/device/:uid/<tab>`), so a link to the live
  * view stays a link to the live view after a reload. The 0.2.x URLs (`/` and
- * `/devices/:uid`) are served by the same component.
+ * `/devices/:uid`) are served by the same component. Tab 触发区按三端放大：
+ * 手表 44px、手机 40px，保证圆屏与指触可用。
  */
 export function DevicePage() {
   const params = useParams();
@@ -50,6 +51,7 @@ export function DevicePage() {
   const navigate = useNavigate();
   const viewport = useViewport();
   const connected = useLive((state) => state.connected);
+  const watch = viewport === "watch";
 
   const query = useQuery({
     queryKey: ["device", uid],
@@ -59,7 +61,7 @@ export function DevicePage() {
   });
 
   const device = query.data?.device;
-  const spacing = viewport === "watch" ? "space-y-2" : viewport === "mobile" ? "space-y-3" : "space-y-4";
+  const spacing = watch ? "space-y-2" : viewport === "mobile" ? "space-y-3" : "space-y-4";
 
   const selectTab = (value: string) => {
     const next: TabValue = isTabValue(value) ? value : "overview";
@@ -90,20 +92,30 @@ export function DevicePage() {
 
   return (
     <div className={spacing}>
-      <div className="flex items-start gap-2">
+      <div className="flex items-start gap-2.5">
         <Link
           to="/wall"
-          className="mt-0.5 inline-flex size-9 shrink-0 items-center justify-center rounded-lg border border-line text-soft no-underline"
+          className={cn(
+            "mt-0.5 inline-flex size-9 shrink-0 items-center justify-center rounded-lg border border-line bg-panel text-soft no-underline shadow-card",
+            watch && "size-10",
+          )}
           aria-label="返回设备列表"
         >
-          <ChevronLeft className="size-4" />
+          <ChevronLeft className="size-[1.1rem]" />
         </Link>
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-            <h1 className="truncate text-base font-semibold text-ink">{device.name || device.uid}</h1>
+            <h1
+              className={cn(
+                "min-w-0 truncate font-semibold tracking-tight text-ink",
+                watch ? "text-[0.95rem]" : viewport === "mobile" ? "text-[1.05rem]" : "text-lg",
+              )}
+            >
+              {device.name || device.uid}
+            </h1>
             <StatusBadge presence={device.presence} />
           </div>
-          <p className="mt-0.5 truncate text-[0.7rem] text-soft">
+          <p className={cn("mt-0.5 truncate text-soft", watch ? "text-[0.68rem]" : "text-xs")}>
             {device.hostname} · v{device.agent_version || "?"}
             {device.protocol ? ` · 协议 ${device.protocol}` : ""} · {formatAge(device.presence.age_ms)}
           </p>
@@ -120,7 +132,7 @@ export function DevicePage() {
       </div>
 
       {isPollMode(device.presence) ? (
-        <div className="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[0.72rem] leading-relaxed text-warn">
+        <div className="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-xs leading-relaxed text-warn">
           <p className="flex items-center gap-1.5 font-medium">
             <WifiOff className="size-3.5 shrink-0" aria-hidden />
             当前为轮询模式，实时控制不可用
@@ -131,7 +143,7 @@ export function DevicePage() {
           </p>
         </div>
       ) : device.presence.state !== "online" ? (
-        <div className="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[0.72rem] leading-relaxed text-warn">
+        <div className="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-xs leading-relaxed text-warn">
           {device.presence.reason}
         </div>
       ) : null}
@@ -140,7 +152,11 @@ export function DevicePage() {
         <div className="-mx-1 overflow-x-auto px-1 scrollbar-none">
           <TabsList className="w-max">
             {TABS.map((item) => (
-              <TabsTrigger key={item.value} value={item.value} className="min-h-9 px-3">
+              <TabsTrigger
+                key={item.value}
+                value={item.value}
+                className={cn("px-3.5", watch ? "min-h-11 text-[0.8rem]" : "min-h-10 text-[0.85rem]")}
+              >
                 {item.label}
               </TabsTrigger>
             ))}

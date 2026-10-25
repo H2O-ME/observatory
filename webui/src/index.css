@@ -296,6 +296,64 @@
     display: none;
   }
 
+  /* ------------------------------------------------- Aceternity 组件的 CSS 层 */
+  /* 旋转锥形渐变描边（MovingBorder / HoverBorderGradient）：超大渐变层绕
+     中心旋转，被外层 overflow-hidden 裁成细边。Chromium 81 安全；
+     reduced-motion 下不旋转，只剩静态渐变。 */
+  .border-spin-bg {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 300%;
+    height: 300%;
+    margin-left: -150%;
+    margin-top: -150%;
+    animation: border-spin 4s linear infinite;
+    transition: opacity 0.25s ease;
+  }
+  @keyframes border-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  /* Meteors 流星：短渐变尾迹 + 斜向位移。 */
+  .meteor {
+    animation: meteor-effect 6s linear infinite;
+  }
+  .meteor::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 60px;
+    height: 1px;
+    background: linear-gradient(90deg, var(--c-faint), transparent);
+    transform: translate(-50%, -50%);
+  }
+  @keyframes meteor-effect {
+    0% {
+      transform: rotate(215deg) translateX(0);
+      opacity: 1;
+    }
+    70% {
+      opacity: 1;
+    }
+    100% {
+      transform: rotate(215deg) translateX(-420px);
+      opacity: 0;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .border-spin-bg {
+      animation: none;
+    }
+    .meteor {
+      display: none;
+    }
+  }
+
   /* Chrome (sidebar, toolbar, sheets) is translucent so the aurora shows
      through; content surfaces stay near-opaque so dense tables and screen
      frames remain readable. */

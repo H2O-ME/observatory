@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { Archive, Database, HardDrive, PackageCheck, Radio, RefreshCw, ServerCog, Timer } from "lucide-react";
 
-import { Banner, ErrorBlock, LoadingBlock, PageHeader } from "@/components/async-state";
+import { Banner, ErrorBlock, LoadingBlock } from "@/components/async-state";
 import { Meter } from "@/components/meter";
+import { PageShell } from "@/components/page-shell";
 import { Button } from "@/components/ui/button";
 import { api, isApiError } from "@/lib/api";
 import { formatBytes, formatDateTime, formatDuration } from "@/lib/format";
@@ -56,25 +57,24 @@ export function SystemPage() {
   const bool = (key: string): boolean => Boolean(values[key]);
 
   return (
-    <div className="space-y-3">
-      <PageHeader
-        title="系统"
-        subtitle="服务端详细状态：版本、载波、数据量、媒体用量与保留策略"
-        actions={
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => {
-              void systemQuery.refetch();
-              void healthQuery.refetch();
-            }}
-            disabled={systemQuery.isFetching || healthQuery.isFetching}
-          >
-            <RefreshCw className={cn("size-3.5", (systemQuery.isFetching || healthQuery.isFetching) && "animate-spin")} />
-            刷新
-          </Button>
-        }
-      />
+    <PageShell
+      title="系统"
+      subtitle="服务端详细状态：版本、载波、数据量、媒体用量与保留策略"
+      actions={
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => {
+            void systemQuery.refetch();
+            void healthQuery.refetch();
+          }}
+          disabled={systemQuery.isFetching || healthQuery.isFetching}
+        >
+          <RefreshCw className={cn("size-3.5", (systemQuery.isFetching || healthQuery.isFetching) && "animate-spin")} />
+          刷新
+        </Button>
+      }
+    >
 
       {systemQuery.isError ? (
         <ErrorBlock
@@ -98,22 +98,22 @@ export function SystemPage() {
               { label: "控制会话", value: String(system.control_sessions) },
             ].map((item) => (
               <div key={item.label} className="rounded-panel border border-line bg-panel p-2.5">
-                <p className="text-[0.66rem] text-faint">{item.label}</p>
+                <p className="text-[0.7rem] text-faint">{item.label}</p>
                 <p className="mt-0.5 truncate font-mono text-sm font-semibold text-ink">{item.value}</p>
               </div>
             ))}
           </section>
 
           <div className="grid gap-3 lg:grid-cols-2">
-            <section className="rounded-panel border border-line bg-panel p-3">
-              <h2 className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-soft">
+            <section className="rounded-panel border border-line bg-panel p-4">
+              <h2 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-soft">
                 <Radio className="size-3.5" />
                 设备载波
               </h2>
               {carrierEntries.length === 0 ? (
-                <p className="text-[0.72rem] text-faint">当前没有任何受控端链路。</p>
+                <p className="text-xs text-faint">当前没有任何受控端链路。</p>
               ) : (
-                <ul className="space-y-1 text-[0.72rem]">
+                <ul className="space-y-1 text-xs">
                   {carrierEntries.map(([carrier, count]) => (
                     <li key={carrier} className="flex items-center justify-between gap-2">
                       <span className="text-soft">
@@ -125,17 +125,17 @@ export function SystemPage() {
                   ))}
                 </ul>
               )}
-              <p className="mt-1.5 text-[0.64rem] leading-relaxed text-faint">
+              <p className="mt-1.5 text-[0.7rem] leading-relaxed text-faint">
                 来自服务端链路注册表（与 <span className="font-mono">/api/v1/health</span> 同源）；控制台连接数不在此列。
               </p>
             </section>
 
-            <section className="rounded-panel border border-line bg-panel p-3">
-              <h2 className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-soft">
+            <section className="rounded-panel border border-line bg-panel p-4">
+              <h2 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-soft">
                 <Timer className="size-3.5" />
                 运行与命令
               </h2>
-              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[0.72rem]">
+              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
                 <dt className="text-faint">服务端当前时间</dt>
                 <dd className="text-soft">{formatDateTime(now ?? system.server_time_ms)}</dd>
                 <dt className="text-faint">待处理命令</dt>
@@ -152,12 +152,12 @@ export function SystemPage() {
             </section>
           </div>
 
-          <section className="rounded-panel border border-line bg-panel p-3">
-            <h2 className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-soft">
+          <section className="rounded-panel border border-line bg-panel p-4">
+            <h2 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-soft">
               <Database className="size-3.5" />
               数据量与存储
             </h2>
-            <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[0.72rem]">
+            <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
               <dt className="text-faint">数据库</dt>
               <dd className="text-soft">{formatBytes(storage?.db_bytes)}</dd>
               <dt className="text-faint">画面文件</dt>
@@ -173,22 +173,22 @@ export function SystemPage() {
               <Meter label={`磁盘占用（服务端计算 ${diskUsedPercent ?? "—"}%）`} value={diskUsedPercent} />
             </div>
             {num("storage_quota_mb") !== null ? (
-              <p className="mt-1.5 text-[0.66rem] leading-relaxed text-faint">
+              <p className="mt-1.5 text-[0.7rem] leading-relaxed text-faint">
                 数据卷配额 {formatBytes((num("storage_quota_mb") ?? 0) * 1024 * 1024)}，回收目标占用{" "}
                 {num("quota_target") ?? "—"}%。
               </p>
             ) : null}
           </section>
 
-          <section className="rounded-panel border border-line bg-panel p-3">
-            <h2 className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-soft">
+          <section className="rounded-panel border border-line bg-panel p-4">
+            <h2 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-soft">
               <HardDrive className="size-3.5" />
               保留策略（全局设置，服务端实际生效值）
             </h2>
             {settingsQuery.isError ? (
-              <p className="text-[0.72rem] text-warn">无法读取设置中的保留策略值。</p>
+              <p className="text-xs text-warn">无法读取设置中的保留策略值。</p>
             ) : (
-              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[0.72rem]">
+              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
                 <dt className="text-faint">画面保留</dt>
                 <dd className="text-soft">{num("frame_retention_days") ?? "—"} 天</dd>
                 <dt className="text-faint">保留任务间隔</dt>
@@ -199,18 +199,18 @@ export function SystemPage() {
                 <dd className="text-soft">{num("command_retention_days") ?? "—"} 天</dd>
               </dl>
             )}
-            <p className="mt-1.5 text-[0.66rem] leading-relaxed text-faint">
+            <p className="mt-1.5 text-[0.7rem] leading-relaxed text-faint">
               这里的值来自全局设置；设备级覆盖（设备页“设置”页签）不会改变保留策略在服务器上的执行值。
             </p>
           </section>
 
           <div className="grid gap-3 lg:grid-cols-2">
-            <section className="rounded-panel border border-line bg-panel p-3">
-              <h2 className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-soft">
+            <section className="rounded-panel border border-line bg-panel p-4">
+              <h2 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-soft">
                 <Archive className="size-3.5" />
                 归档配置
               </h2>
-              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[0.72rem]">
+              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
                 <dt className="text-faint">归档开关</dt>
                 <dd className="text-soft">{bool("archive_enabled") ? "已开启" : "已关闭"}</dd>
                 <dt className="text-faint">仓库</dt>
@@ -220,17 +220,17 @@ export function SystemPage() {
                 <dt className="text-faint">路径前缀</dt>
                 <dd className="text-soft">{text("archive_path_prefix") || "—"}</dd>
               </dl>
-              <p className="mt-1.5 text-[0.64rem] leading-relaxed text-faint">
+              <p className="mt-1.5 text-[0.7rem] leading-relaxed text-faint">
                 队列与失败明细见「备份」页；归档令牌（secret）不会出现在浏览器。
               </p>
             </section>
 
-            <section className="rounded-panel border border-line bg-panel p-3">
-              <h2 className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-soft">
+            <section className="rounded-panel border border-line bg-panel p-4">
+              <h2 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-soft">
                 <PackageCheck className="size-3.5" />
                 安装与访问
               </h2>
-              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[0.72rem]">
+              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
                 <dt className="text-faint">控制台域名</dt>
                 <dd className="break-all text-soft">{system.console_host || "—"}</dd>
                 <dt className="text-faint">备用域名</dt>
@@ -238,19 +238,19 @@ export function SystemPage() {
                 <dt className="text-faint">安装版本</dt>
                 <dd className="font-mono text-soft">v{system.install.version || "—"}</dd>
                 <dt className="text-faint">安装脚本</dt>
-                <dd className="break-all font-mono text-[0.64rem] text-soft">
+                <dd className="break-all font-mono text-[0.7rem] text-soft">
                   {system.install.script_url || "—"} · {system.install.cmd_url || "—"}
                 </dd>
               </dl>
             </section>
           </div>
 
-          <section className="rounded-panel border border-line bg-panel p-3">
-            <h2 className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-soft">
+          <section className="rounded-panel border border-line bg-panel p-4">
+            <h2 className="mb-1.5 flex items-center gap-1.5 text-sm font-semibold text-soft">
               <ServerCog className="size-3.5" />
               页面说明
             </h2>
-            <ul className="list-disc space-y-0.5 pl-4 text-[0.68rem] leading-relaxed text-soft">
+            <ul className="list-disc space-y-0.5 pl-4 text-[0.7rem] leading-relaxed text-soft">
               <li>所有数值来自服务端接口；控制台不推算“在线/新鲜度”，也不使用浏览器时钟判断时间。</li>
               <li>载波计数来自链路注册表快照，页面每 15 秒刷新一次。</li>
               <li>保留策略是全局值；按设备的覆盖不会出现在这里（见设备页“设置”页签）。</li>
@@ -263,6 +263,6 @@ export function SystemPage() {
         待补字段：schema 版本（服务端已有 <span className="font-mono">core/db.py::SCHEMA_VERSION</span>，但
         <span className="font-mono"> /api/v1/system</span> 未输出）。补上后本页直接显示，无需前端再改结构。
       </Banner>
-    </div>
+    </PageShell>
   );
 }

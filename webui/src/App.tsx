@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 
 import { AppShell } from "@/components/app-shell";
+import { Spotlight } from "@/components/aceternity/spotlight";
 import { LiveBridge } from "@/components/live-bridge";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
@@ -33,22 +34,24 @@ export function App() {
 
   if (status === "boot") {
     return (
-      <div className="flex app-vh flex-col items-center justify-center gap-3">
-        <Spinner className="size-5 text-brand" />
-        <p className="text-xs text-soft">正在连接 Observatory…</p>
+      <div className="relative flex app-vh flex-col items-center justify-center gap-3 overflow-hidden">
+        <Spotlight className="left-[-30%] top-[-10%] opacity-30" />
+        <Spinner className="relative z-10 size-5 text-brand" />
+        <p className="relative z-10 text-sm text-soft">正在连接 Observatory…</p>
       </div>
     );
   }
 
   if (status === "error") {
     return (
-      <div className="flex app-vh items-center justify-center px-4">
-        <div className="glass w-full max-w-sm rounded-panel border border-line p-6 text-center shadow-card">
+      <div className="relative flex app-vh items-center justify-center overflow-hidden px-4">
+        <Spotlight className="left-[-30%] top-[-10%] opacity-30" />
+        <div className="glass-raised relative z-10 w-full max-w-sm rounded-window border border-line p-6 text-center shadow-pop">
           <p className="text-sm font-medium text-ink">{error}</p>
-          <p className="mt-1.5 text-xs leading-relaxed text-soft">
+          <p className="mt-2 text-xs leading-relaxed text-soft">
             控制台无法读取服务端会话。网络恢复后可以继续使用，登录状态会保留。
           </p>
-          <Button className="mt-4 w-full" onClick={() => void refresh()}>
+          <Button className="mt-5 w-full" onClick={() => void refresh()}>
             重试
           </Button>
         </div>

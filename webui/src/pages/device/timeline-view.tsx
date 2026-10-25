@@ -150,7 +150,7 @@ export function TimelineView({ device }: { device: DeviceLike }) {
             type="button"
             onClick={() => pickDay(item.days)}
             className={cn(
-              "rounded-md border px-2.5 py-1 text-[0.72rem]",
+              "rounded-md border px-2.5 py-1 text-xs",
               !custom && daysAgo === item.days
                 ? "border-brand/40 bg-brand/10 text-brand"
                 : "border-line text-soft hover:bg-sunken",
@@ -163,15 +163,15 @@ export function TimelineView({ device }: { device: DeviceLike }) {
         <CalendarRange className="size-3.5 text-faint" aria-hidden />
         <Input
           type="datetime-local"
-          className="h-8 w-[11.5rem] text-[0.7rem]"
+          className="h-8 w-[11.5rem] text-xs"
           value={fromText}
           onChange={(event) => setFromText(event.target.value)}
           aria-label="开始时间"
         />
-        <span className="text-[0.7rem] text-faint">至</span>
+        <span className="text-xs text-faint">至</span>
         <Input
           type="datetime-local"
-          className="h-8 w-[11.5rem] text-[0.7rem]"
+          className="h-8 w-[11.5rem] text-xs"
           value={toText}
           onChange={(event) => setToText(event.target.value)}
           aria-label="结束时间"
@@ -187,7 +187,7 @@ export function TimelineView({ device }: { device: DeviceLike }) {
         {anchor !== null && window && !fromText && !toText ? (
           <button
             type="button"
-            className="text-[0.68rem] text-faint underline-offset-2 hover:underline"
+            className="text-[0.7rem] text-faint underline-offset-2 hover:underline"
             onClick={() => {
               setFromText(toDateTimeLocal(window.fromMs));
               setToText(toDateTimeLocal(window.toMs));
@@ -241,14 +241,14 @@ export function TimelineView({ device }: { device: DeviceLike }) {
                     className="h-full w-full object-cover"
                   />
                 ) : (
-                  <span className="flex h-full items-center justify-center text-[0.65rem] text-faint">无缩略图</span>
+                  <span className="flex h-full items-center justify-center text-[0.7rem] text-faint">无缩略图</span>
                 )}
                 {bucket.frame_count > 1 ? (
-                  <span className="absolute right-0.5 bottom-0.5 rounded bg-black/60 px-1 text-[0.6rem] text-white">
+                  <span className="absolute right-0.5 bottom-0.5 rounded bg-black/60 px-1 text-[0.7rem] text-white">
                     {bucket.frame_count}
                   </span>
                 ) : null}
-                <span className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent px-1 pt-3 pb-0.5 text-left text-[0.6rem] text-white/90">
+                <span className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent px-1 pt-3 pb-0.5 text-left text-[0.7rem] text-white/90">
                   {formatDateTime(bucket.ts_ms).slice(11)}
                 </span>
               </button>
@@ -290,7 +290,7 @@ export function TimelineView({ device }: { device: DeviceLike }) {
                 alt={`${formatDateTime(frameTimeMs(openFrame))} 的原图`}
                 className="max-h-[62vh] w-full rounded-md bg-black object-contain"
               />
-              <p className="text-[0.7rem] text-soft">
+              <p className="text-xs text-soft">
                 设备时间 {formatDateTime(openFrame.device_time_ms)} · 服务端时间 {formatDateTime(openFrame.ts_ms)} ·{" "}
                 {openFrame.width}×{openFrame.height} · {formatBytes(openFrame.size_bytes)}
               </p>

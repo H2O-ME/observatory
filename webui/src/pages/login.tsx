@@ -2,9 +2,14 @@ import { useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { KeyRound, Loader2, ShieldCheck } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
+import { GridPattern } from "@/components/aceternity/grid-pattern";
+import { HoverBorderGradient } from "@/components/aceternity/hover-border-gradient";
+import { Meteors } from "@/components/aceternity/meteors";
+import { Spotlight } from "@/components/aceternity/spotlight";
+import { TextGenerateEffect } from "@/components/aceternity/text-generate-effect";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useViewport } from "@/hooks/use-viewport";
 import { isApiError } from "@/lib/api";
 import { useAuth } from "@/store/auth";
 
@@ -13,12 +18,11 @@ interface Props {
 }
 
 /**
- * Login.
+ * Login（0.3.3 Aceternity 重写）。
  *
- * The TOTP field is shown *before* the first attempt when the server's session
- * payload says `totp_enabled`, instead of guessing from an error string. The
- * error-string fallback stays for a server that enables TOTP between the session
- * probe and the login attempt.
+ * 逻辑不变：TOTP 字段在服务端 session 声明 `totp_enabled` 时首渲染即出现，
+ * 错误串回退保留；F40 深链接回跳保留。视觉层换成 Spotlight + 网格 + 流星
+ * 的组合——手表端（无 hover、省电）自动去掉流星与网格动画。
  */
 export function LoginPage({ version }: Props) {
   const login = useAuth((state) => state.login);
@@ -26,6 +30,8 @@ export function LoginPage({ version }: Props) {
   const consoleHost = useAuth((state) => state.consoleHost);
   const navigate = useNavigate();
   const location = useLocation();
+  const viewport = useViewport();
+  const watch = viewport === "watch";
 
   const [password, setPassword] = useState("");
   const [totp, setTotp] = useState("");
@@ -56,18 +62,28 @@ export function LoginPage({ version }: Props) {
   };
 
   return (
-    <div className="flex app-vh-min items-center justify-center px-4 py-8">
-      <div className="w-full max-w-sm">
-        <div className="mb-5 text-center">
-          <h1 className="text-xl font-semibold tracking-tight text-ink">Observatory</h1>
-          <p className="mt-1 text-xs text-soft">受控端控制台</p>
-          <p className="mt-2 inline-flex items-center rounded-md border border-line bg-sunken px-2 py-0.5 font-mono text-[0.7rem] text-soft">
+    <div className="relative flex app-vh-min items-center justify-center overflow-hidden px-4 py-8">
+      {/* 背景层：网格 + 顶光 + 流星（手表端只留顶光） */}
+      {!watch ? <GridPattern strokeDasharray="4 4" className="opacity-60 [mask-image:radial-gradient(ellipse_70%_60%_at_50%_40%,#000,transparent)]" /> : null}
+      <Spotlight className="left-[-40%] top-[-10%] md:left-[-15%]" />
+      {!watch ? <Meteors number={10} /> : null}
+
+      <div className="relative z-10 w-full max-w-sm">
+        <div className="mb-6 text-center">
+          <h1 className="text-2xl font-semibold tracking-tight text-ink">
+            <TextGenerateEffect words="Observatory" duration={0.6} />
+          </h1>
+          <p className="mt-1.5 text-sm text-soft">
+            <TextGenerateEffect words="受控端控制台" duration={0.5} />
+          </p>
+          <p className="mt-2.5 inline-flex items-center rounded-md border border-line bg-sunken px-2 py-0.5 font-mono text-[0.72rem] text-soft">
             版本 v{version || "—"}
           </p>
         </div>
 
-        <form onSubmit={submit} className="glass space-y-3.5 rounded-panel border border-line p-5 shadow-card">
-          <div className="space-y-1.5">
+        <form onSubmit={submit} className="glass-raised relative space-y-4 rounded-window border border-line p-6 shadow-pop">
+          <Spotlight className="left-[-30%] top-[-25%] h-[130%] w-[160%] opacity-25" />
+          <div className="relative space-y-1.5">
             <Label htmlFor="password" className="text-xs text-soft">
               控制台密码
             </Label>
@@ -85,7 +101,7 @@ export function LoginPage({ version }: Props) {
           </div>
 
           {showTotp ? (
-            <div className="space-y-1.5">
+            <div className="relative space-y-1.5">
               <Label htmlFor="totp" className="flex items-center gap-1.5 text-xs text-soft">
                 <ShieldCheck className="size-3.5" />
                 二次验证码
@@ -108,19 +124,27 @@ export function LoginPage({ version }: Props) {
             <p
               role="alert"
               aria-live="polite"
-              className="rounded-md border border-danger/30 bg-danger/10 px-2.5 py-1.5 text-xs text-danger"
+              className="relative rounded-md border border-danger/30 bg-danger/10 px-2.5 py-1.5 text-xs text-danger"
             >
               {error}
             </p>
           ) : null}
 
-          <Button type="submit" className="h-11 w-full text-[0.95rem]" disabled={busy || !password}>
-            {busy ? <Loader2 className="size-4 animate-spin" /> : <KeyRound className="size-4" />}
-            登录
-          </Button>
+          <HoverBorderGradient
+            type="submit"
+            duration={2}
+            containerClassName="relative w-full"
+            className="w-full text-[0.95rem]"
+            disabled={busy || !password}
+          >
+            <span className="flex items-center justify-center gap-2">
+              {busy ? <Loader2 className="size-4 animate-spin" /> : <KeyRound className="size-4" />}
+              登录
+            </span>
+          </HoverBorderGradient>
         </form>
 
-        <p className="mt-4 text-center text-[0.68rem] leading-relaxed text-faint">
+        <p className="mt-5 text-center text-[0.72rem] leading-relaxed text-faint">
           控制台域名为 {consoleHost || "（服务端未配置）"}
           <br />
           受控端可通过任一备用域名接入。

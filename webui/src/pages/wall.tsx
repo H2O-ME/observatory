@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { MonitorSmartphone, Plus, RefreshCw } from "lucide-react";
 
 import { DeviceCard } from "@/components/device-card";
+import { PageShell } from "@/components/page-shell";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, isApiError } from "@/lib/api";
@@ -12,7 +13,7 @@ import { useLive } from "@/store/live";
 import { cn } from "@/lib/utils";
 
 /**
- * The wall.
+ * The wall（0.3.3 重写外壳）：统计改为胶囊芯片，卡片栅格三端分档。
  *
  * Every number and label here comes from the server's `presence` block: state
  * counts are `presence.state` tallies, "poll only" is `presence.transport`, and
@@ -50,36 +51,41 @@ export function WallPage() {
           ? "grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4"
           : "grid-cols-2 xl:grid-cols-3";
 
+  const chips = [
+    { tone: "bg-ok", label: `在线 ${counts.online}` },
+    { tone: "bg-warn", label: `受限 ${counts.degraded}` },
+    { tone: "bg-faint", label: `离线 ${counts.offline}` },
+  ];
+
   return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2">
-          <h1 className="text-base font-semibold text-ink">设备</h1>
-          <span className="font-mono text-[0.68rem] text-faint">v{data?.server_version ?? "—"}</span>
-        </div>
+    <PageShell
+      title="设备"
+      subtitle={
+        <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span className="font-mono text-[0.7rem] text-faint">v{data?.server_version ?? "—"}</span>
+          {pollOnly > 0 ? (
+            <span className="text-warn">{pollOnly} 台仅轮询：实时控制不可用，其余功能正常</span>
+          ) : null}
+          {!connected ? <span className="text-warn">实时连接断开，正在每 8 秒轮询一次</span> : null}
+        </span>
+      }
+      actions={
         <Button variant="outline" size="sm" onClick={() => void refetch()} disabled={isFetching}>
           <RefreshCw className={cn("size-3.5", isFetching && "animate-spin")} />
           刷新
         </Button>
-      </div>
-
-      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[0.72rem] text-soft">
-        <span>
-          <span className="mr-1 inline-block size-1.5 rounded-full bg-ok align-middle" />
-          在线 {counts.online}
-        </span>
-        <span>
-          <span className="mr-1 inline-block size-1.5 rounded-full bg-warn align-middle" />
-          受限 {counts.degraded}
-        </span>
-        <span>
-          <span className="mr-1 inline-block size-1.5 rounded-full bg-faint align-middle" />
-          离线 {counts.offline}
-        </span>
-        {pollOnly > 0 ? (
-          <span className="text-warn">{pollOnly} 台仅轮询：实时控制不可用，其余功能正常</span>
-        ) : null}
-        {!connected ? <span className="text-warn">实时连接断开，正在每 8 秒轮询一次</span> : null}
+      }
+    >
+      <div className="flex flex-wrap gap-2">
+        {chips.map((chip) => (
+          <span
+            key={chip.label}
+            className="inline-flex items-center gap-1.5 rounded-full border border-line bg-panel px-3 py-1 text-xs font-medium text-soft shadow-card"
+          >
+            <span className={cn("inline-block size-1.5 rounded-full align-middle", chip.tone)} />
+            {chip.label}
+          </span>
+        ))}
       </div>
 
       {isError ? (
@@ -114,6 +120,6 @@ export function WallPage() {
           ))}
         </div>
       )}
-    </div>
+    </PageShell>
   );
 }

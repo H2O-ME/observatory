@@ -137,19 +137,19 @@ export function CommandsView({ device }: { device: Device }) {
                       <span className="text-[0.8rem] font-medium text-ink">
                         {TYPE_LABEL[command.type] ?? command.type}
                       </span>
-                      <span className={cn("rounded border px-1.5 py-0.5 text-[0.62rem]", STATUS_TONE[status])}>
+                      <span className={cn("rounded border px-1.5 py-0.5 text-[0.7rem]", STATUS_TONE[status])}>
                         {STATUS_LABEL[status] ?? status}
                       </span>
                       {command.attempts > 1 ? (
-                        <span className="text-[0.62rem] text-warn">重投 {command.attempts} 次</span>
+                        <span className="text-[0.7rem] text-warn">重投 {command.attempts} 次</span>
                       ) : null}
                     </span>
-                    <span className="mt-0.5 block truncate text-[0.66rem] text-faint">
+                    <span className="mt-0.5 block truncate text-[0.7rem] text-faint">
                       {formatDateTime(command.created_at_ms)} · 预算 {command.deadline_ms / 1000}s · 耗时{" "}
                       {elapsedOf(command)} · <span className="font-mono">{command.id.slice(0, 8)}</span>
                     </span>
                     {command.error && !open ? (
-                      <span className="mt-0.5 block truncate text-[0.66rem] text-danger">
+                      <span className="mt-0.5 block truncate text-[0.7rem] text-danger">
                         {command.error_code ? `${ERROR_CODE_TEXT[command.error_code] ?? command.error_code}：` : ""}
                         {command.error}
                       </span>
@@ -159,7 +159,7 @@ export function CommandsView({ device }: { device: Device }) {
 
                 {open ? (
                   <div className="space-y-2 border-t border-line px-2.5 py-2">
-                    <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[0.7rem]">
+                    <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
                       <dt className="text-faint">命令 id</dt>
                       <dd className="break-all font-mono text-soft">{command.id}</dd>
                       <dt className="text-faint">下发时间</dt>
@@ -186,7 +186,7 @@ export function CommandsView({ device }: { device: Device }) {
         </ul>
       )}
 
-      <div className="flex items-center justify-between text-[0.72rem] text-soft">
+      <div className="flex items-center justify-between text-xs text-soft">
         <Button
           size="sm"
           variant="outline"
@@ -219,8 +219,8 @@ function JsonBlock({ label, value }: { label: string; value: unknown }) {
   if (text.length > 4000) text = `${text.slice(0, 4000)}\n…（已截断）`;
   return (
     <div>
-      <p className="mb-1 text-[0.66rem] text-faint">{label}</p>
-      <pre className="max-h-56 overflow-auto rounded-md border border-line bg-sunken p-2 font-mono text-[0.64rem] leading-relaxed text-soft">
+      <p className="mb-1 text-[0.7rem] text-faint">{label}</p>
+      <pre className="max-h-56 overflow-auto rounded-md border border-line bg-sunken p-2 font-mono text-[0.7rem] leading-relaxed text-soft">
         {text}
       </pre>
     </div>

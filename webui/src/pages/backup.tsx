@@ -3,8 +3,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { AlertTriangle, ArrowDownToLine, CloudUpload, Database, Download, RefreshCw, Trash2 } from "lucide-react";
 
-import { Banner, EmptyBlock, ErrorBlock, LoadingBlock, PageHeader, Pager } from "@/components/async-state";
+import { Banner, EmptyBlock, ErrorBlock, LoadingBlock, Pager } from "@/components/async-state";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { PageShell } from "@/components/page-shell";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -97,33 +98,32 @@ export function BackupPage() {
   };
 
   return (
-    <div className="space-y-3">
-      <PageHeader
-        title="归档备份"
-        subtitle={
-          overview.data
-            ? overview.data.configured
-              ? `${overview.data.repo || "（仓库未填）"}${overview.data.branch ? ` · ${overview.data.branch}` : ""} · ${
-                  overview.data.archive_enabled ? "自动归档开启" : "自动归档关闭"
-                }`
-              : "未配置远端归档仓库"
-            : "读取中…"
-        }
-        actions={
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => {
-              void overview.refetch();
-              void entries.refetch();
-            }}
-            disabled={overview.isFetching || entries.isFetching}
-          >
-            <RefreshCw className={cn("size-3.5", (overview.isFetching || entries.isFetching) && "animate-spin")} />
-            刷新
-          </Button>
-        }
-      />
+    <PageShell
+      title="归档备份"
+      subtitle={
+        overview.data
+          ? overview.data.configured
+            ? `${overview.data.repo || "（仓库未填）"}${overview.data.branch ? ` · ${overview.data.branch}` : ""} · ${
+                overview.data.archive_enabled ? "自动归档开启" : "自动归档关闭"
+              }`
+            : "未配置远端归档仓库"
+          : "读取中…"
+      }
+      actions={
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => {
+            void overview.refetch();
+            void entries.refetch();
+          }}
+          disabled={overview.isFetching || entries.isFetching}
+        >
+          <RefreshCw className={cn("size-3.5", (overview.isFetching || entries.isFetching) && "animate-spin")} />
+          刷新
+        </Button>
+      }
+    >
 
       {message ? <Banner tone="ok">{message}</Banner> : null}
       {error ? <Banner tone="error">{error}</Banner> : null}
@@ -152,7 +152,7 @@ export function BackupPage() {
             { label: "已删除", value: summary.statuses["已删除"] ?? summary.deleted ?? 0, tone: "text-faint" },
           ].map((item) => (
             <div key={item.label} className="rounded-panel border border-line bg-panel p-2.5">
-              <p className="text-[0.66rem] text-faint">{item.label}</p>
+              <p className="text-[0.7rem] text-faint">{item.label}</p>
               <p className={cn("mt-0.5 font-mono text-lg font-semibold", item.tone)}>{item.value}</p>
             </div>
           ))}
@@ -160,7 +160,7 @@ export function BackupPage() {
       ) : null}
 
       {summary && configured ? (
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-panel border border-line bg-panel px-2.5 py-2 text-[0.68rem] text-soft">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-panel border border-line bg-panel px-2.5 py-2 text-[0.7rem] text-soft">
           <span className="flex items-center gap-1">
             <CloudUpload className="size-3.5 text-faint" />
             队列 {summary.queue_size ?? 0} · worker {summary.worker_running ? "运行中" : "未运行"}
@@ -171,15 +171,15 @@ export function BackupPage() {
       ) : null}
 
       {overview.data && overview.data.recent_failures.length > 0 ? (
-        <section className="rounded-panel border border-warn/40 bg-warn/10 p-3">
-          <h2 className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-warn">
+        <section className="rounded-panel border border-warn/40 bg-warn/10 p-4">
+          <h2 className="mb-1.5 flex items-center gap-1.5 text-sm font-semibold text-warn">
             <AlertTriangle className="size-3.5" aria-hidden />
             最近未成功的归档（{overview.data.recent_failures.length}）
           </h2>
-          <ul className="space-y-1 text-[0.68rem] text-soft">
+          <ul className="space-y-1 text-[0.7rem] text-soft">
             {overview.data.recent_failures.map((failure) => (
               <li key={failure.id} className="flex items-start justify-between gap-2">
-                <span className="min-w-0 flex-1 truncate font-mono text-[0.64rem]">{failure.remote_path}</span>
+                <span className="min-w-0 flex-1 truncate font-mono text-[0.7rem]">{failure.remote_path}</span>
                 <span className="shrink-0 text-warn">
                   {failure.status} · 尝试 {failure.attempts} 次
                   {failure.error ? ` · ${failure.error}` : ""}
@@ -187,7 +187,7 @@ export function BackupPage() {
               </li>
             ))}
           </ul>
-          <p className="mt-1.5 text-[0.64rem] leading-relaxed text-faint">
+          <p className="mt-1.5 text-[0.7rem] leading-relaxed text-faint">
             失败行由服务端周期任务自动重试；超过重试上限后保持“失败”，需要人工排查仓库权限或网络。
           </p>
         </section>
@@ -276,17 +276,17 @@ export function BackupPage() {
                 title="查看归档详情"
               >
                 <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                  <span className={cn("rounded border px-1.5 py-0.5 text-[0.62rem]", STATUS_TONE[entry.status] ?? "border-line bg-sunken text-soft")}>
+                  <span className={cn("rounded border px-1.5 py-0.5 text-[0.7rem]", STATUS_TONE[entry.status] ?? "border-line bg-sunken text-soft")}>
                     {entry.status}
                   </span>
-                  <span className="truncate font-mono text-[0.72rem] text-ink">{entry.device_uid || `设备 ${entry.device_id}`}</span>
-                  {entry.device_name ? <span className="text-[0.68rem] text-soft">{entry.device_name}</span> : null}
+                  <span className="truncate font-mono text-xs text-ink">{entry.device_uid || `设备 ${entry.device_id}`}</span>
+                  {entry.device_name ? <span className="text-[0.7rem] text-soft">{entry.device_name}</span> : null}
                 </span>
-                <span className="mt-0.5 block truncate text-[0.64rem] text-faint">
+                <span className="mt-0.5 block truncate text-[0.7rem] text-faint">
                   {entry.day} · {formatBytes(entry.size_bytes)} · {entry.frame_id ?? "—"} ·{" "}
                   {entry.local_available ? "本地副本在" : "仅远端"} · 尝试 {entry.attempts} 次
                 </span>
-                {entry.error ? <span className="mt-0.5 block truncate text-[0.64rem] text-danger">{entry.error}</span> : null}
+                {entry.error ? <span className="mt-0.5 block truncate text-[0.7rem] text-danger">{entry.error}</span> : null}
               </button>
               <span className="flex shrink-0 items-center gap-1">
                 {entry.local_available ? (
@@ -349,15 +349,15 @@ export function BackupPage() {
                   className="max-h-64 w-full rounded-md bg-black object-contain"
                 />
               ) : null}
-              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[0.7rem]">
+              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
                 <dt className="text-faint">设备</dt>
                 <dd className="break-all text-soft">{detail.data.entry.device_name || detail.data.entry.device_uid || detail.data.entry.device_id}</dd>
                 <dt className="text-faint">日期</dt>
                 <dd className="text-soft">{detail.data.entry.day}</dd>
                 <dt className="text-faint">远端路径</dt>
-                <dd className="break-all font-mono text-[0.64rem] text-soft">{detail.data.entry.remote_path}</dd>
+                <dd className="break-all font-mono text-[0.7rem] text-soft">{detail.data.entry.remote_path}</dd>
                 <dt className="text-faint">sha256</dt>
-                <dd className="break-all font-mono text-[0.64rem] text-soft">{detail.data.entry.sha256 || "—"}</dd>
+                <dd className="break-all font-mono text-[0.7rem] text-soft">{detail.data.entry.sha256 || "—"}</dd>
                 <dt className="text-faint">大小</dt>
                 <dd className="text-soft">{formatBytes(detail.data.entry.size_bytes)}</dd>
                 <dt className="text-faint">状态</dt>
@@ -392,6 +392,6 @@ export function BackupPage() {
           if (pendingDelete) remove.mutate(pendingDelete.id);
         }}
       />
-    </div>
+    </PageShell>
   );
 }

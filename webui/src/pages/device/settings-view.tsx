@@ -186,8 +186,8 @@ export function DeviceSettingsView({ device }: { device: Device }) {
         <LoadingBlock label="正在读取设置与生效值…" rows={6} />
       ) : (
         <>
-          <section className="rounded-panel border border-line bg-panel p-3">
-            <h2 className="mb-2 text-xs font-semibold text-soft">可按设备覆盖（{overridable.length} 项）</h2>
+          <section className="rounded-panel border border-line bg-panel p-4">
+            <h2 className="mb-2 text-sm font-medium text-soft">可按设备覆盖（{overridable.length} 项）</h2>
             <div className="space-y-3">
               {overridable.map(([key, spec]) => (
                 <DeviceSettingRow
@@ -209,22 +209,22 @@ export function DeviceSettingsView({ device }: { device: Device }) {
             </div>
           </section>
 
-          <section className="rounded-panel border border-line bg-panel p-3">
-            <h2 className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-soft">
+          <section className="rounded-panel border border-line bg-panel p-4">
+            <h2 className="mb-1.5 flex items-center gap-1.5 text-sm font-medium text-soft">
               <TriangleAlert className="size-3.5 text-warn" />
               只支持全局的设置（{globalOnly.length} 项）
             </h2>
-            <p className="text-[0.68rem] leading-relaxed text-soft">
+            <p className="text-[0.7rem] leading-relaxed text-soft">
               以下设置不支持按设备覆盖，只能在设置页修改：
             </p>
-            <p className="mt-1 break-all font-mono text-[0.64rem] leading-relaxed text-faint">
+            <p className="mt-1 break-all font-mono text-[0.7rem] leading-relaxed text-faint">
               {globalOnly.join(" · ") || "—"}
             </p>
           </section>
 
-          <section className="rounded-panel border border-line bg-panel p-3">
-            <h2 className="mb-1.5 text-xs font-semibold text-soft">已知限制</h2>
-            <p className="text-[0.68rem] leading-relaxed text-soft">
+          <section className="rounded-panel border border-line bg-panel p-4">
+            <h2 className="mb-1.5 text-sm font-medium text-soft">已知限制</h2>
+            <p className="text-[0.7rem] leading-relaxed text-soft">
               服务端当前只支持“写入/覆盖”单设备设置，<b>不支持删除某条覆盖</b>（`PATCH /devices/{"{uid}"}` 没有删除分支）。
               要回到全局行为，可点该行的“填全局值”再保存（这会留下一条与全局相同的覆盖），或等 server-console 提供删除接口。
             </p>
@@ -260,19 +260,19 @@ function DeviceSettingRow({
   return (
     <div className="grid gap-1.5 border-b border-line/60 pb-2.5 last:border-b-0 last:pb-0 sm:grid-cols-[minmax(0,1fr)_minmax(0,20rem)] sm:items-center sm:gap-3">
       <div className="min-w-0">
-        <p className="flex flex-wrap items-center gap-1.5 text-[0.74rem] text-ink">
+        <p className="flex flex-wrap items-center gap-1.5 text-xs text-ink">
           <label htmlFor={id}>{spec.description || name}</label>
           {overridden ? (
-            <span className="rounded border border-brand/30 bg-brand/10 px-1 py-0.5 text-[0.6rem] text-brand">
+            <span className="rounded border border-brand/30 bg-brand/10 px-1 py-0.5 text-[0.7rem] text-brand">
               本设备已覆盖
             </span>
           ) : (
-            <span className="rounded border border-line bg-sunken px-1 py-0.5 text-[0.6rem] text-faint">
+            <span className="rounded border border-line bg-sunken px-1 py-0.5 text-[0.7rem] text-faint">
               继承全局
             </span>
           )}
         </p>
-        <p className="text-[0.64rem] text-faint">
+        <p className="text-[0.7rem] text-faint">
           <span className="font-mono">{name}</span> · 全局默认{" "}
           <span className="font-mono text-soft">{showValue(globalValue)}</span> · 本设备有效{" "}
           <span className={cn("font-mono", overridden ? "text-brand" : "text-soft")}>{effectiveText}</span>

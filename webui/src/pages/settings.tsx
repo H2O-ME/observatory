@@ -2,8 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, Download, KeyRound, Loader2, RotateCcw, Save, ShieldCheck, Trash2 } from "lucide-react";
 
-import { Banner, ErrorBlock, LoadingBlock, PageHeader } from "@/components/async-state";
+import { Banner, ErrorBlock, LoadingBlock } from "@/components/async-state";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { PageShell } from "@/components/page-shell";
 import { W2Notice } from "@/components/w2-notice";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -230,27 +231,25 @@ export function SettingsPage() {
   const install = installQuery.data;
 
   return (
-    <div className="space-y-3">
-      <PageHeader
-        title="设置"
-        subtitle={`服务端 v${system?.version ?? query.data?.server_version ?? "—"} · 修改只在点“保存”后生效并推送给在线受控端`}
-        actions={
-          <>
-            <Button size="sm" variant="outline" onClick={reset} disabled={saving || (dirtyKeys.length === 0 && secretKeys.length === 0)}>
-              <RotateCcw className="size-3.5" />
-              放弃修改
-            </Button>
-            <Button
-              size="sm"
-              onClick={() => void save()}
-              disabled={saving || (dirtyKeys.length === 0 && secretKeys.length === 0)}
-            >
-              {saving ? <Loader2 className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
-              保存{dirtyKeys.length + secretKeys.length > 0 ? `（${dirtyKeys.length + secretKeys.length} 项）` : ""}
-            </Button>
-          </>
-        }
-      />
+    <PageShell
+      title="设置"
+      subtitle={`服务端 v${system?.version ?? query.data?.server_version ?? "—"} · 修改只在点“保存”后生效并推送给在线受控端`}
+      actions={
+        <>
+          <Button size="sm" variant="outline" onClick={reset} disabled={saving || (dirtyKeys.length === 0 && secretKeys.length === 0)}>
+            <RotateCcw className="size-3.5" />
+            放弃修改
+          </Button>
+          <Button
+            onClick={() => void save()}
+            disabled={saving || (dirtyKeys.length === 0 && secretKeys.length === 0)}
+          >
+            {saving ? <Loader2 className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
+            保存{dirtyKeys.length + secretKeys.length > 0 ? `（${dirtyKeys.length + secretKeys.length} 项）` : ""}
+          </Button>
+        </>
+      }
+    >
 
       {message ? <Banner tone="ok">{message}</Banner> : null}
       {error ? <Banner tone="error">{error}</Banner> : null}
@@ -265,7 +264,7 @@ export function SettingsPage() {
         if (keys.length === 0) return null;
         return (
           <section key={group.title} className="rounded-panel border border-line bg-panel p-3">
-            <h2 className="mb-2 text-xs font-semibold text-soft">{group.title}</h2>
+            <h2 className="mb-2 text-sm font-semibold text-soft">{group.title}</h2>
             <div className="space-y-2.5">
               {keys.map((key) => (
                 <SettingField
@@ -284,8 +283,8 @@ export function SettingsPage() {
       })}
 
       {leftovers.length > 0 ? (
-        <section className="rounded-panel border border-line bg-panel p-3">
-          <h2 className="mb-2 text-xs font-semibold text-soft">其他</h2>
+        <section className="rounded-panel border border-line bg-panel p-4">
+          <h2 className="mb-2 text-sm font-semibold text-soft">其他</h2>
           <div className="space-y-2.5">
             {leftovers.map((key) => (
               <SettingField
@@ -302,23 +301,23 @@ export function SettingsPage() {
         </section>
       ) : null}
 
-      <section className="rounded-panel border border-line bg-panel p-3">
+      <section className="rounded-panel border border-line bg-panel p-4">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="flex items-center gap-1.5 text-xs font-semibold text-soft">
+          <h2 className="flex items-center gap-1.5 text-sm font-semibold text-soft">
             <ShieldCheck className="size-3.5" />
             安装令牌
           </h2>
-          <span className="text-[0.66rem] text-faint">
+          <span className="text-[0.7rem] text-faint">
             可用 {install?.available_tokens ?? 0} 个 · 默认有效期 {install?.token_ttl_minutes ?? "—"} 分钟
           </span>
         </div>
-        <p className="mb-2 text-[0.66rem] leading-relaxed text-faint">
+        <p className="mb-2 text-[0.7rem] leading-relaxed text-faint">
           令牌只用于一次安装，绑定第一台使用它的机器，下载脚本本身不会消耗它。旧的共享注册码已于 0.3.1 移除。
         </p>
 
         <div className="flex flex-wrap items-end gap-2">
           <div className="space-y-1">
-            <Label className="text-[0.66rem] text-faint">有效期</Label>
+            <Label className="text-[0.7rem] text-faint">有效期</Label>
             <Select value={String(ttl)} onValueChange={(value) => setTtl(Number(value) || 1800)}>
               <SelectTrigger size="sm" className="w-28">
                 <SelectValue />
@@ -337,7 +336,7 @@ export function SettingsPage() {
             生成令牌
           </Button>
           {created ? (
-            <span className="text-[0.66rem] text-soft">
+            <span className="text-[0.7rem] text-soft">
               最近生成的令牌有效至 {formatDateTime(created.expires)}
             </span>
           ) : null}
@@ -345,9 +344,9 @@ export function SettingsPage() {
 
         {created ? (
           <div className="mt-2 space-y-1.5 rounded-md border border-brand/30 bg-brand/10 p-2.5">
-            <p className="text-[0.7rem] font-medium text-brand">令牌只显示这一次，请立即复制并保存</p>
+            <p className="text-xs font-medium text-brand">令牌只显示这一次，请立即复制并保存</p>
             <div className="flex items-center gap-1.5">
-              <code className="min-w-0 flex-1 truncate rounded border border-line bg-panel px-2 py-1 font-mono text-[0.66rem]">
+              <code className="min-w-0 flex-1 truncate rounded border border-line bg-panel px-2 py-1 font-mono text-[0.7rem]">
                 {created.token}
               </code>
               <Button size="icon-sm" variant="ghost" aria-label="复制令牌" onClick={() => void copy(created.token, "token")}>
@@ -388,16 +387,16 @@ export function SettingsPage() {
         ) : tokensQuery.isLoading ? (
           <LoadingBlock label="正在读取令牌…" rows={2} />
         ) : (tokensQuery.data?.tokens.length ?? 0) === 0 ? (
-          <p className="mt-2 text-[0.7rem] text-soft">还没有令牌。</p>
+          <p className="mt-2 text-xs text-soft">还没有令牌。</p>
         ) : (
           <ul className="mt-2 divide-y divide-line rounded-md border border-line">
             {(tokensQuery.data?.tokens ?? []).map((token) => {
               const state = token.used ? "已使用" : token.expired ? "已过期" : "可用";
               return (
-                <li key={token.id} className="flex flex-wrap items-center gap-2 px-2 py-1.5 text-[0.68rem]">
+                <li key={token.id} className="flex flex-wrap items-center gap-2 px-2 py-1.5 text-[0.7rem]">
                   <span
                     className={cn(
-                      "rounded border px-1.5 py-0.5 text-[0.62rem]",
+                      "rounded border px-1.5 py-0.5 text-[0.7rem]",
                       state === "可用"
                         ? "border-ok/30 bg-ok/10 text-ok"
                         : state === "已使用"
@@ -439,12 +438,12 @@ export function SettingsPage() {
         testId="settings-account-w3"
       />
 
-      <section className="rounded-panel border border-line bg-panel p-3">
-        <h2 className="mb-2 text-xs font-semibold text-soft">服务器</h2>
+      <section className="rounded-panel border border-line bg-panel p-4">
+        <h2 className="mb-2 text-sm font-semibold text-soft">服务器</h2>
         {systemQuery.isError ? (
           <ErrorBlock message="无法读取服务器状态" retryable onRetry={() => void systemQuery.refetch()} />
         ) : (
-          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[0.72rem]">
+          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
             <dt className="text-faint">版本</dt>
             <dd className="font-mono text-soft">v{system?.version ?? "—"}</dd>
             <dt className="text-faint">运行时长</dt>
@@ -487,7 +486,7 @@ export function SettingsPage() {
           if (pendingToken) revokeToken.mutate(pendingToken.id);
         }}
       />
-    </div>
+    </PageShell>
   );
 }
 
@@ -513,10 +512,10 @@ function SettingField({
     return (
       <div className="grid gap-1 sm:grid-cols-[minmax(0,1fr)_minmax(0,16rem)] sm:items-center sm:gap-3">
         <div className="min-w-0">
-          <Label htmlFor={id} className="text-[0.74rem] text-ink">
+          <Label htmlFor={id} className="text-xs text-ink">
             {specLabel(name, spec)}
           </Label>
-          <p className="text-[0.64rem] text-faint">
+          <p className="text-[0.7rem] text-faint">
             <span className="font-mono">{name}</span> · 已配置的值不会回显，留空表示不修改
           </p>
         </div>
@@ -536,10 +535,10 @@ function SettingField({
   return (
     <div className="grid gap-1 sm:grid-cols-[minmax(0,1fr)_minmax(0,16rem)] sm:items-center sm:gap-3">
       <div className="min-w-0">
-        <Label htmlFor={id} className="text-[0.74rem] text-ink">
+        <Label htmlFor={id} className="text-xs text-ink">
           {specLabel(name, spec)}
         </Label>
-        <p className="text-[0.64rem] text-faint">
+        <p className="text-[0.7rem] text-faint">
           <span className="font-mono">{name}</span>
           {hint}
           {spec.kind === "int" && (spec.min !== null || spec.max !== null)

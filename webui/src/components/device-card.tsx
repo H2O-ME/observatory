@@ -32,12 +32,14 @@ export function DeviceCard({ device, variant = "full" }: Props) {
   const offline = device.presence.state === "offline" || device.presence.state === "uninstalled";
   // Reachable but poll-only: name the consequence instead of showing a bare "受限".
   const pollMode = isPollMode(device.presence);
+  // 手表端（compact）：字号下限提到 0.7rem，触点行加 min-h，保证圆屏可读可点。
+  const compact = variant === "compact";
 
   return (
     <Link
       to={`/device/${encodeURIComponent(device.uid)}`}
       className={cn(
-        "group flex min-w-0 flex-col gap-2 rounded-panel border border-line bg-panel p-3 no-underline shadow-card transition-colors active:bg-sunken",
+        "group flex min-w-0 flex-col gap-2 rounded-panel border border-line bg-panel p-4 no-underline shadow-card transition active:bg-sunken hover:-translate-y-0.5",
         "hover:border-line-strong",
         offline && "opacity-80",
       )}
@@ -48,12 +50,12 @@ export function DeviceCard({ device, variant = "full" }: Props) {
         ) : (
           <div className="flex h-full w-full flex-col items-center justify-center gap-1 text-faint">
             <MonitorSmartphone className="size-6" />
-            <span className="text-[0.7rem]">还没有画面</span>
+            <span className="text-xs">还没有画面</span>
           </div>
         )}
         <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-end justify-between gap-2 bg-gradient-to-t from-black/55 to-transparent p-2">
           <StatusBadge presence={device.presence} compact />
-          <span className="shrink-0 rounded bg-black/45 px-1.5 py-0.5 text-[0.65rem] font-medium text-white/90">
+          <span className="shrink-0 rounded bg-black/45 px-1.5 py-0.5 text-[0.7rem] font-medium text-white/90">
             v{device.agent_version || "?"}
           </span>
         </div>
@@ -61,18 +63,27 @@ export function DeviceCard({ device, variant = "full" }: Props) {
 
       <div className="flex min-w-0 items-start justify-between gap-2">
         <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-ink">{device.name || device.uid}</p>
-          <p className="truncate text-[0.7rem] text-soft">
+          <p className={cn("truncate font-semibold text-ink", compact ? "text-[0.95rem]" : "text-sm")}>
+            {device.name || device.uid}
+          </p>
+          <p className={cn("truncate text-soft", compact ? "text-[0.8rem]" : "text-xs")}>
             {device.hostname || device.uid}
             {device.os_name ? ` · ${device.os_name}` : ""}
           </p>
         </div>
         {/* The age is computed by the server (`presence.age_ms`), not by us. */}
-        <span className="shrink-0 text-[0.68rem] text-faint">{formatAge(device.presence.age_ms)}</span>
+        <span className={cn("shrink-0 text-faint", compact ? "text-xs" : "text-[0.7rem]")}>
+          {formatAge(device.presence.age_ms)}
+        </span>
       </div>
 
       {pollMode ? (
-        <p className="flex items-center gap-1 rounded-md border border-warn/25 bg-warn/10 px-1.5 py-1 text-[0.66rem] leading-tight text-warn">
+        <p
+          className={cn(
+            "flex items-center gap-1 rounded-md border border-warn/25 bg-warn/10 px-1.5 py-1 text-[0.7rem] leading-tight text-warn",
+            compact && "min-h-9",
+          )}
+        >
           <WifiOff className="size-3 shrink-0" aria-hidden />
           <span className="truncate">
             {variant === "compact" ? "仅轮询 · 无实时控制" : "轮询模式 · 实时控制不可用"}
@@ -84,7 +95,7 @@ export function DeviceCard({ device, variant = "full" }: Props) {
         <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
           <Meter label="CPU" value={cpu} compact />
           <Meter label="内存" value={memory} compact />
-          <div className="col-span-2 flex items-center gap-1 text-[0.68rem] text-faint">
+          <div className="col-span-2 flex items-center gap-1 text-[0.7rem] text-faint">
             <MemoryStick className="size-3" />
             <span className="truncate">{formatBytes(memTotal)}</span>
             <Cpu className="ml-1 size-3" />

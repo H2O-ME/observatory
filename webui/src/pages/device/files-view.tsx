@@ -360,7 +360,7 @@ export function FilesView({ device }: { device: Device }) {
       {error ? <Banner tone="error">{error}</Banner> : null}
       {progress ? (
         <div className="rounded-panel border border-line bg-panel p-2.5">
-          <div className="mb-1 flex items-center justify-between gap-2 text-[0.72rem] text-soft">
+          <div className="mb-1 flex items-center justify-between gap-2 text-xs text-soft">
             <span className="truncate">
               {progress.label} · {formatBytes(progress.loaded)} / {formatBytes(progress.total)}
             </span>
@@ -415,7 +415,7 @@ export function FilesView({ device }: { device: Device }) {
         ) : null}
       </div>
 
-      <div className="flex flex-wrap items-center gap-1 text-[0.7rem] text-soft">
+      <div className="flex flex-wrap items-center gap-1 text-xs text-soft">
         {crumbs(path).map((crumb, index) => (
           <span key={`${crumb.path}-${index}`} className="flex items-center gap-1">
             {index > 0 ? <span className="text-faint">›</span> : null}
@@ -479,12 +479,12 @@ export function FilesView({ device }: { device: Device }) {
                 key={drive.path}
                 type="button"
                 onClick={() => setPath(drive.path)}
-                className="flex items-center gap-2.5 rounded-panel border border-line bg-panel p-3 text-left hover:bg-sunken"
+                className="flex items-center gap-2.5 rounded-panel border border-line bg-panel p-4 text-left hover:bg-sunken"
               >
                 <HardDrive className="size-5 shrink-0 text-soft" aria-hidden />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm font-medium text-ink">{drive.name}</span>
-                  <span className="block text-[0.7rem] text-soft">
+                  <span className="block text-xs text-soft">
                     {drive.filesystem || "—"} · 剩余 {drive.free === null ? "—" : formatBytes(drive.free)}
                     {drive.total === null ? "" : ` / ${formatBytes(drive.total)}`}
                   </span>
@@ -512,7 +512,7 @@ export function FilesView({ device }: { device: Device }) {
 
       {listQuery.data?.truncated ? <Banner tone="warn">目录条目过多，受控端已截断返回。</Banner> : null}
 
-      <p className="text-[0.66rem] leading-relaxed text-faint">
+      <p className="text-[0.7rem] leading-relaxed text-faint">
         当前路径：<span className="font-mono">{path || "（驱动器列表）"}</span> · 分片 {CHUNK_BYTES / 1024} KiB ·
         单文件上传上限由服务端设置（默认 512 MiB）
       </p>
@@ -586,7 +586,7 @@ function EntryList({
               <span className={cn("block truncate text-[0.8rem]", entry.hidden ? "text-faint" : "text-ink")}>
                 {entry.name}
               </span>
-              <span className="block truncate text-[0.64rem] text-faint">
+              <span className="block truncate text-[0.7rem] text-faint">
                 {entry.is_dir ? "文件夹" : formatBytes(entry.size)} · 设备时间 {formatDateTime(entry.deviceTimeMs)}
               </span>
             </span>
@@ -673,7 +673,7 @@ function ActionDialog({
           <DialogDescription>{hint}</DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
-          <Label htmlFor="file-action-input" className="text-[0.72rem] text-soft">
+          <Label htmlFor="file-action-input" className="text-xs text-soft">
             {kind === "search" ? "匹配片段" : kind === "copy" || kind === "move" ? "目标路径" : "名称"}
           </Label>
           <Input
@@ -687,7 +687,7 @@ function ActionDialog({
             className="h-9"
           />
           {kind === "search" ? (
-            <label className="flex items-center gap-1.5 text-[0.72rem] text-soft">
+            <label className="flex items-center gap-1.5 text-xs text-soft">
               <input type="checkbox" checked={recursive} onChange={(event) => onRecursiveChange(event.target.checked)} />
               递归搜索子目录
             </label>
