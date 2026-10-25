@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import secrets
+import subprocess
 import sys
 import threading
 import time
@@ -124,6 +125,48 @@ OUTBOX_PATH: Path = outbox_path()
 def ensure_dirs() -> None:
     for path in (PROGRAM_DATA, LOG_DIR, STAGING_DIR):
         path.mkdir(parents=True, exist_ok=True)
+    _harden_acl(PROGRAM_DATA)
+
+
+def _harden_acl(path: Path) -> None:
+    """P1（2026-10 审查）：收紧数据目录/配置的 DACL 到 SYSTEM+Administrators。
+
+    ProgramData 子目录继承的默认 ACL 允许本地 Users 读取；config.json 里躺着
+    设备令牌与一次性注册码——任意本地用户可窃取令牌冒充受控端。用系统自带的
+    ``icacls`` 去继承并显式授权（零新依赖；服务以 SYSTEM 运行有权限改自己目录
+    的 ACL）。失败只告警：ACL 加固是纵深防御，不能阻断主流程。
+
+    两个刻意的边界（win_smoke 的 uninstall_staging 曾被第一版锁死）：
+      * 只对真实生产目录（无 OBS_PROGRAM_DATA 覆盖、位于系统 ProgramData 下）
+        生效——测试/便携目录跳过；
+      * 授权表**保留当前调用者**：CLI 诊断等非提权场景下用户不是 SYSTEM，
+        把自己移出 DACL 会让后续写入全部 PermissionError。
+    """
+
+    if os.name != "nt":
+        return
+    if os.environ.get("OBS_PROGRAM_DATA", "").strip():
+        return
+    grants = ["SYSTEM:(OI)(CI)F", "Administrators:(OI)(CI)F"]
+    user = os.environ.get("USERNAME", "").strip()
+    if user and user.lower() not in ("system",):
+        grants.append(f"{user}:(OI)(CI)F")
+    try:
+        result = subprocess.run(
+            ["icacls", str(path), "/inheritance:r", "/grant:r", *grants],
+            capture_output=True,
+            timeout=15,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode != 0:
+            log.warning(
+                "icacls 收紧 %s 失败（rc=%s）：%s",
+                path,
+                result.returncode,
+                result.stderr.decode("mbcs", "replace").strip(),
+            )
+    except OSError as exc:
+        log.warning("icacls 不可用，跳过 ACL 收紧（%s）：%s", path, exc)
 
 
 # --------------------------------------------------------------- settings ---
@@ -435,6 +478,9 @@ class AgentConfig:
         temporary = target.with_name(f"{target.name}.{os.getpid()}.part")
         temporary.write_text(text, encoding="utf-8")
         os.replace(temporary, target)
+        # P1（2026-10 审查）：这份文件含设备令牌/注册码，ProgramData 的默认
+        # 继承 ACL 允许本地 Users 读——save 后就地收紧到 SYSTEM+Administrators。
+        _harden_acl(target)
         # F38：成功后轮转一份 .bak（load 阶段配置损坏时从这里恢复）。同样走
         # ".part + os.replace" 保证备份文件本身也是原子的。
         backup = target.with_name(target.name + ".bak")
@@ -442,6 +488,7 @@ class AgentConfig:
         try:
             backup_part.write_text(text, encoding="utf-8")
             os.replace(backup_part, backup)
+            _harden_acl(backup)
         except OSError as exc:
             log.warning("写入配置备份 %s 失败: %s", backup, exc)
 

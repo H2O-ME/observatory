@@ -574,9 +574,17 @@ class ServiceRuntime:
         """按 ``capture_scope`` 选择要采集的会话（A15 的消费者）。
 
         ``session``（默认）：优先当前交互用户会话（非 console 会话），没有则退回
-        console 会话；``console``：优先 console 会话。状态过滤与 0.2.10 一致
-        （必须有真实用户名且处于 active/connected），避免在残留会话上反复重试。
+        console 会话；``console``：优先 console 会话。可采集状态以
+        :data:`win.session.CAPTURABLE_STATES` 为唯一权威（F36：active/disconnected
+        ——RDP 关窗后的 disconnected 会话仍可采集，无人值守不失联；connected 是
+        CONNECTQUERY 桌面未就绪，重试白耗）。此前这里硬编码旧集合，与
+        ``select_capturable`` 双实现漂移（P1，2026-10 审查）。
         """
+
+        try:
+            from ..win.session import CAPTURABLE_STATES
+        except Exception:  # noqa: BLE001 — 非 Windows 测试环境回退
+            CAPTURABLE_STATES = frozenset({"active", "disconnected"})
 
         scope = str(self._store.setting("capture_scope", "session")).strip().lower()
         entries = [_session_dict(item) for item in self._sessions]
@@ -584,7 +592,7 @@ class ServiceRuntime:
             entry
             for entry in entries
             if str(entry.get("username") or "").strip()
-            and str(entry.get("state") or "").lower() in {"active", "connected"}
+            and str(entry.get("state") or "").lower() in CAPTURABLE_STATES
         ]
         if not candidates:
             return None
@@ -1021,6 +1029,34 @@ class ServiceRuntime:
                 error="已有更新在进行中",
                 error_code="BAD_REQUEST",
             )
+        # P1（2026-10 审查）：更新门槛。此前 offer/handler 都不比较版本，服务端
+        # 可把设备降到任意旧版本（含回退安全修复）；`auto_update` 配置项定义了
+        # 却无任何消费者（安慰剂，违反自家 C8 纪律）。规则：
+        #   * forced=True（payload 显式声明）→ 跳过版本比较，仍受 auto_update 管辖；
+        #   * 目标版本不高于当前 → 拒绝降级；
+        #   * auto_update 关闭（设置非 true）→ 拒绝一切自动更新。
+        try:
+            from ..version import is_newer
+            from .. import __version__ as current_version
+        except Exception:  # noqa: BLE001 — 版本模块缺失时退回不比较
+            is_newer = None  # type: ignore[assignment]
+            current_version = ""  # type: ignore[assignment]
+        forced = bool(command.payload.get("forced"))
+        if is_newer is not None and not forced and not is_newer(version, current_version):
+            return CommandResult(
+                ok=False,
+                result={"version": version},
+                error=f"拒绝降级到 {version}（当前 {current_version}；强制降级需 forced=true）",
+                error_code="BAD_REQUEST",
+            )
+        auto_update = str(self._store.setting("auto_update", True)).strip().lower()
+        if auto_update not in ("1", "true", "yes", "on"):
+            return CommandResult(
+                ok=False,
+                result={"version": version},
+                error="auto_update 已关闭，拒绝自动更新（forced=true 亦受此开关管辖）",
+                error_code="BAD_REQUEST",
+            )
         task = self._update_task
         if task is None:
             return CommandResult(
@@ -1100,7 +1136,14 @@ class ServiceRuntime:
         return CommandResult(ok=True, result={"ok": True, "reboot": reboot})
 
     async def _uninstall_ack(self) -> None:
-        """helper 写回 ok=true 之后才 ack（A1：先确认再报卸载）。"""
+        """helper 写回 ok=true 之后才 ack（A1：先确认再报卸载）。
+
+        P1（2026-10 审查）：``link.send`` 在 HTTP 载体下只入队，真正发送要等
+        下一轮长轮询；ack 后调用方立即 ``request_shutdown`` 会取消载体任务，
+        随后 purge helper 又会删掉整个数据目录（含 outbox.sqlite3）——ack
+        大概率永远发不出去，服务端留下永久幽灵设备。这里等 outbox 排空
+        （上限 10s）再返回，给最后一轮轮询一个真实的机会。
+        """
 
         link = self._link
         if link is None:
@@ -1109,6 +1152,19 @@ class ServiceRuntime:
             await link.send("uninstall_ack", {"ok": True, "device_time_ms": _now_ms()})
         except (LinkClosed, OutboxFull) as exc:
             log.warning("卸载回执发送失败：%s", exc)
+            return
+        deadline = time.monotonic() + 10.0
+        pending = -1
+        while time.monotonic() < deadline:
+            try:
+                pending = int(link.outbox_stats().get("pending", 1))
+            except Exception:  # noqa: BLE001 — 统计不可得时按仍待发送处理
+                pending = 1
+            if pending <= 0:
+                log.info("卸载回执已排空 outbox")
+                return
+            await asyncio.sleep(0.25)
+        log.warning("卸载回执在 10s 内未能排空（outbox pending=%s），继续停服", pending)
 
     async def _uninstall_report_failure(self, reason: str) -> None:
         await self._send_event("uninstall_failed", {"reason": reason})

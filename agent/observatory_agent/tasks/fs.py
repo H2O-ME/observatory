@@ -39,7 +39,10 @@ log = logging.getLogger(__name__)
 
 MAX_LIST_ENTRIES = 5_000
 MAX_SEARCH_RESULTS = 500
-MAX_READ_BYTES = 1024 * 1024
+#: 单次 files read 的原始字节上限。base64 编码后体积 ×4/3，必须给协议的
+#: MAX_ENVELOPE_BYTES(1MiB) 留余量——1MiB 原文 ≈1.37MiB 信封会被服务端
+#: 422 且整批连坐丢弃，700KiB 编码后 ≈933KiB 安全（P1，2026-10 审查）。
+MAX_READ_BYTES = 700 * 1024
 MAX_WRITE_BYTES = 4 * 1024 * 1024
 #: 0.3.1（F35）：稀疏文件防护——写入 offset 最多允许超出现有大小这么多字节。
 #: NTFS 会把 offset 之前的空洞填零，没有上界时一条伪造 offset 的命令就能写爆磁盘。

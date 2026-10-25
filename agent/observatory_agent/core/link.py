@@ -54,6 +54,7 @@ from .envelope import (
     BATCH_MAX_ITEMS,
     Envelope,
     EnvelopeError,
+    MAX_ENVELOPE_BYTES,
     build_uplink_batch,
     decode,
     decode_binary,
@@ -425,6 +426,10 @@ class Link:
     def closed(self) -> bool:
         return self._closing
 
+    def outbox_stats(self) -> dict[str, Any]:
+        """上行队列统计（pending 数等）——卸载/更新前的"排空"等待用它。"""
+        return dict(self._outbox.stats())
+
     @property
     def terminated(self) -> bool:
         """设备已被服务端标记卸载：调用方应停止服务并退出。"""
@@ -789,6 +794,9 @@ class Link:
                 except LinkError as exc:
                     self._last_error = f"ws: {exc}"
                     log.warning("WS 载体错误（%s），降级到 HTTP 长轮询", exc)
+                except Exception as exc:  # noqa: BLE001 — 兜底：见下方 HTTP 段同款注释
+                    self._last_error = f"ws: {exc}"
+                    log.exception("WS 阶段未预期异常（%s），降级到 HTTP 长轮询", exc)
                 if self._closing:
                     return
 
@@ -803,6 +811,17 @@ class Link:
                 except LinkGoneError as exc:
                     await self._terminate(str(exc))
                     return
+                except Exception as exc:  # noqa: BLE001 — 载体循环的最后一道防线
+                    # P0（2026-10 架构审查）：`_run_http_phase` → `_request` 只捕获
+                    # Transport 家族，httpx.InvalidURL / TooManyRedirects 会穿透到
+                    # 这里。没有这层兜底时一次异常就杀死载体任务，而 `is_alive`
+                    # 只看线程——链路死了线程照活，设备进入"心跳照发、永不
+                    # 重连"的假活，只能重启机器恢复。
+                    self._last_error = f"http: {exc}"
+                    delay = policy.next_reconnect_delay()
+                    log.exception("HTTP 阶段未预期异常（%s）；%.0fs 后重试", exc, delay)
+                    await asyncio.sleep(delay)
+                    continue
                 if self._closing:
                     return
                 if upgraded:
@@ -1067,6 +1086,24 @@ class Link:
         """一次上行批次 → 下行批次的往返；成功时推进 outbox 与时钟。"""
 
         entries = self._outbox.pending(limit=BATCH_MAX_ITEMS, frames=False)
+        # P1（2026-10 审查）：装批前执行协议尺寸上限。MAX_ENVELOPE_BYTES 此前
+        # 只写在 envelope.encode() 里而那里从未被调用——一条超限 result（例如
+        # files read 上限与 base64 膨胀叠加）会让服务端 422 整批，最多 64 条
+        # 无关回执/事件被连坐丢弃且不重发。在这里就地丢弃超限条目并记录，
+        # 让"声明的不变量"真正在发送路径上成立。
+        kept: list = []
+        for entry in entries:
+            if entry.size_bytes > MAX_ENVELOPE_BYTES:
+                self._outbox.discard(
+                    entry.msg_id, reason=f"envelope_too_large: {entry.size_bytes}B"
+                )
+                log.error(
+                    "上行条目 %s 超 %sB 上限（%sB），已丢弃（type=%s）",
+                    entry.msg_id, MAX_ENVELOPE_BYTES, entry.size_bytes, entry.body.get("type"),
+                )
+                continue
+            kept.append(entry)
+        entries = kept
         sent_ids = tuple(entry.msg_id for entry in entries)
         # 请求里的 last_ack_id 是**下行**游标（已处理的最后一条下行 id），
         # 让服务端推进它自己的下行 outbox；与上行确认彻底分开（规格 §5.6）。
@@ -1178,6 +1215,15 @@ class Link:
                         delay,
                         self._outbox.stats()["frames"],
                     )
+                    await asyncio.sleep(delay)
+                    continue
+                except Exception as exc:  # noqa: BLE001 — 帧循环兜底
+                    # 与载体循环同因（P0）：非 Transport 家族异常（无效 URL、
+                    # 重定向循环…）会杀死帧循环且外部无从感知；退避重试。
+                    self._last_error = f"frame: {exc}"
+                    delay = delays[min(failure_index, len(delays) - 1)]
+                    failure_index += 1
+                    log.exception("帧上传未预期异常（%s），%.0fs 后重试", exc, delay)
                     await asyncio.sleep(delay)
                     continue
                 failure_index = 0
