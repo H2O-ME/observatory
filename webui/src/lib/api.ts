@@ -487,17 +487,17 @@ export const api = {
   totpSetup() {
     return request<TotpSetup>(`${API_ROOT}/auth/totp/setup`, { method: "POST", json: {}, opKey: "auth.totpSetup" });
   },
-  totpEnable(secret: string, code: string) {
+  totpEnable(secret: string, code: string, password: string) {
     return request<OkResult>(`${API_ROOT}/auth/totp/enable`, {
       method: "POST",
-      json: { secret, code },
+      json: { secret, code, password },
       opKey: "auth.totpEnable",
     });
   },
-  totpDisable(code: string) {
+  totpDisable(code: string, password: string) {
     return request<OkResult>(`${API_ROOT}/auth/totp/disable`, {
       method: "POST",
-      json: { code },
+      json: { code, password },
       opKey: "auth.totpDisable",
     });
   },

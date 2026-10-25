@@ -634,6 +634,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         trust_forwarded_for=settings.trust_forwarded_for,
         allow_loopback_console=settings.allow_loopback_console,
     )
+    # P1（2026-10 审查）：网络层请求体上限——在 FastAPI 解析 body 之前拒绝
+    # 超限请求（限流此前发生在 body 完整读入内存之后）。装在 HostSplit 内层：
+    # 外域先 404，不向扫描器暴露 413 差异。
+    from .adapters.bodylimit import BodyLimit  # noqa: PLC0415 - 就地导入保持启动顺序清晰
+
+    app.add_middleware(
+        BodyLimit,
+        frame_limit=int(settings.max_frame_bytes),
+    )
     errors.install_error_handlers(app)
 
     app.include_router(link_http_router)

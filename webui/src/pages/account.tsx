@@ -46,7 +46,9 @@ export function AccountPage() {
 
   const [setup, setSetup] = useState<{ secret: string; uri: string } | null>(null);
   const [setupCode, setSetupCode] = useState("");
+  const [setupPassword, setSetupPassword] = useState("");
   const [disableCode, setDisableCode] = useState("");
+  const [disablePassword, setDisablePassword] = useState("");
   const [totpBusy, setTotpBusy] = useState(false);
   const [totpMessage, setTotpMessage] = useState("");
   const [totpError, setTotpError] = useState("");
@@ -113,14 +115,19 @@ export function AccountPage() {
       setTotpError("请输入 6 位验证码");
       return;
     }
+    if (!setupPassword) {
+      setTotpError("请输入当前控制台密码");
+      return;
+    }
     setTotpBusy(true);
     setTotpError("");
     setTotpMessage("");
     try {
-      const result = await api.totpEnable(setup.secret, setupCode);
+      const result = await api.totpEnable(setup.secret, setupCode, setupPassword);
       setTotpMessage(result.message || "已开启二次验证");
       setSetup(null);
       setSetupCode("");
+      setSetupPassword("");
       await refresh();
     } catch (failure) {
       setTotpError(isApiError(failure) ? failure.message : "开启失败");
@@ -134,13 +141,18 @@ export function AccountPage() {
       setTotpError("请输入当前 6 位验证码");
       return;
     }
+    if (!disablePassword) {
+      setTotpError("请输入当前控制台密码");
+      return;
+    }
     setTotpBusy(true);
     setTotpError("");
     setTotpMessage("");
     try {
-      const result = await api.totpDisable(disableCode);
+      const result = await api.totpDisable(disableCode, disablePassword);
       setTotpMessage(result.message || "已关闭二次验证");
       setDisableCode("");
+      setDisablePassword("");
       await refresh();
     } catch (failure) {
       setTotpError(isApiError(failure) ? failure.message : "关闭失败");
@@ -154,7 +166,7 @@ export function AccountPage() {
       <PageHeader
         icon={UserRound}
         title="账户与安全"
-        description="修改控制台密码、管理二次验证；新密码至少 10 位，开启/关闭 TOTP 都需要有效验证码。"
+        description="修改控制台密码、管理二次验证；新密码至少 10 位，开启/关闭 TOTP 都需要有效验证码与当前密码确认。"
       />
 
       <div className={cn("mt-4 min-w-0 sm:mt-5", stack)}>
@@ -285,7 +297,7 @@ export function AccountPage() {
                       </div>
                     </div>
 
-                    <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,10rem)_auto_auto] sm:items-end">
+                    <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,9rem)_minmax(0,11rem)_auto_auto] sm:items-end">
                       <div className="min-w-0">
                         <Label htmlFor="setup-code" className="text-[0.72rem] text-faint">
                           验证器上的 6 位验证码
@@ -300,9 +312,22 @@ export function AccountPage() {
                           className={cn("mt-1 h-9 text-center font-mono tracking-[0.3em]", touch && "tap")}
                         />
                       </div>
+                      <div className="min-w-0">
+                        <Label htmlFor="setup-password" className="text-[0.72rem] text-faint">
+                          当前密码（防会话劫持）
+                        </Label>
+                        <Input
+                          id="setup-password"
+                          type="password"
+                          autoComplete="current-password"
+                          value={setupPassword}
+                          onChange={(event) => setSetupPassword(event.target.value)}
+                          className={cn("mt-1 h-9", touch && "tap")}
+                        />
+                      </div>
                       <ShimmerButton
                         busy={totpBusy}
-                        disabled={totpBusy || setupCode.length !== 6}
+                        disabled={totpBusy || setupCode.length !== 6 || !setupPassword}
                         onClick={() => void enableTotp()}
                       >
                         <Check className="mr-1.5 size-4" />
@@ -326,7 +351,7 @@ export function AccountPage() {
 
               {totpEnabled ? (
                 <div className="grid min-w-0 gap-2 border-t border-line pt-3">
-                  <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,10rem)_auto] sm:items-end">
+                  <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,9rem)_minmax(0,11rem)_auto] sm:items-end">
                     <div className="min-w-0">
                       <Label htmlFor="disable-code" className="text-[0.72rem] text-faint">
                         当前 6 位验证码
@@ -341,12 +366,25 @@ export function AccountPage() {
                         className={cn("mt-1 h-9 text-center font-mono tracking-[0.3em]", touch && "tap")}
                       />
                     </div>
+                    <div className="min-w-0">
+                      <Label htmlFor="disable-password" className="text-[0.72rem] text-faint">
+                        当前密码（防会话劫持）
+                      </Label>
+                      <Input
+                        id="disable-password"
+                        type="password"
+                        autoComplete="current-password"
+                        value={disablePassword}
+                        onChange={(event) => setDisablePassword(event.target.value)}
+                        className={cn("mt-1 h-9", touch && "tap")}
+                      />
+                    </div>
                     <Button
                       size="sm"
                       variant="destructive"
                       className="h-11 sm:h-9"
                       onClick={() => void disableTotp()}
-                      disabled={totpBusy || disableCode.length !== 6}
+                      disabled={totpBusy || disableCode.length !== 6 || !disablePassword}
                     >
                       关闭二次验证
                     </Button>

@@ -239,15 +239,27 @@ async def totp_setup(
 async def totp_enable(
     payload: dict[str, Any],
     request: Request,
+    settings: Any = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
     _admin: dict = Depends(require_admin),
 ) -> dict[str, Any]:
     secret = str(payload.get("secret") or "")
     code = str(payload.get("code") or "")
+    # P1（2026-10 审查）：M2 注释声称"被盗会话无法单独开启 TOTP"，但原实现
+    # 只需要已登录 + 自带 secret/验证码——攻击者用自己的 secret 开启后
+    # bump 吊销所有者全部会话，所有者被永久锁死（无恢复码）。现在与
+    # change_password 同样要求当前密码重认证。
+    password = str(payload.get("password") or "")
+    if not await _check_password(settings, session, password):
+        await audit.record(
+            session,
+            action=audit.ACTION_TOTP_ENABLE,
+            ip=client_ip(request),
+            detail={"ok": False, "stage": "reauth"},
+        )
+        raise AppError.auth("密码不正确，已拒绝开启二次验证")
     if not verify_totp(secret, code):
         raise AppError.bad_request("验证码不正确，请检查手机时间")
-    # M2 hardening: enabling TOTP must not be possible with a stolen session
-    # alone — it revokes other sessions and locks the account to this factor.
     await bump_credential_version(request, session)
     await _put_auth_setting(session, KEY_TOTP_SECRET, secret)
     await audit.record(
@@ -270,6 +282,17 @@ async def totp_disable(
     if secret is None:
         return stamp({"ok": True, "message": "二次验证本来就没有开启"})
     code = str(payload.get("code") or "")
+    # P1（同 totp/enable）：关闭也要密码重认证——被劫持的会话不该能仅凭
+    # 当前 TOTP 码（攻击者刚从屏幕上看到）就拆掉第二因子。
+    password = str(payload.get("password") or "")
+    if not await _check_password(get_settings(request), session, password):
+        await audit.record(
+            session,
+            action=audit.ACTION_TOTP_DISABLE,
+            ip=client_ip(request),
+            detail={"ok": False, "stage": "reauth"},
+        )
+        raise AppError.auth("密码不正确，已拒绝关闭二次验证")
     if not verify_totp(secret, code):
         await audit.record(
             session,

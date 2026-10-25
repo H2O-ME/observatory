@@ -118,6 +118,15 @@ async def console_socket(websocket: WebSocket) -> None:
         await websocket.close(code=CLOSE_UNAUTHORIZED, reason="unauthorized")
         return
 
+    # P1（2026-10 审查）：与 require_admin 相同的 F15 凭据版本校验。此前 WS
+    # 事件流只验签名与过期——被盗会话在改密/TOTP 变更后仍能持续接收
+    # device_updated / command_created / frame_added 实时数据最长 720 分钟。
+    current_pwv = int(getattr(websocket.app.state, "credential_version", 0) or 0)
+    if int(payload.get("pwv", 0) or 0) != current_pwv:
+        await websocket.accept()
+        await websocket.close(code=CLOSE_UNAUTHORIZED, reason="credential-version")
+        return
+
     await websocket.accept()
     await HUB.register(websocket)
     await websocket.send_json(

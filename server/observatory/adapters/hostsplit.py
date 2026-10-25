@@ -29,6 +29,11 @@ log = logging.getLogger(__name__)
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 
+#: 真实对端地址的 loopback 判定集合。Starlette TestClient 的传输把 client
+#: host 固定为字符串 "testclient"（非 IP）——它只存在于进程内测试传输，
+#: 没有网络对端，与本机回环同等对待；此外覆盖整个 127/8。
+CLIENT_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "testclient"})
+
 SHARED_PREFIXES = (
     "/api/v1/agent/",
     "/api/v1/public/",
@@ -105,13 +110,20 @@ class HostSplit:
             )
 
     # -- policy ------------------------------------------------------------
-    def _console_allowed(self, host: str) -> bool:
+    def _console_allowed(self, host: str, *, client_is_loopback: bool) -> bool:
         if host in self.console_hosts:
             return True
-        return bool(self.allow_loopback_console and host in LOOPBACK_HOSTS)
+        # P0（2026-10 架构审查）：Host 头完全由客户端控制。此前公网请求只要
+        # 带 ``Host: 127.0.0.1`` 就命中 loopback 分支，整个控制台 API（登录、
+        # 命令、文件、删除）对互联网敞开——"fail-closed" 实为最大的 fail-open。
+        # loopback 放行现在要求 **Host 是 loopback 且真实对端地址也是
+        # loopback**（scope["client"]，代理后是网桥 IP、伪造不了）。
+        return bool(
+            self.allow_loopback_console and host in LOOPBACK_HOSTS and client_is_loopback
+        )
 
-    def _shared_allowed(self, host: str) -> bool:
-        if host in LOOPBACK_HOSTS:
+    def _shared_allowed(self, host: str, *, client_is_loopback: bool) -> bool:
+        if host in LOOPBACK_HOSTS and client_is_loopback:
             return True
         if not self.config_complete:
             return False
@@ -129,10 +141,16 @@ class HostSplit:
             return
 
         host = request_host(scope, trust_forwarded_for=self.trust_forwarded_for)
+        client_ip = (scope.get("client") or ("", 0))[0]
+        client_is_loopback = _normalise_host(client_ip) in CLIENT_LOOPBACK_HOSTS or client_ip.startswith("127.")
         path = str(scope.get("path") or "/")
-        allowed = self._shared_allowed(host) if _is_shared(path) else self._console_allowed(host)
+        allowed = (
+            self._shared_allowed(host, client_is_loopback=client_is_loopback)
+            if _is_shared(path)
+            else self._console_allowed(host, client_is_loopback=client_is_loopback)
+        )
         if not allowed and scope["type"] == "websocket" and _is_shared_ws(path):
-            allowed = self._shared_allowed(host)
+            allowed = self._shared_allowed(host, client_is_loopback=client_is_loopback)
         if allowed:
             await self.app(scope, receive, send)
             return
