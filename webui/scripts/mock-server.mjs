@@ -32,6 +32,17 @@ const json = (res, status, body) => {
 // --------------------------------------------------------------------- data ---
 const hue = (seed) => [...seed].reduce((a, c) => (a * 31 + c.charCodeAt(0)) % 360, 7);
 
+/** Watches report a single small volume; desktops get C: + D:. */
+function d_disks(uid, opts) {
+  if (opts.singleDisk) {
+    return [{ mount: "C:", total: 32_212_254_720, free: 21_481_836_544 }];
+  }
+  return [
+    { mount: "C:", total: 42_949_672_960, free: 9_663_676_416 },
+    { mount: "D:", total: 107_374_182_400, free: 99_451_166_720 - hue(uid) * 1e6 },
+  ];
+}
+
 function device(uid, name, host, os, osv, arch, ver, proto, state, transport, opts = {}) {
   const lastSeen = now() - (opts.ageS ?? 4) * 1000;
   return {
@@ -71,7 +82,9 @@ function device(uid, name, host, os, osv, arch, ver, proto, state, transport, op
       cpu_percent: opts.cpuPercent ?? 12 + hue(uid) % 40,
       mem_percent: 34 + hue(uid) % 30,
       mem_total: 17_179_869_184,
-      disks: [{ mount: "C:", total: 42_949_672_960, free: 9_663_676_416 }],
+      uptime_s: 86_400 * (1 + hue(uid) % 9) + 3_600 * (hue(uid) % 20),
+      username: opts.username ?? "operator",
+      disks: d_disks(uid, opts),
       sessions: opts.sessions ?? 2,
       resolution: opts.res ?? "1920x1080",
     },
@@ -82,7 +95,7 @@ function device(uid, name, host, os, osv, arch, ver, proto, state, transport, op
 }
 
 const DEVICES = [
-  device("W-7f3a91", "手腕观测站", "watch-band-01", "Android", "13 (Wear)", "arm64", "0.3.6", 3, "online", "ws", { ageS: 3, res: "454x454", note: "表盘右侧,充电座" }),
+  device("W-7f3a91", "手腕观测站", "watch-band-01", "Android", "13 (Wear)", "arm64", "0.3.6", 3, "online", "ws", { ageS: 3, res: "454x454", note: "表盘右侧,充电座", singleDisk: true, username: "wear" }),
   device("D-2c81e4", "主控笔记本", "LAPTOP-TR9", "Windows", "11 23H2", "x64", "0.3.6", 3, "online", "ws", { ageS: 2, note: "日常主力机" }),
   device("D-55aa10", "书房迷你机", "MINI-PC-02", "Windows", "10 22H2", "x64", "0.3.5", 3, "degraded", "poll", { ageS: 95, reason: "WebSocket 不可达,轮询通道正常", cpu: "Intel N100" }),
   device("D-9b0c33", "设计工作站", "MACSTUDIO-X", "macOS", "14.6", "arm64", "0.3.6", 3, "offline", "none", { ageS: 5400, reason: "超过 45 分钟未上报", noFrames: false }),

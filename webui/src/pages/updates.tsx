@@ -147,17 +147,19 @@ export function UpdatesPage() {
             stroke="var(--c-grid-line)"
             strokeDasharray="4 8"
           />
-          <div className="relative grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+          <div className="relative grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end sm:gap-6">
             <div className="min-w-0">
-              <p className="display-title tnum break-all text-gradient">{latest ? `v${latest}` : "—"}</p>
-              <p className="mt-2 max-w-xl text-[0.8rem] leading-relaxed text-soft">
+              <p className="tnum text-gradient break-all text-[1.65rem] font-semibold leading-tight tracking-tight sm:text-[1.85rem]">
+                {latest ? `v${latest}` : "—"}
+              </p>
+              <p className="mt-2 max-w-md text-[0.8rem] leading-relaxed text-soft">
                 “最新”取已上传安装包里
                 <b className="mx-0.5 font-semibold text-ink">语义版本最高</b>
                 的一个；上传旧版本不会降低推送目标。
               </p>
             </div>
 
-            <div className="flex min-w-0 flex-wrap items-center">
+            <div className="flex min-w-0 flex-wrap items-center sm:pb-1">
               <ShimmerButton
                 className="w-full sm:w-auto"
                 busy={uploading}
@@ -233,15 +235,18 @@ export function UpdatesPage() {
                         </MetaChip>
                       ) : null}
                     </div>
-                    <p className="min-w-0 truncate font-mono text-[0.72rem] text-faint">
+                    {pkg.notes ? (
+                      <p className="min-w-0 break-words text-[0.78rem] leading-relaxed text-soft">{pkg.notes}</p>
+                    ) : null}
+                    <p
+                      className="min-w-0 truncate font-mono text-[0.72rem] text-faint"
+                      title={`${pkg.filename}\n大小 ${formatBytes(pkg.size_bytes)}\nsha256 ${pkg.sha256}`}
+                    >
                       {pkg.filename} · {formatBytes(pkg.size_bytes)} · sha256 {pkg.sha256.slice(0, 16)}…
                     </p>
                     <p className="min-w-0 truncate text-[0.72rem] text-faint">
                       上传于 {formatDateTime(pkg.created_at_ms)}
                     </p>
-                    {pkg.notes ? (
-                      <p className="min-w-0 break-words text-[0.78rem] leading-relaxed text-soft">{pkg.notes}</p>
-                    ) : null}
                   </div>
 
                   <div className="flex min-w-0 flex-wrap items-center justify-start sm:justify-end">
@@ -257,7 +262,7 @@ export function UpdatesPage() {
                     <Button
                       size="sm"
                       variant="ghost"
-                      className={cn("text-danger", tapClass)}
+                      className={cn("text-soft hover:text-danger", tapClass)}
                       disabled={remove.isPending}
                       onClick={() => setPendingDelete(pkg)}
                       title={isLatest ? "删除当前最新版本会回退到次高版本" : "删除该安装包"}

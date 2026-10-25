@@ -328,15 +328,29 @@ export function OverviewView({ device, onRefresh }: Props) {
         {disks.length > 0 ? (
           <Section title="磁盘" icon={HardDrive} className={cn("min-w-0", secondarySpan)}>
             <div className="space-y-2.5">
-              {disks.map((disk, index) => (
-                <div key={`${disk.mount ?? index}`} className="min-w-0">
-                  <Meter
-                    label={`${disk.mount ?? "?"} · 剩余 ${formatBytes(disk.free)}`}
-                    value={disk.percent}
-                    hint={`共 ${formatBytes(disk.total)}`}
-                  />
-                </div>
-              ))}
+              {disks.map((disk, index) => {
+                // Bar length = 已用占比, derived from the server's total/free
+                // pair (fall back to the agent's own percent when totals are
+                // missing). High fill therefore reads as "almost full" — the
+                // same danger direction as CPU/内存, not the inverse.
+                const total = disk.total ?? 0;
+                const used = total > 0 ? Math.max(0, total - (disk.free ?? 0)) : 0;
+                const usedPercent =
+                  total > 0
+                    ? (used / total) * 100
+                    : typeof disk.percent === "number"
+                      ? disk.percent
+                      : null;
+                return (
+                  <div key={`${disk.mount ?? index}`} className="min-w-0">
+                    <Meter
+                      label={`${disk.mount ?? "?"} · 已用 ${formatBytes(used)}`}
+                      value={usedPercent}
+                      hint={`共 ${formatBytes(total)} · 剩余 ${formatBytes(disk.free ?? 0)}`}
+                    />
+                  </div>
+                );
+              })}
             </div>
           </Section>
         ) : null}
