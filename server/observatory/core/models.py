@@ -199,12 +199,14 @@ class InstallToken(Base):
 
 
 class DeletedDevice(Base):
-    """Delete tombstone (0.3.1 F9).
+    """Delete tombstone (0.3.1 F9, resurrection semantics amended same release).
 
     A deleted device's token hash lives on here so the link directory can answer
     ``410 GONE`` instead of ``401`` — the agent treats GONE as terminal and stops
-    retrying, and enrolment refuses to resurrect the uid. Kept forever: rows are
-    tiny, and the guarantee "this device was deliberately removed" must not expire.
+    retrying. Enrolment refuses to resurrect the uid **with old credentials**;
+    a freshly minted one-time install token pierces the tombstone (the admin
+    minting it is the re-admission consent) and burns the row inside the claim
+    transaction. Rows are tiny and carry no expiry by design.
     """
 
     __tablename__ = "deleted_devices"

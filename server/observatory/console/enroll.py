@@ -11,6 +11,13 @@ token race leaves no device row behind and rotates nothing. A token already
 bound to *this* device may be re-redeemed (A17 self-heal after e.g. a database
 restore). An enrolment for a uid with a live session is rejected as a takeover
 attempt and audited.
+
+F9 resurrection (0.3.1 hotfix): delete → reinstall is a normal ops cycle, so a
+**freshly minted install token is the admin's consent to re-admit the
+hardware**. Enrolment with an unused token pierces the delete tombstone and
+burns it inside the claim transaction; a used or invalid token never
+resurrects anything, and the old device token stays dead for good (410 while
+the tombstone lives, 401 once it is burned).
 """
 
 from __future__ import annotations
@@ -19,7 +26,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, Request
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.clock import now_ms
@@ -95,18 +102,21 @@ async def enroll(
         raise AppError.auth("缺少安装令牌")
 
     token_row = await _load_token_row(session, install_token, settings=settings)
-    # F9: a deleted uid stays deleted — do not resurrect it under a new token.
+    # F9: a deleted uid stays dead for old credentials. A *fresh* install token
+    # is the admin's re-admission consent (delete → reinstall cycle); only a
+    # used token is refused here — it can never resurrect anything.
     tombstone = (
         await session.execute(select(DeletedDevice).where(DeletedDevice.uid == uid))
     ).scalars().first()
-    if tombstone is not None:
+    resurrected = tombstone is not None
+    if tombstone is not None and token_row.used_at_ms is not None:
         await audit.record(
             session,
             action=audit.ACTION_ENROLL,
             ip=ip,
             detail={"ok": False, "uid": uid, "reason": "tombstoned"},
         )
-        raise AppError.auth("该设备记录已被管理员删除；如需重新接入请先清除墓碑记录")
+        raise AppError.auth("该设备曾被删除，重新接入需使用新的一次性安装令牌")
     device = (await session.execute(select(Device).where(Device.uid == uid))).scalars().first()
 
     # --- claim the token (or verify the same-device re-redeem) ---------------
@@ -132,6 +142,10 @@ async def enroll(
             await session.rollback()
             raise AppError.auth("安装令牌已被使用")
         claimed = True
+        if tombstone is not None:
+            # Same transaction as the claim: a race loser never burns the
+            # tombstone, and a resurrected uid always lands with a live row.
+            await session.execute(delete(DeletedDevice).where(DeletedDevice.uid == uid))
 
     # --- takeover guard: refuse to rotate credentials of a live device -------
     if device is not None and not device.uninstalled_at_ms and _live_session(request, device):
@@ -178,7 +192,13 @@ async def enroll(
         action=audit.ACTION_ENROLL,
         device=device,
         ip=ip,
-        detail={"ok": True, "version": device.agent_version, "mode": "token", "reclaimed": not claimed},
+        detail={
+            "ok": True,
+            "version": device.agent_version,
+            "mode": "token",
+            "reclaimed": not claimed,
+            "resurrected": resurrected,
+        },
     )
     effective = await store().effective(session, device.settings or {})
     return {
