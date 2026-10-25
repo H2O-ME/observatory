@@ -9,6 +9,7 @@ surface and the audit trail.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -77,8 +78,26 @@ async def bump_credential_version(request: Request, session: AsyncSession) -> in
 
 
 async def _get_auth_setting(session: AsyncSession, key: str) -> str | None:
+    """Read one auth setting, tolerating the legacy double-encoded form.
+
+    ``settings.value`` is a JSON column; a plain-string write via some legacy
+    paths stored ``'"$2b$…"'`` (the JSON-quoted form). bcrypt then sees the
+    quotes as part of the salt and ``verify_password`` swallowed the ValueError
+    as a plain mismatch — locking out every password. Strip the quoting when
+    the payload is a quoted string; anything else is returned verbatim.
+    """
+
     row = await session.get(Setting, key)
-    return None if row is None else str(row.value)
+    if row is None:
+        return None
+    raw = row.value
+    if isinstance(raw, str) and len(raw) >= 2 and raw.startswith('"') and raw.endswith('"'):
+        try:
+            decoded = json.loads(raw)
+        except ValueError:
+            return raw
+        return decoded if isinstance(decoded, str) else raw
+    return str(raw)
 
 
 async def _put_auth_setting(session: AsyncSession, key: str, value: str | None) -> None:
