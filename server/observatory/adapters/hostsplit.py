@@ -20,6 +20,7 @@ empty, only the loopback console (if allowed) and loopback shared paths work.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
 
@@ -35,10 +36,8 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 CLIENT_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "testclient"})
 
 
-def _parse_networks(spec: str) -> tuple["ipaddress.IPv4Network | ipaddress.IPv6Network", ...]:
+def _parse_networks(spec: str) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
     """Parse ``"127.0.0.1,::1,172.16.0.0/12"`` into networks (bad entries skipped)."""
-
-    import ipaddress
 
     networks = []
     for piece in (spec or "").split(","):
@@ -53,8 +52,6 @@ def _parse_networks(spec: str) -> tuple["ipaddress.IPv4Network | ipaddress.IPv6N
 
 
 def _in_networks(ip: str, networks: tuple) -> bool:
-    import ipaddress
-
     if not ip or not networks:
         return False
     try:

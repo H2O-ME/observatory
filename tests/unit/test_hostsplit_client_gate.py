@@ -11,10 +11,8 @@
 
 from __future__ import annotations
 
-import asyncio
 
 import pytest
-from starlette.responses import PlainTextResponse
 from starlette.types import Scope
 
 from observatory.adapters.hostsplit import HostSplit
