@@ -160,13 +160,13 @@ function NavItem({
       <NavLink to={item.to} className="block no-underline">
         {active ? (
           <MovingBorder duration={9000} containerClassName="rounded-xl">
-            <span className="flex items-center gap-2.5 rounded-xl bg-panel px-3 py-2.5 text-sm font-medium text-brand shadow-card">
+            <span className="flex items-center gap-2.5 rounded-xl bg-brand-soft px-3 py-2 text-sm font-semibold text-brand shadow-card">
               <Icon className="size-[1.1rem]" />
               {item.label}
             </span>
           </MovingBorder>
         ) : (
-          <span className="flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm text-soft transition-colors hover:bg-sunken hover:text-ink">
+          <span className="flex items-center gap-2.5 rounded-xl px-3 py-2 text-sm text-soft transition-colors hover:bg-sunken hover:text-ink">
             <Icon className="size-[1.1rem]" />
             {item.label}
           </span>
@@ -279,11 +279,11 @@ export function AppShell() {
         {/* ------------------------------------------------ desktop 浮动侧栏 */}
         {viewport === "desktop" ? (
           <aside className="shrink-0 py-4 pl-3 pr-1.5">
-            <div className="glass flex h-full w-[10.5rem] flex-col gap-1 rounded-window border border-line p-2.5 shadow-card">
+            <div className="glass flex h-full w-[10.5rem] flex-col gap-0.5 rounded-window border border-line-strong p-2 shadow-raised">
               {NAV.map((item) => (
                 <NavItem key={item.to} item={item} active={isActive(item.to)} variant="rail" />
               ))}
-              <div className="mt-auto space-y-1 px-2 pb-1 text-[0.7rem] leading-relaxed text-faint">
+              <div className="mt-auto space-y-1 px-2.5 pb-1 pt-2 text-[0.7rem] leading-relaxed text-faint">
                 <p className="font-mono">v{version || "—"}</p>
                 <p>设备状态与时间均由服务端提供</p>
               </div>

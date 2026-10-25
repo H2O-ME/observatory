@@ -139,7 +139,7 @@ export function TimelineView({ device }: { device: DeviceLike }) {
         }
       />
 
-      <div className="flex flex-wrap items-center gap-1.5">
+      <div className="flex flex-wrap items-center gap-2">
         {[
           { days: 0, label: "今天" },
           { days: 1, label: "昨天" },
@@ -150,20 +150,20 @@ export function TimelineView({ device }: { device: DeviceLike }) {
             type="button"
             onClick={() => pickDay(item.days)}
             className={cn(
-              "rounded-md border px-2.5 py-1 text-xs",
+              "rounded-full border px-3.5 py-1.5 text-xs font-medium transition-colors",
               !custom && daysAgo === item.days
-                ? "border-brand/40 bg-brand/10 text-brand"
-                : "border-line text-soft hover:bg-sunken",
+                ? "border-transparent bg-brand text-brand-ink"
+                : "border-line bg-panel text-soft hover:bg-sunken",
             )}
           >
             {item.label}
           </button>
         ))}
         <span className="mx-1 hidden h-4 w-px bg-line sm:block" aria-hidden />
-        <CalendarRange className="size-3.5 text-faint" aria-hidden />
+        <CalendarRange className="size-4 text-faint" aria-hidden />
         <Input
           type="datetime-local"
-          className="h-8 w-[11.5rem] text-xs"
+          className="h-9 w-[11.5rem] text-xs"
           value={fromText}
           onChange={(event) => setFromText(event.target.value)}
           aria-label="开始时间"
@@ -171,7 +171,7 @@ export function TimelineView({ device }: { device: DeviceLike }) {
         <span className="text-xs text-faint">至</span>
         <Input
           type="datetime-local"
-          className="h-8 w-[11.5rem] text-xs"
+          className="h-9 w-[11.5rem] text-xs"
           value={toText}
           onChange={(event) => setToText(event.target.value)}
           aria-label="结束时间"
@@ -187,7 +187,7 @@ export function TimelineView({ device }: { device: DeviceLike }) {
         {anchor !== null && window && !fromText && !toText ? (
           <button
             type="button"
-            className="text-[0.7rem] text-faint underline-offset-2 hover:underline"
+            className="text-xs text-faint underline-offset-2 hover:underline"
             onClick={() => {
               setFromText(toDateTimeLocal(window.fromMs));
               setToText(toDateTimeLocal(window.toMs));
@@ -218,9 +218,11 @@ export function TimelineView({ device }: { device: DeviceLike }) {
       ) : (
         <>
           <Banner tone="info">
-            桶宽 {bucketMs / 1000} 秒（由服务端按跨度选择）· 共 {buckets.length} 个桶 · 点击缩略图查看该时段全部画面
+            桶宽 {bucketMs / 1000} 秒（由服务端按跨度选择）· 共 {buckets.length} 个桶 · 点击卡片查看该时段全部画面
           </Banner>
-          <div className="grid grid-cols-3 gap-1.5 sm:grid-cols-5 md:grid-cols-8">
+          {/* 大卡片网格：缩略图必须可辨认（200px+），时间戳在图下实底条上，
+              不再叠在画面上。列数按视口收敛，告别 8 列邮票墙。 */}
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5">
             {visibleBuckets.map((bucket) => (
               <button
                 key={bucket.ts_ms}
@@ -229,27 +231,32 @@ export function TimelineView({ device }: { device: DeviceLike }) {
                   setOpenFrame(null);
                   setOpenBucket(bucket);
                 }}
-                className="group relative aspect-video overflow-hidden rounded-md border border-line bg-sunken focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
+                className="group overflow-hidden rounded-lg border border-line bg-panel text-left shadow-card transition-transform duration-150 hover:-translate-y-0.5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
                 title={`${formatDateTime(bucket.ts_ms)} · ${bucket.frame_count} 帧`}
               >
-                {bucket.frame_id ? (
-                  <img
-                    src={api.frameUrl(uid, bucket.frame_id, "thumb")}
-                    alt={`${formatDateTime(bucket.ts_ms)} 的画面`}
-                    loading="lazy"
-                    decoding="async"
-                    className="h-full w-full object-cover"
-                  />
-                ) : (
-                  <span className="flex h-full items-center justify-center text-[0.7rem] text-faint">无缩略图</span>
-                )}
-                {bucket.frame_count > 1 ? (
-                  <span className="absolute right-0.5 bottom-0.5 rounded bg-black/60 px-1 text-[0.7rem] text-white">
-                    {bucket.frame_count}
-                  </span>
-                ) : null}
-                <span className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent px-1 pt-3 pb-0.5 text-left text-[0.7rem] text-white/90">
-                  {formatDateTime(bucket.ts_ms).slice(11)}
+                <span className="relative block">
+                  {bucket.frame_id ? (
+                    <img
+                      src={api.frameUrl(uid, bucket.frame_id, "thumb")}
+                      alt={`${formatDateTime(bucket.ts_ms)} 的画面`}
+                      loading="lazy"
+                      decoding="async"
+                      className="block h-auto w-full bg-sunken object-cover"
+                    />
+                  ) : (
+                    <span className="flex aspect-video w-full items-center justify-center text-xs text-faint">
+                      无缩略图
+                    </span>
+                  )}
+                  {bucket.frame_count > 1 ? (
+                    <span className="absolute right-1.5 top-1.5 rounded-md bg-black/70 px-1.5 py-0.5 text-xs font-medium text-white">
+                      {bucket.frame_count} 帧
+                    </span>
+                  ) : null}
+                </span>
+                <span className="flex items-center justify-between gap-2 border-t border-line bg-panel px-2.5 py-1.5">
+                  <span className="font-mono text-xs text-soft">{formatDateTime(bucket.ts_ms).slice(11)}</span>
+                  <span className="text-[0.7rem] text-faint">{formatDateTime(bucket.ts_ms).slice(5, 10)}</span>
                 </span>
               </button>
             ))}
@@ -309,13 +316,13 @@ export function TimelineView({ device }: { device: DeviceLike }) {
               description="可能已被保留策略清理，或只存在于归档仓库（见备份页）。"
             />
           ) : (
-            <div className="grid grid-cols-3 gap-1.5 sm:grid-cols-5">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
               {(framesQuery.data?.frames ?? []).map((frame) => (
                 <button
                   key={frame.id}
                   type="button"
                   onClick={() => setOpenFrame(frame)}
-                  className="aspect-video overflow-hidden rounded-md border border-line bg-sunken"
+                  className="overflow-hidden rounded-lg border border-line bg-panel transition-transform duration-150 hover:-translate-y-0.5"
                   title={formatDateTime(frameTimeMs(frame))}
                 >
                   <img
@@ -323,7 +330,7 @@ export function TimelineView({ device }: { device: DeviceLike }) {
                     alt={formatDateTime(frameTimeMs(frame))}
                     loading="lazy"
                     decoding="async"
-                    className="h-full w-full object-cover"
+                    className="block h-auto w-full bg-sunken object-cover"
                   />
                 </button>
               ))}
