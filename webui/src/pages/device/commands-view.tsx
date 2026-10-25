@@ -94,7 +94,16 @@ export function CommandsView({ device }: { device: Device }) {
   const query = useQuery({
     queryKey: ["commands", device.uid, PAGE, offset],
     queryFn: () => api.listCommands(device.uid, PAGE, offset),
-    refetchInterval: 5_000,
+    // Fast poll only while something is in flight (the socket invalidates on
+    // command_created/updated anyway); a settled journal drops to 30s repair
+    // polling instead of a permanent 5s loop.
+    refetchInterval: (query) => {
+      const commands = query.state.data?.commands;
+      const active = commands?.some(
+        (command) => command.status === "pending" || command.status === "dispatched",
+      );
+      return active ? 5_000 : 30_000;
+    },
   });
 
   const commands = query.data?.commands ?? [];

@@ -413,11 +413,9 @@ export function LiveView({ device }: Props) {
     send({ type: "input", ev: { kind: "mouse", action: "up", button, x, y, norm: true } });
   };
 
-  const onWheel = (event: React.WheelEvent) => {
-    // React 17+ 在根节点以 passive 方式注册 wheel 监听，这里的
-    // preventDefault 是空操作（页面照滚）——真正的拦截在下面的原生监听。
-    send({ type: "input", ev: { kind: "wheel", delta: event.deltaY > 0 ? -1 : 1 } });
-  };
+  // F41: 滚轮只走下面的原生非 passive 监听。React 根节点的 wheel 是
+  // passive 且与原生监听同帧触发——若在这里也 send，一次滚动会双发
+  // （远端速度翻倍）。
 
   // F41: 原生非 passive wheel 监听——preventDefault 真正生效，控制画面
   // 滚轮不再同时滚动控制台页面。
@@ -607,7 +605,6 @@ export function LiveView({ device }: Props) {
             onPointerMove={onPointerMove}
             onPointerDown={onPointerDown}
             onPointerUp={onPointerUp}
-            onWheel={onWheel}
             onKeyDown={onKeyDown}
             onKeyUp={onKeyUp}
             onContextMenu={(event) => event.preventDefault()}

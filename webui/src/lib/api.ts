@@ -795,9 +795,14 @@ async function fetchEventWsOrigins(): Promise<string[]> {
       ...(bootstrap.base_urls ?? []).map((base) => base.replace(/^http/, "ws").replace(/\/+$/, "")),
       sameOrigin,
     ].filter((value, index, all) => value && all.indexOf(value) === index);
+    // Only a *successful* answer is cached. Caching the failure fallback used
+    // to pin [sameOrigin] forever: when the console domain sits behind a CDN
+    // that cannot do WebSocket, a single transient 5xx at page load degraded
+    // the whole session to polling even though every later retry would have
+    // recovered the real candidate list.
     eventWsOriginsCache = origins;
   } catch {
-    eventWsOriginsCache = [sameOrigin];
+    return [sameOrigin];
   }
   return eventWsOriginsCache;
 }

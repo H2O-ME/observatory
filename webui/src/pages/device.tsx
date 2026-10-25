@@ -154,16 +154,20 @@ export function DevicePage() {
         <TabsContent value="overview" className={watch ? "mt-2" : "mt-3 sm:mt-4"}>
           <OverviewView device={device} onRefresh={() => void query.refetch()} />
         </TabsContent>
-        <TabsContent value="live" className={watch ? "mt-2" : "mt-3 sm:mt-4"}>
+        {/* keepMounted: switching tabs used to unmount these views — a live
+            control session was silently revoked, a file transfer aborted, a
+            journal page position lost. Cheap views (overview/timeline/settings)
+            still unmount to stop their timers. */}
+        <TabsContent value="live" keepMounted className={watch ? "mt-2" : "mt-3 sm:mt-4"}>
           <LiveView device={device} />
         </TabsContent>
         <TabsContent value="timeline" className={watch ? "mt-2" : "mt-3 sm:mt-4"}>
           <TimelineView device={device} />
         </TabsContent>
-        <TabsContent value="files" className={watch ? "mt-2" : "mt-3 sm:mt-4"}>
+        <TabsContent value="files" keepMounted className={watch ? "mt-2" : "mt-3 sm:mt-4"}>
           <FilesView device={device} />
         </TabsContent>
-        <TabsContent value="commands" className={watch ? "mt-2" : "mt-3 sm:mt-4"}>
+        <TabsContent value="commands" keepMounted className={watch ? "mt-2" : "mt-3 sm:mt-4"}>
           <CommandsView device={device} />
         </TabsContent>
         <TabsContent value="settings" className={watch ? "mt-2" : "mt-3 sm:mt-4"}>

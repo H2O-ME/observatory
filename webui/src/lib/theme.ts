@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 
 const THEME_KEY = "observatory.theme";
 
@@ -39,32 +39,63 @@ export const THEME_LABEL: Record<ThemeMode, string> = {
   dark: "主题：深色",
 };
 
-export function useTheme() {
-  const [mode, setMode] = useState<ThemeMode>(
-    () => window.__OBS_THEME_MODE__ ?? readStoredMode(),
-  );
+/**
+ * Module-level theme store.
+ *
+ * The old per-hook `useState` meant every `useTheme()` instance (top-bar
+ * button, mobile "more" sheet, login page switcher) kept its own copy and
+ * drifted apart after the first toggle. The store keeps one source of truth;
+ * `useSyncExternalStore` subscribes every instance to it. The system-preference
+ * listener also lives here once, not once per consumer.
+ */
+const listeners = new Set<() => void>();
+let currentMode: ThemeMode =
+  (globalThis as { __OBS_THEME_MODE__?: ThemeMode }).__OBS_THEME_MODE__ ?? readStoredMode();
 
-  useEffect(() => {
-    applyTheme(mode);
-    try {
-      localStorage.setItem(THEME_KEY, mode);
-    } catch {
-      /* storage disabled: the choice still applies for this page */
+function notify(): void {
+  for (const listener of listeners) listener();
+}
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+function setMode(next: ThemeMode): void {
+  if (next === currentMode) return;
+  currentMode = next;
+  applyTheme(next);
+  try {
+    localStorage.setItem(THEME_KEY, next);
+  } catch {
+    /* storage disabled: the choice still applies for this page */
+  }
+  notify();
+}
+
+// One global listener for `system` mode: applies and notifies even when no
+// component happens to be mounted in that mode.
+try {
+  const query = window.matchMedia("(prefers-color-scheme: dark)");
+  query.addEventListener("change", () => {
+    if (currentMode === "system") {
+      applyTheme("system");
+      notify();
     }
-    if (mode !== "system") return;
-    let query: MediaQueryList | null = null;
-    try {
-      query = window.matchMedia("(prefers-color-scheme: dark)");
-    } catch {
-      return;
-    }
-    const onChange = () => applyTheme("system");
-    query.addEventListener("change", onChange);
-    return () => query?.removeEventListener("change", onChange);
-  }, [mode]);
+  });
+} catch {
+  /* matchMedia unavailable: system mode falls back to light */
+}
+
+applyTheme(currentMode);
+
+export function useTheme() {
+  const mode = useSyncExternalStore(subscribe, () => currentMode);
 
   const cycle = useCallback(() => {
-    setMode((current) => (current === "system" ? "light" : current === "light" ? "dark" : "system"));
+    setMode(
+      currentMode === "system" ? "light" : currentMode === "light" ? "dark" : "system",
+    );
   }, []);
 
   const set = useCallback((next: ThemeMode) => setMode(next), []);

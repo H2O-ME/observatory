@@ -23,6 +23,13 @@ function channelsOf(data: Record<string, unknown> | undefined): { ws: number; po
   return { ws: Number(record.ws ?? 0), poll: Number(record.poll ?? 0) };
 }
 
+/** frame_added burst coalescer — see the handler below. Module-level so a
+ *  socket reconnect never doubles the flush timer. */
+const pendingFrameInvalidation: { timer: number | undefined; uids: Set<string> } = {
+  timer: undefined,
+  uids: new Set(),
+};
+
 export function LiveBridge() {
   const queryClient = useQueryClient();
 
@@ -77,11 +84,23 @@ export function LiveBridge() {
         // also invalidates the list (the 0.2.x bridge forgot this and the wall
         // waited for its poll). The timeline drill-down and the archive counters
         // move with it.
-        void queryClient.invalidateQueries({ queryKey: ["devices"] });
-        void queryClient.invalidateQueries({ queryKey: ["frames"] });
-        void queryClient.invalidateQueries({ queryKey: ["timeline"] });
-        void queryClient.invalidateQueries({ queryKey: ["backup-overview"] });
-        void queryClient.invalidateQueries({ queryKey: ["backup-entries"] });
+        //
+        // Burst coalescing (0.3.7): a fleet capturing on its own interval can
+        // emit dozens of frame_added per second; invalidating five query trees
+        // per event hammered the API and re-rendered every list on the watch.
+        // Collect for 1.5s, then invalidate once.
+        pendingFrameInvalidation.uids.add(uid ?? "");
+        if (!pendingFrameInvalidation.timer) {
+          pendingFrameInvalidation.timer = window.setTimeout(() => {
+            pendingFrameInvalidation.timer = undefined;
+            pendingFrameInvalidation.uids.clear();
+            void queryClient.invalidateQueries({ queryKey: ["devices"] });
+            void queryClient.invalidateQueries({ queryKey: ["frames"] });
+            void queryClient.invalidateQueries({ queryKey: ["timeline"] });
+            void queryClient.invalidateQueries({ queryKey: ["backup-overview"] });
+            void queryClient.invalidateQueries({ queryKey: ["backup-entries"] });
+          }, 1_500);
+        }
       }
       if (event.type === "device_removed") {
         void queryClient.invalidateQueries({ queryKey: ["backup-overview"] });

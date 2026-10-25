@@ -318,7 +318,7 @@ function MoreSheet({
                 <Icon className="size-4" />
                 <span className="min-w-0 flex-1">
                   <span className="block text-[0.85rem] font-medium">{entry.label}</span>
-                  <span className={cn("block text-[0.68rem]", active(entry.to) ? "text-brand-ink/80" : "text-faint")}>
+                  <span className={cn("block text-[0.68rem]", active(entry.to) ? "text-brand-ink" : "text-faint")}>
                     {entry.hint}
                   </span>
                 </span>
