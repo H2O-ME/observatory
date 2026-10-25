@@ -111,7 +111,7 @@ export function BackupPage() {
   const tapClass = touch ? "min-h-11 min-w-11" : undefined;
 
   return (
-    <div className={cn("w-full max-w-full min-w-0 space-y-5", watch && "space-y-3")}>
+    <div className={cn("w-full max-w-full min-w-0 space-y-5", watch && "space-y-3", viewport === "desktop" && "mx-auto max-w-[72rem]")}>
       <PageHeader
         title="归档备份"
         description={
@@ -377,7 +377,7 @@ export function BackupPage() {
                   <Button
                     size="sm"
                     variant="ghost"
-                    className={cn("text-danger", tapClass)}
+                    className={cn("text-soft hover:text-danger", tapClass)}
                     title="删除远端归档（先删远端，成功后才标记已删除）"
                     aria-label="删除远端归档"
                     disabled={remove.isPending || entry.status === "已删除"}
