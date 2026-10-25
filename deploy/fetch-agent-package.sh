@@ -88,12 +88,19 @@ fi
 log "大小：$(du -h "${OUT_DIR}/${NAME}" | cut -f1)"
 
 log "登记到控制台"
-docker cp "${OUT_DIR}/${NAME}" observatory-api:/data/packages/ \
+# 注意：docker cp 到 /data/packages 会让文件归 root 所有，而容器以 observatory
+# (10001) 运行；随后 package-add 需要把文件复制成自己的副本，会因目标文件不可写
+# 而 PermissionError。先拷到容器 /tmp（package-add 只读源文件），由 CLI 负责写入
+# /data/packages 并落库。
+REMOTE_TMP="/tmp/${NAME}"
+docker cp "${OUT_DIR}/${NAME}" "observatory-api:${REMOTE_TMP}" \
   || die "docker cp 失败（容器 observatory-api 是否在运行？）"
-if docker exec -w /srv observatory-api python -m observatory.cli package-add "/data/packages/${NAME}" >/dev/null; then
+if docker exec -w /srv observatory-api python -m observatory.cli package-add "${REMOTE_TMP}" >/dev/null; then
+  docker exec observatory-api rm -f "${REMOTE_TMP}" >/dev/null 2>&1 || true
   log "已登记 ${NAME}"
 else
-  warn "登记 ${NAME} 失败（可能已存在同版本）"
+  docker exec observatory-api rm -f "${REMOTE_TMP}" >/dev/null 2>&1 || true
+  die "登记 ${NAME} 失败（查看 docker exec observatory-api python -m observatory.cli package-add 的输出）"
 fi
 
 log "完成。低于 ${VERSION} 的在线设备会在下次心跳拿到更新（受控端按版本比较自行更新）。"

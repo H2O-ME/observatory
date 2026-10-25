@@ -36,8 +36,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with: { python-version: "3.12" }
       - name: VERSION 与各副本一致
         run: python tools/set_version.py --check
@@ -58,8 +58,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with: { python-version: "3.12" }
       - name: 安装 ruff
         run: pip install ruff
@@ -71,8 +71,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with: { python-version: "3.12" }
       - name: 安装测试依赖
         run: pip install -r requirements-dev.txt
@@ -86,8 +86,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with: { python-version: "3.12" }
       - name: 安装测试依赖
         run: pip install -r requirements-dev.txt
@@ -101,8 +101,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with: { python-version: "3.12" }
       - name: 安装测试依赖
         run: pip install -r requirements-dev.txt
@@ -116,8 +116,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with: { node-version: "20", cache: npm, cache-dependency-path: webui/package-lock.json }
       - name: 安装依赖
         # F62（0.3.1）：lockfile 与 package.json 不同步应该红灯，静默回退
@@ -132,12 +132,14 @@ jobs:
     name: 受控端（Windows）
     runs-on: windows-latest
     timeout-minutes: 45
-    needs: [version]
+    # 只在全部质量门禁通过后才构建/发布受控端；旧版只依赖 version，
+    # tag 构建可能在服务端/WebUI 测试红灯时仍把 agent-dist 推出去。
+    needs: [version, lint, server, contract, acceptance, webui, deploy-static]
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           architecture: x64
@@ -167,7 +169,7 @@ jobs:
           if ($reported -ne $expected) { throw "exe 报告 $reported，期望 $expected" }
           Write-Host "version ok: $reported"
       - name: 上传产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: observatory-agent
           path: agent/dist/observatory-agent-*.zip
@@ -199,9 +201,28 @@ jobs:
             "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
             agent-dist:agent-dist
           echo "pushed agent-dist (${version})"
+      - name: 发布摘要
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="$(cat VERSION)"
+          agent_sha="$(git ls-remote "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" refs/heads/agent-dist | cut -f1)"
+          {
+            echo "### 发布完成 v${version}"
+            echo ""
+            echo "- 源码 commit: \`${GITHUB_SHA}\`"
+            echo "- agent-dist: \`${agent_sha}\`"
+            echo "- 安装包: \`observatory-agent-${version}.zip\`"
+            echo ""
+            echo "部署服务器由 \`observatory-auto-update.timer\` 轮询 GitHub，"
+            echo "自动拉取 main 并登记同版本 agent-dist；无需在服务器手工下载。"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: 发布 Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: agent/dist/observatory-agent-*.zip
           generate_release_notes: true
@@ -211,8 +232,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with: { python-version: "3.12" }
       - name: 安装体检脚本依赖（check_deployment.py 需要 httpx/websockets）
         run: python -m pip install --quiet --disable-pip-version-check httpx websockets
@@ -249,7 +270,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: 渲染模板并在 nginx 容器里 nginx -t
         run: |
           set -euo pipefail
@@ -286,8 +307,8 @@ jobs:
     # 并把 "出现 skip" 变成失败条件（指纹不匹配 = 基线失效，应当修基线而不是跳过）。
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with: { python-version: "3.12" }
       - name: 安装测试依赖
         run: pip install -r requirements-dev.txt
