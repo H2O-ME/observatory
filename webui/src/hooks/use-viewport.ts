@@ -11,7 +11,11 @@ function measure(): Viewport {
   // A 390×844 phone must never fall into this branch.
   const squareWatch = width <= 480 && height <= 560;
   if (squareWatch || width <= 340) return "watch";
-  if (width <= 900) return "mobile";
+  // Must mirror Tailwind's `lg:` (1024px), not 900: the desktop sidebar is
+  // `hidden lg:block` — anything between 901 and 1023 would otherwise render
+  // neither sidebar (CSS hides it) nor top bar/dock (JS said "desktop"),
+  // leaving the app with no navigation at all.
+  if (width < 1024) return "mobile";
   return "desktop";
 }
 

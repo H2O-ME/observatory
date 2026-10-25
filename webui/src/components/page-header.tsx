@@ -109,7 +109,7 @@ export function PageHeader({
           </div>
         ) : null}
       </div>
-      <div className="mt-4 h-px w-full bg-gradient-to-r from-transparent via-line-strong to-transparent sm:mt-5" />
+      <div className="hairline mt-4 sm:mt-5" />
     </header>
   );
 }

@@ -302,6 +302,20 @@
     color: transparent;
   }
 
+  /* Fading hairline divider under page headers. Tailwind's bg-gradient-*
+     utilities compile to `in oklab` interpolation, which Chromium 81 drops
+     wholesale — this class is the explicit literal-gradient replacement. */
+  .hairline {
+    height: 1px;
+    width: 100%;
+    background-image: linear-gradient(
+      to right,
+      transparent,
+      var(--c-line-strong),
+      transparent
+    );
+  }
+
   .tnum {
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
