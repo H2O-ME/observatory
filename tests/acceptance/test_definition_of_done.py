@@ -22,6 +22,12 @@ from pathlib import Path
 
 import pytest
 
+# 注意：本模块启用了 `from __future__ import annotations`，函数内定义的
+# FastAPI 路由的参数注解会以字符串形式被 FastAPI 在**模块全局**求值——
+# WebSocket/WebSocketDisconnect 必须在模块级导入，否则路由的 websocket
+# 参数会被当成 query 参数拒绝（2026-10-25 a23 测试的踩坑）。
+from fastapi import WebSocket, WebSocketDisconnect
+
 pytestmark = pytest.mark.acceptance
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -700,6 +706,63 @@ def test_a11_default_bind_and_forwarded_headers_and_hostsplit() -> None:
     assert defaults.trust_forwarded_for is False
     compose = (REPO_ROOT / "deploy/docker-compose.yml").read_text(encoding="utf-8")
     assert "${OBS_BIND_ADDR:-127.0.0.1}" in compose, "默认必须只绑回环（A11）"
+
+
+def test_a23_console_websockets_served_on_agent_host() -> None:
+    """A23 补充（2026-10-25 生产）：控制台域名可能挂在不支持 WebSocket 的
+    CDN（阿里云 ESA）后面——控制台的两条 WS（实时事件流 /api/v1/ws、实时
+    控制观看端 /api/v1/devices/<uid>/control）必须能在 agent 域名承载；
+    同路径的 REST 仍只归 console 域。"""
+
+    from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+    from fastapi.testclient import TestClient
+
+    from observatory.adapters.hostsplit import HostSplit
+
+    inner = FastAPI()
+
+    @inner.websocket("/api/v1/devices/{uid}/control")
+    async def control_ws(websocket: WebSocket, uid: str) -> None:  # noqa: ARG001
+        await websocket.accept()
+        await websocket.send_json({"type": "ready"})
+        await websocket.close()
+
+    @inner.websocket("/api/v1/ws")
+    async def events_ws(websocket: WebSocket) -> None:
+        await websocket.accept()
+        await websocket.send_json({"type": "hello"})
+        await websocket.close()
+
+    @inner.post("/api/v1/devices/{uid}/control")
+    async def control_grant(uid: str) -> dict:  # noqa: ARG001
+        return {"ok": True}
+
+    client = TestClient(
+        HostSplit(inner, console_hosts=["console.test"], agent_hosts=["agent.test"])
+    )
+
+    # agent host：两条 WS 可建立（经 direct/agent 域承载控制台实时通道）
+    with client.websocket_connect(
+        "/api/v1/devices/OBS-X/control", headers={"host": "agent.test"}
+    ) as viewer:
+        assert viewer.receive_json() == {"type": "ready"}
+    with client.websocket_connect("/api/v1/ws", headers={"host": "agent.test"}) as events:
+        assert events.receive_json() == {"type": "hello"}
+
+    # console host 两条 WS 照常
+    with client.websocket_connect(
+        "/api/v1/devices/OBS-X/control", headers={"host": "console.test"}
+    ) as viewer:
+        assert viewer.receive_json() == {"type": "ready"}
+
+    # 同路径 REST 仍只归 console host；未知 host 的 WS 一律拒绝
+    assert client.post("/api/v1/devices/OBS-X/control", headers={"host": "agent.test"}).status_code == 404
+    assert client.post("/api/v1/devices/OBS-X/control", headers={"host": "console.test"}).status_code == 200
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            "/api/v1/devices/OBS-X/control", headers={"host": "evil.test"}
+        ):
+            pass
 
 
 def test_a12_single_clock_source(tmp_dir: Path) -> None:

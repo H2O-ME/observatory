@@ -5,6 +5,10 @@ Rules:
   in ``console_hosts`` — or loopback when ``allow_loopback_console`` is true;
 * **shared paths** (health/version, agent link, public/install endpoints) are
   served for console hosts, agent hosts and loopback;
+* the console's two WebSockets (``/api/v1/ws``, ``/api/v1/devices/<uid>/control``)
+  are shared too, **websocket scopes only** — a console domain fronted by a
+  no-WebSocket CDN (Aliyun ESA, 2026-10-25) needs them on the agent domain;
+  same-path REST stays console-only;
 * every other host gets a uniform 404 — an unknown Host must never receive the
   console (old behaviour treated unknown hosts as console);
 * ``X-Forwarded-Host`` is honoured only when ``trust_forwarded_for`` is enabled
@@ -17,6 +21,7 @@ empty, only the loopback console (if allowed) and loopback shared paths work.
 from __future__ import annotations
 
 import logging
+import re
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -32,6 +37,13 @@ SHARED_PREFIXES = (
     "/install.ps1",
     "/install.cmd",
 )
+
+#: 控制台页面的两条 WebSocket：实时事件流与实时控制观看端。控制台域名
+#: 可能挂在不支持 WebSocket 的 CDN 后面（2026-10-25 生产：control 域换
+#: 阿里云 ESA，WS 完全不可用），这两条 WS 允许在**任一**域名承载——仅限
+#: websocket 连接，同路径的 REST（grant 创建/撤销）仍按控制台域隔离。
+_CONTROL_WS_RE = re.compile(r"^/api/v1/devices/[^/]+/control$")
+SHARED_WS_PATHS = frozenset({"/api/v1/ws"})
 
 AGENT_ONLY_NOTICE = (
     "该域名仅用于受控端接入与安装，控制台请访问 https://{console}\n"
@@ -60,6 +72,10 @@ def request_host(scope: Scope, *, trust_forwarded_for: bool) -> str:
 
 def _is_shared(path: str) -> bool:
     return any(path.startswith(prefix) for prefix in SHARED_PREFIXES)
+
+
+def _is_shared_ws(path: str) -> bool:
+    return path in SHARED_WS_PATHS or bool(_CONTROL_WS_RE.match(path))
 
 
 class HostSplit:
@@ -115,6 +131,8 @@ class HostSplit:
         host = request_host(scope, trust_forwarded_for=self.trust_forwarded_for)
         path = str(scope.get("path") or "/")
         allowed = self._shared_allowed(host) if _is_shared(path) else self._console_allowed(host)
+        if not allowed and scope["type"] == "websocket" and _is_shared_ws(path):
+            allowed = self._shared_allowed(host)
         if allowed:
             await self.app(scope, receive, send)
             return

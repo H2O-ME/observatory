@@ -19,7 +19,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PRODUCT = "Observatory"
-FALLBACK_VERSION = "0.3.1"
+FALLBACK_VERSION = "0.3.2"
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 #: Lowest agent build that may replace itself through the v3 update path (A3/A18).

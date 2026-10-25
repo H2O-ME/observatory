@@ -775,19 +775,45 @@ const CLOSE_UNAUTHORIZED = 4401;
 const RECONNECT_MAX_MS = 15_000;
 
 /**
+ * 事件 WS 的候选域名（/public/bootstrap 拉取后进程内缓存）。
+ *
+ * 控制台域名可能挂在不支持 WebSocket 的 CDN 后面（2026-10-25 生产：control
+ * 域换阿里云 ESA）——同源 WS 永远连不上，必须逐个尝试服务端给出的域名
+ * 列表（优先序非锁定），同源 host 排最后兜底。
+ */
+let eventWsOriginsCache: string[] | null = null;
+
+async function fetchEventWsOrigins(): Promise<string[]> {
+  if (eventWsOriginsCache) return eventWsOriginsCache;
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  const sameOrigin = `${scheme}://${location.host}`;
+  try {
+    const bootstrap = await request<{ base_urls?: string[] }>(`${API_ROOT}/public/bootstrap`, {
+      opKey: "bootstrap",
+    });
+    const origins = [
+      ...(bootstrap.base_urls ?? []).map((base) => base.replace(/^http/, "ws").replace(/\/+$/, "")),
+      sameOrigin,
+    ].filter((value, index, all) => value && all.indexOf(value) === index);
+    eventWsOriginsCache = origins;
+  } catch {
+    eventWsOriginsCache = [sameOrigin];
+  }
+  return eventWsOriginsCache;
+}
+
+/**
  * Console event socket.
  *
- * Authenticates with the HttpOnly session cookie, so the bearer token never
- * appears in a URL that ends up in access logs. A close with 4401 is reported as
- * an auth failure instead of being retried forever.
+ * Authenticates with the bearer token in the query string (the server accepts
+ * `?token=` — a browser WebSocket cannot set headers, and a cross-origin socket
+ * never carries the console domain's HttpOnly cookie). A close with 4401 is
+ * reported as an auth failure instead of being retried forever.
  */
 export function openEventSocket(options: {
   onEvent: (event: SocketEvent) => void;
   onAuthFailure?: () => void;
 }): EventSocketHandle {
-  const scheme = location.protocol === "https:" ? "wss" : "ws";
-  const url = `${scheme}://${location.host}${API_ROOT}/ws`;
-
   let socket: WebSocket | null = null;
   let closed = false;
   let retry = 0;
@@ -795,6 +821,7 @@ export function openEventSocket(options: {
   let watchdogTimer: number | undefined;
   let watchdogMs = 75_000;
   let lastMessageAt = 0;
+  let originCursor = 0;
 
   const clearWatchdog = () => {
     if (watchdogTimer !== undefined) {
@@ -803,12 +830,19 @@ export function openEventSocket(options: {
     }
   };
 
-  const connect = () => {
+  const connect = async () => {
     if (closed) return;
-    socket = new WebSocket(url);
+    const origins = await fetchEventWsOrigins();
+    const list = origins.length ? origins : [`wss://${location.host}`];
+    if (originCursor >= list.length) originCursor = 0;
+    const token = readToken();
+    const query = token ? `?token=${encodeURIComponent(token)}` : "";
+    socket = new WebSocket(`${list[originCursor]}${API_ROOT}/ws${query}`);
+    let opened = false;
     lastMessageAt = performance.now();
 
     socket.onopen = () => {
+      opened = true;
       retry = 0;
       options.onEvent({ type: "socket_open", data: {} });
     };
@@ -830,9 +864,11 @@ export function openEventSocket(options: {
       options.onEvent({ type: "socket_closed", code: event.code, data: {} });
       if (event.code === CLOSE_UNAUTHORIZED) options.onAuthFailure?.();
       if (closed) return;
+      // 连接从未建立（该域名不支持 WS / 不可达）：轮换到下一个候选域名
+      if (!opened) originCursor = (originCursor + 1) % list.length;
       const delay = Math.min(RECONNECT_MAX_MS, 1000 * 2 ** retry);
       retry += 1;
-      timer = window.setTimeout(connect, delay);
+      timer = window.setTimeout(() => void connect(), delay);
     };
     socket.onerror = () => {
       // An error is always followed by `onclose`; closing here guarantees it.
@@ -848,7 +884,7 @@ export function openEventSocket(options: {
     }, 5_000);
   };
 
-  connect();
+  void connect();
 
   return {
     close() {
