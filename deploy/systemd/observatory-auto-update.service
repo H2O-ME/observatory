@@ -1,0 +1,15 @@
+[Unit]
+Description=Observatory auto update (GitHub main + agent-dist)
+Documentation=https://github.com/H2O-ME/observatory
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/observatory
+ExecStart=/opt/observatory/deploy/auto-update.sh
+# A rebuild + container recreate is CPU/IO heavy; keep it out of the way.
+Nice=10
+IOSchedulingClass=idle
+# update.sh can legitimately run several minutes on a small VPS.
+TimeoutStartSec=3600

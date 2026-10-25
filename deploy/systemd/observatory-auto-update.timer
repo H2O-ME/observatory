@@ -1,0 +1,14 @@
+[Unit]
+Description=Observatory auto update timer (every 2 minutes)
+Documentation=https://github.com/H2O-ME/observatory
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=15s
+RandomizedDelaySec=20s
+Persistent=true
+Unit=observatory-auto-update.service
+
+[Install]
+WantedBy=timers.target
