@@ -301,6 +301,9 @@ export interface ControlGrant {
   fps: number;
   quality: number;
   ws_path: string;
+  /** 观看端 WS 候选域名（优先序，非锁定）。不同网络到各域名质量不同，
+   *  客户端逐个尝试并在失败时切换；同源 host 作为最终回退。 */
+  ws_bases?: string[];
   server_time_ms: number;
 }
 

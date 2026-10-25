@@ -202,64 +202,89 @@ export function LiveView({ device }: Props) {
       setStatus("connecting");
       setMessage("正在建立实时通道…");
 
+      // 控制观看 WS 的候选域名按序尝试（优先序非锁定）：不同设备/网络到
+      // 各域名的质量不同，某个域名握不起手（超时/被 CDN 掐断）就切下一个，
+      // 同源 host 永远是最后回退（2026-10-25 生产事故：国内 CDN 静默掐断
+      // 长连 WS，单一同源连接必然周期性死）。
       const scheme = location.protocol === "https:" ? "wss" : "ws";
-      const socket = new WebSocket(
-        `${scheme}://${location.host}${grant.ws_path}?token=${encodeURIComponent(grant.token)}`,
-      );
-      socket.binaryType = "blob";
-      socketRef.current = socket;
+      const origins = [
+        ...(grant.ws_bases ?? []).map((base) => base.replace(/^http/, "ws").replace(/\/+$/, "")),
+        `${scheme}://${location.host}`,
+      ].filter((value, index, all) => value && all.indexOf(value) === index);
+      let originIndex = 0;
+      let ready = false;
 
-      socket.onmessage = (event) => {
-        if (typeof event.data === "string") {
-          try {
-            const parsed = JSON.parse(event.data) as { type?: string };
-            if (parsed.type === "ready") {
-              setStatus("streaming");
-              setMessage("");
-            } else if (parsed.type === "pong" && pingAtRef.current > 0) {
-              setRttMs(performance.now() - pingAtRef.current);
-              pingAtRef.current = 0;
-            }
-          } catch {
-            /* one malformed control frame must not end the session */
-          }
-          return;
-        }
-        const blob = event.data as Blob;
-        const nextUrl = URL.createObjectURL(blob);
-        const previous = lastUrlRef.current;
-        lastUrlRef.current = nextUrl;
-        setFrameUrl(nextUrl);
-        if (previous) window.setTimeout(() => URL.revokeObjectURL(previous), 1500);
-        frameCountRef.current += 1;
-      };
-
-      socket.onclose = (event) => {
-        if (socketRef.current !== socket) return;
-        socketRef.current = null;
-        const active = sessionRef.current;
-        sessionRef.current = null;
-        // F41: 远端断开（受控端重启/通道丢失）也要撤销 grant——否则控制流
-        // 残留到 TTL，设备一直被独占。
-        if (active) void api.revokeControl(uid, active.token).catch(() => undefined);
-        heldModifiersRef.current.clear();
-        setSession(null);
-        setFps(0);
-        setStatus(event.code === 4409 ? "error" : "closed");
-        setMessage(
-          event.code === 4409
-            ? "受控端当前没有实时通道，实时控制不可用（会显示为“仅轮询”）。"
-            : "控制会话已结束",
+      const openSocket = (): void => {
+        const socket = new WebSocket(
+          `${origins[originIndex]}${grant.ws_path}?token=${encodeURIComponent(grant.token)}`,
         );
-      };
+        socket.binaryType = "blob";
+        socketRef.current = socket;
+        // 握手看的是服务端 ready 帧；9 秒没等到就视为该域名不可用。
+        const handshakeTimeout = window.setTimeout(() => {
+          if (!ready) socket.close();
+        }, 9000);
 
-      socket.onerror = () => {
-        // Always close: a half-open socket would otherwise linger and a second
-        // "重新连接" would stack another socket on top of it.
-        socket.close();
-        setStatus((current) => (current === "streaming" ? current : "error"));
-        setMessage((current) => current || "控制通道发生错误");
+        socket.onmessage = (event) => {
+          if (typeof event.data === "string") {
+            try {
+              const parsed = JSON.parse(event.data) as { type?: string };
+              if (parsed.type === "ready") {
+                ready = true;
+                window.clearTimeout(handshakeTimeout);
+                setStatus("streaming");
+                setMessage("");
+              } else if (parsed.type === "pong" && pingAtRef.current > 0) {
+                setRttMs(performance.now() - pingAtRef.current);
+                pingAtRef.current = 0;
+              }
+            } catch {
+              /* one malformed control frame must not end the session */
+            }
+            return;
+          }
+          const blob = event.data as Blob;
+          const nextUrl = URL.createObjectURL(blob);
+          const previous = lastUrlRef.current;
+          lastUrlRef.current = nextUrl;
+          setFrameUrl(nextUrl);
+          if (previous) window.setTimeout(() => URL.revokeObjectURL(previous), 1500);
+          frameCountRef.current += 1;
+        };
+
+        socket.onclose = (event) => {
+          window.clearTimeout(handshakeTimeout);
+          if (socketRef.current !== socket) return;
+          socketRef.current = null;
+          if (!ready && originIndex + 1 < origins.length) {
+            originIndex += 1;
+            setMessage(`通道 ${origins[originIndex - 1]} 不可用，切换到 ${origins[originIndex]} …`);
+            openSocket();
+            return;
+          }
+          const active = sessionRef.current;
+          sessionRef.current = null;
+          // F41: 远端断开（受控端重启/通道丢失）也要撤销 grant——否则控制流
+          // 残留到 TTL，设备一直被独占。
+          if (active) void api.revokeControl(uid, active.token).catch(() => undefined);
+          heldModifiersRef.current.clear();
+          setSession(null);
+          setFps(0);
+          setStatus(event.code === 4409 ? "error" : "closed");
+          setMessage(
+            event.code === 4409
+              ? "受控端当前没有实时通道，实时控制不可用（会显示为“仅轮询”）。"
+              : "控制会话已结束",
+          );
+        };
+
+        socket.onerror = () => {
+          // Always close: a half-open socket would otherwise linger and a second
+          // "重新连接" would stack another socket on top of it.
+          socket.close();
+        };
       };
+      openSocket();
     } catch (failure) {
       sessionRef.current = null;
       setSession(null);
@@ -453,7 +478,7 @@ export function LiveView({ device }: Props) {
         </Button>
         <span
           className={cn(
-            "ml-auto text-[0.66rem]",
+            "ml-auto text-xs",
             status === "streaming" ? "text-ok" : status === "error" ? "text-danger" : "text-faint",
           )}
         >
@@ -476,7 +501,7 @@ export function LiveView({ device }: Props) {
         onContextMenu={(event) => event.preventDefault()}
         aria-label="实时画面与输入区域"
       >
-        <FrameStage className="aspect-video w-full cursor-crosshair select-none touch-none">
+        <FrameStage className="h-[min(56.25vw,calc(100vh_-_15rem))] w-full cursor-crosshair select-none touch-none">
           {frameUrl ? (
             <img
               src={frameUrl}
@@ -491,7 +516,7 @@ export function LiveView({ device }: Props) {
           ) : (
             <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-soft">
               <MousePointer2 className="size-6 text-faint" />
-              <p className="text-[0.72rem]">
+              <p className="text-xs">
                 {status === "idle" ? "点击“开始实时控制”建立会话" : message || "等待画面…"}
               </p>
             </div>
@@ -527,7 +552,7 @@ export function LiveView({ device }: Props) {
         </Button>
       </div>
 
-      <p className="text-[0.66rem] leading-relaxed text-faint">
+      <p className="text-xs leading-relaxed text-faint">
         画面与输入都经过服务器中转，全程审计。会话剩余 {secondsLeft === null ? "—" : secondsLeft} 秒（服务端时钟）。
         {rttMs !== null ? ` 通道往返约 ${rttMs.toFixed(0)}ms。` : ""}
       </p>

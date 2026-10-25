@@ -34,7 +34,7 @@ from ..core.db import get_session
 from ..core.errors import AppError
 from ..core.models import Device
 from . import audit
-from .deps import client_ip, get_links, require_admin, store
+from .deps import client_ip, get_links, get_settings, require_admin, store
 from .dto import stamp
 from .envelope import ConsoleRoute
 
@@ -278,6 +278,7 @@ async def create_control_grant(
     _admin: dict = Depends(require_admin),
 ) -> dict[str, Any]:
     device = await _load_device(session, uid)
+    settings = get_settings(request)
     if not payload.get("confirm"):
         raise AppError.bad_request("需要显式确认才能开始远程控制")
     try:
@@ -334,6 +335,10 @@ async def create_control_grant(
             "fps": grant.fps,
             "quality": grant.quality,
             "ws_path": f"/api/v1/devices/{device.uid}/control",
+            # 观看端 WS 的候选域名（优先序，非锁定）：不同设备/网络到各域名的
+            # 质量不同，客户端应逐个尝试并在失败时切换（2026-10-25 生产事故：
+            # 国内 CDN 对长连 WS 有分钟级静默掐断，单一同源连接必然周期性死）。
+            "ws_bases": list(settings.base_urls),
         },
         deadline=CONTROL_DEADLINE_MS,
     )

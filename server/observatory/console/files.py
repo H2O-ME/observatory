@@ -66,6 +66,22 @@ async def ensure_reachable(request: Request, session: AsyncSession, device: Any)
         raise AppError.unsupported(str(snapshot.get("reason") or "设备当前不可操作"))
 
 
+def _unwrap_agent_payload(data: Any) -> Any:
+    """剥掉受控端 files 结果的 ``{ok, op, data{...}}`` 包装（1-2 层）。
+
+    perform() 包一层，管道转发 CommandResult 可能再包一层。真正的文件载荷
+    （drives/list/read/write/hash）顶层不会出现 "ok"+"data" 组合，不会误剥。
+    2026-10-25 生产：漏剥让驱动器/目录列表恒为空、读文件恒报“无法解码”。
+    """
+
+    for _ in range(3):
+        if isinstance(data, dict) and isinstance(data.get("data"), dict) and "ok" in data:
+            data = data["data"]
+        else:
+            break
+    return data
+
+
 async def run_file_op(
     request: Request,
     session: AsyncSession,
@@ -82,7 +98,7 @@ async def run_file_op(
         if getattr(result, "status", "") == "cancelled":
             raise AppError.internal(str(getattr(result, "error", "") or "命令已取消"))
         raise _result_to_error(result)
-    data = getattr(result, "result", None)
+    data = _unwrap_agent_payload(getattr(result, "result", None))
     return {
         "ok": True,
         "op": str(body.get("op") or ""),
