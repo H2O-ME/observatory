@@ -4,7 +4,6 @@ import { Loader2, RadioTower, RefreshCw } from "lucide-react";
 
 import { AppShell } from "@/components/app-shell";
 import { GridPattern } from "@/components/aceternity/grid-pattern";
-import { Spotlight } from "@/components/aceternity/spotlight";
 import { LiveBridge } from "@/components/live-bridge";
 import { Button } from "@/components/ui/button";
 import { AccountPage } from "@/pages/account";
@@ -33,7 +32,6 @@ export function App() {
     return (
       <div className="relative flex app-vh flex-col items-center justify-center overflow-hidden px-4">
         <GridPattern className="opacity-50" stroke="var(--c-grid-line)" strokeDasharray="4 6" />
-        <Spotlight className="left-[-30%] top-[-10%] opacity-30" />
         <div className="surface-strong relative z-10 flex flex-col items-center px-8 py-7">
           <span className="relative flex size-12 items-center justify-center rounded-2xl border border-line bg-brand-soft text-brand">
             <RadioTower className="size-5" />
@@ -53,7 +51,6 @@ export function App() {
     return (
       <div className="relative flex app-vh items-center justify-center overflow-hidden px-4">
         <GridPattern className="opacity-50" stroke="var(--c-grid-line)" strokeDasharray="4 6" />
-        <Spotlight className="left-[-30%] top-[-10%] opacity-30" />
         <div className="surface-strong relative z-10 w-full max-w-sm p-6 text-center">
           <p className="text-[0.95rem] font-semibold text-ink">{error}</p>
           <p className="mt-2 text-[0.8rem] leading-relaxed text-soft">

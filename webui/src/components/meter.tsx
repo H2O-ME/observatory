@@ -97,7 +97,6 @@ export function RingMeter({
           height={resolvedSize}
           viewBox={`0 0 ${resolvedSize} ${resolvedSize}`}
           aria-hidden="true"
-          className="-rotate-90"
           style={{ transform: "rotate(-90deg)" }}
         >
           <circle

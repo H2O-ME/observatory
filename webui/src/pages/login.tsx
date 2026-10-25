@@ -15,14 +15,10 @@ import {
 } from "lucide-react";
 
 import {
-  AuroraBackground,
   BackgroundBeams,
   GridPattern,
   HoverBorderGradient,
-  LampEffect,
-  Meteors,
   Sparkles,
-  Spotlight,
   TextGenerateEffect,
 } from "@/components/aceternity";
 import { Input } from "@/components/ui/input";
@@ -43,8 +39,8 @@ const THEME_ICON: Record<ThemeMode, typeof Sun> = { system: SunMoon, light: Sun,
  *
  * Same logic as before: TOTP appears when the server session says it is enabled
  * (or after the server asks for it), deep-link return is preserved, and the
- * console never invents error copy. The visual is a deep-field hero with the
- * lamp/beams/meteors atmosphere, collapsing to a single compact card on the
+ * console never invents error copy. The visual is a flat mission-control hero
+ * (beams + engineering grid), collapsing to a single compact card on the
  * watch.
  */
 export function LoginPage({ version }: Props) {
@@ -90,15 +86,12 @@ export function LoginPage({ version }: Props) {
 
   return (
     <div className="relative flex app-vh-min w-full flex-col overflow-hidden">
-      <AuroraBackground fixed intensity={0.85} />
-      {!watch ? <BackgroundBeams fixed count={10} className="opacity-55" /> : null}
+      {!watch ? <BackgroundBeams fixed count={8} className="opacity-35" /> : null}
       <GridPattern
-        className="pointer-events-none opacity-50"
+        className="pointer-events-none opacity-60"
         stroke="var(--c-grid-line)"
         strokeDasharray="4 6"
       />
-      {!watch ? <Meteors number={9} /> : null}
-      <Spotlight className="left-[-40%] top-[-20%] opacity-30 md:left-[-12%]" />
 
       <div className="relative z-10 flex min-h-0 flex-1 flex-col">
         <header className="flex h-14 shrink-0 items-center justify-between px-4 sm:px-6">
@@ -127,14 +120,6 @@ export function LoginPage({ version }: Props) {
           <div className={watch ? "w-full max-w-[19rem]" : "grid w-full max-w-5xl grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_26rem] lg:items-center lg:gap-10"}>
             {/* --------------------------------------------------------- hero */}
             <section className={watch ? "hidden" : "relative min-w-0"}>
-              {!watch ? (
-                <div
-                  className="pointer-events-none absolute left-1/2 top-[-2.5rem] h-28 w-[34rem] max-w-full opacity-80"
-                  style={{ transform: "translateX(-50%)" }}
-                >
-                  <LampEffect className="h-full w-full" contentClassName="hidden" />
-                </div>
-              ) : null}
               <div className="relative">
                 <p className="eyebrow mb-3 flex items-center gap-2">
                   <span className="inline-block size-1.5 rounded-full bg-brand-3" />
@@ -225,7 +210,6 @@ export function LoginPage({ version }: Props) {
                       aria-label={showPassword ? "隐藏密码" : "显示密码"}
                       title={showPassword ? "隐藏密码" : "显示密码"}
                       className="absolute top-0 right-0 flex h-11 w-11 items-center justify-center text-faint"
-                      style={{ position: "absolute", top: 0, right: 0 }}
                     >
                       {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
                     </button>

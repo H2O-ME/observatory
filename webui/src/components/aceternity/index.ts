@@ -11,26 +11,14 @@
 import "./aceternity.css";
 
 /* Atmosphere / background layers */
-export { AuroraBackground } from "./aurora-background";
-export type { AuroraBackgroundProps } from "./aurora-background";
-
 export { BackgroundBeams } from "./background-beams";
 export type { BackgroundBeamsProps } from "./background-beams";
-
-export { LampEffect } from "./lamp-effect";
-export type { LampEffectProps } from "./lamp-effect";
 
 export { Sparkles } from "./sparkles";
 export type { SparklesProps } from "./sparkles";
 
-export { Meteors } from "./meteors";
-export type { MeteorsProps } from "./meteors";
-
 export { GridPattern } from "./grid-pattern";
 export type { GridPatternProps } from "./grid-pattern";
-
-export { Spotlight } from "./spotlight";
-export type { SpotlightProps } from "./spotlight";
 
 /* Surfaces & layout */
 export { BentoGrid, BentoGridItem } from "./bento-grid";
@@ -48,9 +36,6 @@ export type { TracingBeamProps } from "./tracing-beam";
 /* Interaction */
 export { FloatingDock } from "./floating-dock";
 export type { FloatingDockItem, FloatingDockProps } from "./floating-dock";
-
-export { InfiniteMovingCards } from "./infinite-moving-cards";
-export type { InfiniteMovingCardsProps } from "./infinite-moving-cards";
 
 export { AnimatedTooltip } from "./animated-tooltip";
 export type { AnimatedTooltipProps, TooltipSide } from "./animated-tooltip";

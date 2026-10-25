@@ -34,8 +34,8 @@ import {
 
 import {
   AnimatedTooltip,
-  AuroraBackground,
   FloatingDock,
+  GridPattern,
   MovingBorder,
 } from "@/components/aceternity";
 import { Button } from "@/components/ui/button";
@@ -437,7 +437,10 @@ export function AppShell() {
 
   return (
     <div className="relative flex app-vh w-full flex-col overflow-hidden">
-      <AuroraBackground fixed intensity={desktop ? 0.9 : 0.65} />
+      {/* Flat ambient layer: a quiet engineering grid, no glow, no blur. */}
+      <div className="pointer-events-none fixed top-0 right-0 bottom-0 left-0 z-0" aria-hidden="true">
+        <GridPattern width={34} height={34} stroke="var(--c-grid-line)" />
+      </div>
 
       <div className="relative z-10 flex min-h-0 w-full flex-1">
         {desktop ? <DesktopSidebar active={active} /> : null}
