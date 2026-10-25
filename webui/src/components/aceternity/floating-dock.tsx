@@ -1,3 +1,10 @@
+/**
+ * Aceternity UI · Floating Dock — adapted build.
+ * Upstream: https://ui.aceternity.com/registry/floating-dock.json (see ./registry/).
+ * Local changes: Chromium 81 syntax floor (no inset/translate/aspect
+ * utilities, no color-mix), CJK tokenising, flat tokens, watch fallbacks.
+ */
+
 import type { CSSProperties, ReactNode } from "react";
 
 import { Link } from "react-router-dom";

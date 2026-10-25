@@ -84,6 +84,28 @@
 
 ## 5. Aceternity 组件清单（全部 Chromium 81 安全实现）
 
+### 5.1 标准来源与 CLI（如何装新组件）
+
+项目已按官方文档接入标准 Aceternity 注册表：
+
+- `components.json` → `"registries": { "@aceternity": "https://ui.aceternity.com/registry/{name}.json" }`
+- 安装命令（在 `webui/` 下）：
+  `pnpm dlx shadcn@latest add @aceternity/<name> --yes --cwd .`
+- **注意**：CLI 的 `--path` 在当前版本不可靠（会相对 cwd 解析）且覆盖提示有误导；
+  装完后确认文件落点，再把上游原版移入 `src/components/aceternity/registry/`
+  （不参与构建，`tsconfig.app.json` 已 exclude），并在对应适配版文件头登记来源。
+- CLI 会顺手写入新依赖（如 `motion`、`@tsparticles/*`、`@tabler/icons-react`）——
+  registry 不编译就**必须还原 package.json**，否则 CI 的 `npm ci`（lock 未同步）会挂。
+- 依赖管理仍是 npm + package-lock（CI 用 `npm ci`）；`pnpm dlx` 只用来跑 CLI。
+
+**为什么不直接用原版**（每条都在源码验证过）：原版按空格分词（中文整句退化）、
+`<a href>` 整页刷新（毁 SPA 路由）、`inset-0`/`translate-x-2`/`aspect-square`
+等 Chromium 104+ 语法在手表 81 上静默丢失、`shadow-input` 等 v3 工具类在 v4 不存在、
+tsparticles 在手表 GPU 上不可用。因此采用「上游归档 + 本地适配」：`registry/` 存原版
+可 diff 升级，`../xxx.tsx` 是适配版，文件头写明改动点。
+
+### 5.2 组件清单
+
 | 组件 | 路径 | 用在哪 |
 | --- | --- | --- |
 | `BackgroundBeams` | `aceternity/background-beams.tsx` | 登录页、设备 hero |

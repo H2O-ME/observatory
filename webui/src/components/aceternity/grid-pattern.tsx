@@ -1,3 +1,10 @@
+/**
+ * Aceternity UI · Grid and Dot Backgrounds — adapted build.
+ * Upstream: https://ui.aceternity.com/registry/grid.json (see ./registry/).
+ * Local changes: Chromium 81 syntax floor (no inset/translate/aspect
+ * utilities, no color-mix), CJK tokenising, flat tokens, watch fallbacks.
+ */
+
 import { useId } from "react";
 
 import { cn } from "@/lib/utils";

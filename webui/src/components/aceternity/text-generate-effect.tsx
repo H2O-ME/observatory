@@ -1,3 +1,10 @@
+/**
+ * Aceternity UI · Text Generate Effect — adapted build.
+ * Upstream: https://ui.aceternity.com/registry/text-generate-effect.json (see ./registry/).
+ * Local changes: Chromium 81 syntax floor (no inset/translate/aspect
+ * utilities, no color-mix), CJK tokenising, flat tokens, watch fallbacks.
+ */
+
 import type { CSSProperties } from "react";
 
 import { cn } from "@/lib/utils";

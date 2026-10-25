@@ -1,3 +1,9 @@
+/**
+ * Aceternity UI · Shimmer Button — local implementation of the Pro (paid)
+ * registry component (registry returns 401 without a licence), rebuilt
+ * with the same visual contract but Chromium 81 safe and flat.
+ */
+
 import type { ReactNode } from "react";
 
 import { cn } from "@/lib/utils";

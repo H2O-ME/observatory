@@ -1,3 +1,10 @@
+/**
+ * Aceternity UI · Hover Border Gradient — adapted build.
+ * Upstream: https://ui.aceternity.com/registry/hover-border-gradient.json (see ./registry/).
+ * Local changes: Chromium 81 syntax floor (no inset/translate/aspect
+ * utilities, no color-mix), CJK tokenising, flat tokens, watch fallbacks.
+ */
+
 import { useState } from "react";
 import type { ReactNode } from "react";
 

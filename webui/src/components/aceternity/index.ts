@@ -1,9 +1,16 @@
 /**
  * Aceternity kit · observatory edition
  *
- * Barrel for the visual-identity components. Importing this file also pulls in
- * `aceternity.css`; every component imports it on its own as well, so deep
- * imports (`@/components/aceternity/glow-card`) are equally safe.
+ * Standard source: the official registry, installed with the shadcn CLI —
+ *   pnpm dlx shadcn@latest add @aceternity/<name>
+ * (namespace configured in components.json → "registries"). The untouched
+ * upstream files live in ./registry/ for diffing/upgrading; they are excluded
+ * from the build (tsconfig.app.json). The components exported here are the
+ * same registry items adapted for this console (each file's header lists its
+ * changes): Chromium 81 syntax floor, CJK text, flat tokens, watch fallbacks.
+ *
+ * Importing this barrel also pulls in `aceternity.css`; every component
+ * imports it on its own as well, so deep imports are equally safe.
  *
  * Chromium 81 notes and the watch fallbacks live in `aceternity.css`.
  */

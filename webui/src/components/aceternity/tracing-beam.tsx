@@ -1,3 +1,10 @@
+/**
+ * Aceternity UI · Tracing Beam — adapted build.
+ * Upstream: https://ui.aceternity.com/registry/tracing-beam.json (see ./registry/).
+ * Local changes: Chromium 81 syntax floor (no inset/translate/aspect
+ * utilities, no color-mix), CJK tokenising, flat tokens, watch fallbacks.
+ */
+
 import type { CSSProperties, ReactNode } from "react";
 
 import { cn } from "@/lib/utils";
