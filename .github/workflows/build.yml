@@ -217,7 +217,7 @@ jobs:
             echo "- agent-dist: \`${agent_sha}\`"
             echo "- 安装包: \`observatory-agent-${version}.zip\`"
             echo ""
-            echo "部署服务器由 \`observatory-auto-update.timer\` 轮询 GitHub，"
+            echo "生产部署由本 workflow 的 \`deploy\` job（tag 触发）SSH 触发服务器 deploy.sh，"
             echo "自动拉取 main 并登记同版本 agent-dist；无需在服务器手工下载。"
           } >> "$GITHUB_STEP_SUMMARY"
       - name: 发布 Release
@@ -322,3 +322,91 @@ jobs:
         run: |
           python -m pytest tests/perf -q -m perf -rs 2>&1 | Tee-Object -Variable out
           if ("$out" -match '\d+ skipped') { throw "N4 出现 skip：perf 基线指纹与 runner 不匹配，禁止空转绿灯" }
+
+  deploy:
+    name: 部署生产
+    # 只在 tag 推送上部署；main push 只跑测试不部署。发布的正规入口是本机
+    # tools/release.sh（bump → tag → push）。部署失败直接红灯在本 job；
+    # 服务器侧 deploy.sh 另有自动回滚与熔断兜底。
+    if: startsWith(github.ref, 'refs/tags/v')
+    # 等 agent-windows 结束再部署：服务器登记的受控端包与本次服务端版本必须
+    # 同源同版本（agent-dist 分支在该 job 内 force push）。
+    needs: [version, lint, server, contract, acceptance, webui, deploy-static, nginx-config-test, agent-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: 写入部署密钥
+        env:
+          OBS_DEPLOY_KEY: ${{ secrets.OBS_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$OBS_DEPLOY_KEY" ] || { echo "缺少 secret OBS_DEPLOY_KEY" >&2; exit 1; }
+          install -m 600 /dev/null "$HOME/obs_deploy_key"
+          printf '%s\n' "$OBS_DEPLOY_KEY" > "$HOME/obs_deploy_key"
+      - name: 触发部署并盯完结果
+        env:
+          OBS_DEPLOY_HOST: ${{ secrets.OBS_DEPLOY_HOST }}
+          OBS_DEPLOY_PORT: ${{ secrets.OBS_DEPLOY_PORT }}
+          OBS_DEPLOY_USER: ${{ secrets.OBS_DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/}"
+          ssh_base=(-i "$HOME/obs_deploy_key" -p "$OBS_DEPLOY_PORT" \
+            -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
+            -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
+          target="$OBS_DEPLOY_USER@$OBS_DEPLOY_HOST"
+          # 点火（deploy.sh release 是异步 supervisor，立即返回；worker 在服务器
+          # 上脱离会话运行，SSH 掉线不影响部署本身）。网络抖动重试 3 次。
+          out=""
+          for attempt in 1 2 3; do
+            if out="$(ssh "${ssh_base[@]}" "$target" "release $tag" 2>&1)"; then
+              echo "$out"
+              break
+            fi
+            echo "$out" >&2
+            if [ "$attempt" = 3 ]; then
+              echo "SSH 触发部署失败（已重试 3 次）" >&2
+              exit 1
+            fi
+            sleep 10
+          done
+          echo "$out" | grep -q "worker 已启动" || { echo "点火输出异常，中止" >&2; exit 1; }
+          # 轮询状态文件直到 done（部署含 docker build，给 35 分钟）。
+          for i in $(seq 1 140); do
+            st="$(ssh "${ssh_base[@]}" "$target" status 2>/dev/null || echo 'phase=ssh-error')"
+            echo "[poll $i] $(echo "$st" | tr '\n' ' ')"
+            if grep -q '^result=success$' <<<"$st"; then
+              exit 0
+            fi
+            if grep -q '^result=failed$' <<<"$st"; then
+              echo "部署失败，服务器日志尾部：" >&2
+              ssh "${ssh_base[@]}" "$target" "logs 120" >&2 || true
+              exit 1
+            fi
+            sleep 15
+          done
+          echo "部署超时（35 分钟）未结束，服务器日志尾部：" >&2
+          ssh "${ssh_base[@]}" "$target" "logs 120" >&2 || true
+          exit 1
+      - name: 部署摘要
+        if: always()
+        env:
+          OBS_DEPLOY_HOST: ${{ secrets.OBS_DEPLOY_HOST }}
+          OBS_DEPLOY_PORT: ${{ secrets.OBS_DEPLOY_PORT }}
+          OBS_DEPLOY_USER: ${{ secrets.OBS_DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/}"
+          {
+            echo "### 发布 $tag"
+            echo ""
+            if [ "${{ job.status }}" = "success" ]; then
+              echo "- 生产已部署并通过多点健康验证（容器内 / 宿主反代路径 / healthcheck / WebUI 版本）"
+            else
+              echo "- 部署未成功：服务器侧 deploy.sh 已自动回滚到上一个版本（见上方日志）"
+            fi
+            state="$(ssh -i "$HOME/obs_deploy_key" -p "$OBS_DEPLOY_PORT" -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 \
+              "$OBS_DEPLOY_USER@$OBS_DEPLOY_HOST" status 2>/dev/null || true)"
+            [ -n "$state" ] && echo '```' && echo "$state" && echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
