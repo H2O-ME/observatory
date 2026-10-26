@@ -48,7 +48,13 @@ git diff --cached --quiet || die "暂存区非空，先 commit"
 branch="$(git rev-parse --abbrev-ref HEAD)"
 [[ "$branch" == "main" ]] || die "当前在 $branch 分支；发布只允许从 main"
 log "同步远端…"
-git fetch --quiet origin
+fetch_ok=0
+for i in 1 2 3 4 5; do
+  if git fetch --quiet origin 2>/dev/null; then fetch_ok=1; break; fi
+  warn "fetch 失败（第 $i/5 次，代理抖动？）5 秒后重试"
+  sleep 5
+done
+[[ "$fetch_ok" == "1" ]] || die "git fetch 连续失败；检查网络/代理后重跑"
 local_head="$(git rev-parse HEAD)"
 remote_head="$(git rev-parse origin/main)"
 [[ "$local_head" == "$remote_head" ]] || die "本地 main 与 origin/main 不一致（ahead/behind）；先 push/pull"
@@ -82,9 +88,18 @@ fi
 [[ -n "$TOKEN" ]] || die "没有发布令牌：设 SHENMI_GITHUB_TOKEN 或写 .localdata/github-token"
 
 push_url="https://H2O-ME:${TOKEN}@github.com/${REPO_SLUG}.git"
-if ! git push "$push_url" "main" "$TAG" 2>&1 | grep -v "^remote:"; then
-  die "推送失败（令牌过期/无 workflow 权限/网络）"
-fi
+push_ok=0
+for i in 1 2 3; do
+  if git push "$push_url" "main" "$TAG" >/tmp/release-push.log 2>&1; then
+    push_ok=1
+    grep -v "^remote:" /tmp/release-push.log || true
+    break
+  fi
+  grep -v "^remote:" /tmp/release-push.log >&2 || true
+  warn "推送失败（第 $i/3 次）10 秒后重试"
+  sleep 10
+done
+[[ "$push_ok" == "1" ]] || die "推送连续失败（令牌过期/无 workflow 权限/网络）"
 unset push_url
 log "已推送 main + $TAG → GitHub；CI 开始跑全门禁"
 
