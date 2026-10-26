@@ -9,7 +9,7 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:
 cd /opt/observatory
 SHA="${1:?usage: pull-and-restart.sh <sha> [agent_changed]}"
 AGENT_CHANGED="${2:-false}"
-COMPOSE="docker compose -f deploy/docker-compose.yml --env-file server/.env"
+compose() { docker compose -f deploy/docker-compose.yml --env-file server/.env "$@"; }
 
 # 1) 受控端有更新：从固定 Release（latest-agent）拉 zip 并登记（服务器→GitHub 满速）
 if [[ "$AGENT_CHANGED" == "true" ]]; then
@@ -48,8 +48,8 @@ PY
 
 # 3) 拉镜像 + 切换（香港→ghcr 满速；构建不发生在本机）
 export OBS_IMAGE_TAG="ghcr.io/h2o-me/observatory:${SHA}"
-$COMPOSE pull --quiet
-$COMPOSE up -d --no-build
+compose pull --quiet
+compose up -d --no-build
 
 # 4) 健康验证（容器内直连，绕过反代/HostSplit 网络位形；容忍一次性 DB 迁移，最长 6 分钟）
 ok=""
@@ -71,7 +71,7 @@ done
 if [[ -z "$ok" ]]; then
   echo "health check FAILED; rolling back to ${OLD_IMAGE:-<none>}" >&2
   if [[ -n "$OLD_IMAGE" ]]; then
-    OBS_IMAGE_TAG="$OLD_IMAGE" $COMPOSE up -d --no-build
+    OBS_IMAGE_TAG="$OLD_IMAGE" compose up -d --no-build
   fi
   exit 1
 fi
