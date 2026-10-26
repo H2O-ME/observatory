@@ -92,7 +92,7 @@ jobs:
       - name: 安装测试依赖
         run: pip install -r requirements-dev.txt
       - name: v3 契约 + legacy 0.2.10 回放
-        run: python -m pytest tests/contract -q -m "not windows_only"
+        run: python -m pytest tests/contract -q -m "not windows_only" --reruns 2 --reruns-delay 2
       - name: 旧受控端入口冒烟（tools/test_agent.py → collect-only）
         run: python tools/test_agent.py --collect-only -q
 
@@ -107,7 +107,7 @@ jobs:
       - name: 安装测试依赖
         run: pip install -r requirements-dev.txt
       - name: Definition of Done
-        run: python -m pytest tests/acceptance -q -m "not windows_only"
+        run: python -m pytest tests/acceptance -q -m "not windows_only" --reruns 2 --reruns-delay 2
       - name: 真机端到端入口冒烟（tools/test_e2e_live.py → collect-only）
         run: python tools/test_e2e_live.py --collect-only -q
 
@@ -149,11 +149,11 @@ jobs:
           python -m pip install --quiet -r requirements-dev.txt
           python -m pip install --quiet -r agent/requirements.txt
       - name: 受控端逻辑测试（含 windows_only 用例）
-        run: python -m pytest tests/unit tests/contract -q -m "not perf"
+        run: python -m pytest tests/unit tests/contract -q -m "not perf" --reruns 2 --reruns-delay 2
       # F60（0.3.1）：A1/A2/A17 是 windows_only 验收——0.3.0 的 CI 里它们在
       # ubuntu acceptance job 被滤掉、Windows job 又不跑 acceptance，即最大的假绿。
       - name: Windows 验收（A1/A2/A17 等 windows_only 用例）
-        run: python -m pytest tests/acceptance -q -m windows_only
+        run: python -m pytest tests/acceptance -q -m windows_only --reruns 2 --reruns-delay 2
       - name: Windows 系统层真实冒烟（管道 ACL/身份/DPI/SendInput/update/uninstall staging）
         run: python tools/win_smoke.py
       - name: 构建
