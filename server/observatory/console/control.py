@@ -440,6 +440,16 @@ async def control_socket(websocket: WebSocket, uid: str) -> None:
             await websocket.close(code=CLOSE_NO_CHANNEL, reason="agent unreachable")
         return
 
+    async def send_input(body: dict[str, Any]) -> None:
+        """输入事件直发（尽力而为），失败只丢这一条。"""
+
+        transient = getattr(agent_session, "send_transient", None)
+        if callable(transient):
+            await transient("control", body)
+            return
+        with contextlib.suppress(Exception):
+            await agent_session.send("control", body, deadline_ms=CONTROL_SEND_DEADLINE_MS)
+
     async def pump_frames() -> None:
         queue = getattr(stream, "queue", None)
         if queue is None:
@@ -484,11 +494,11 @@ async def control_socket(websocket: WebSocket, uid: str) -> None:
                     continue
                 kind = parsed.get("type")
                 if kind == "input" and isinstance(parsed.get("ev"), dict):
-                    await agent_session.send(
-                        "control",
-                        {"session": grant.token, "action": "input", "ev": parsed["ev"]},
-                        deadline_ms=CONTROL_SEND_DEADLINE_MS,
-                    )
+                    # 输入事件是易失信号：走直发通道，绝不进可靠 outbox。
+                    # 之前每次鼠标移动都占一条 at-least-once 信封，30 Hz 下几秒
+                    # 就把该设备的 256 条队列灌满，之后文件/命令全部在入队时
+                    # 报“下行队列已满，请稍后重试”（2026-10-27 生产反馈）。
+                    await send_input({"session": grant.token, "action": "input", "ev": parsed["ev"]})
                 elif kind == "ping":
                     async with grant.send_lock:
                         await websocket.send_json({"type": "pong", "server_time_ms": now_ms()})
@@ -500,14 +510,12 @@ async def control_socket(websocket: WebSocket, uid: str) -> None:
                 if callable(forward_binary):
                     await forward_binary(message["bytes"])
                 else:
-                    await agent_session.send(
-                        "control",
+                    await send_input(
                         {
                             "session": grant.token,
                             "action": "input",
                             "data_b64": base64.b64encode(message["bytes"]).decode("ascii"),
-                        },
-                        deadline_ms=CONTROL_SEND_DEADLINE_MS,
+                        }
                     )
 
     timer = asyncio.create_task(_expire_after(websocket, grant), name=f"control-ttl-{grant.token}")

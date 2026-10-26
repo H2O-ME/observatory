@@ -1267,6 +1267,9 @@ class Link:
                 body: dict[str, Any] = {
                     "agent_version": self._agent_version,
                     "boot_id": self._boot_id,
+                    # WS 载体没有 HTTP 响应可回带下行游标：每条上行都要报一次，
+                    # 否则服务端 outbox 里的非命令信封永远无人确认、越积越多。
+                    "last_ack_id": self._last_downlink_id,
                     "device_time_ms": self._clock.device_now_ms(),
                 }
                 if self._heartbeat_payload is not None:
@@ -1358,7 +1361,14 @@ class Link:
 
     async def _reply_pong(self, _ping: Envelope) -> None:
         try:
-            await self.send("pong", {"device_time_ms": self._clock.device_now_ms()})
+            await self.send(
+                "pong",
+                {
+                    "device_time_ms": self._clock.device_now_ms(),
+                    # 同上：pong 是最快的下行确认机会（服务端静默一个心跳就 ping）。
+                    "last_ack_id": self._last_downlink_id,
+                },
+            )
         except OutboxFull as exc:
             log.error("pong 入队失败（outbox 满）: %s", exc)
         except LinkClosed:

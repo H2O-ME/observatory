@@ -155,6 +155,10 @@ async def link_ws(websocket: WebSocket) -> None:
                 )
                 return False
 
+    #: Live-control input is fire-and-forget on this socket: it must never enter
+    #: the at-least-once outbox (see AgentSession.send_transient).
+    session.set_direct_sender(send_envelope)
+
     async def pump_downlink() -> None:
         await link_ready.wait()
         #: Envelopes already written on this socket. ``outbox.pending()`` is the
@@ -283,6 +287,7 @@ async def link_ws(websocket: WebSocket) -> None:
             # Reason: cancellation is the expected way to stop the downlink pump.
             await pump
         session.set_close_hook(None)
+        session.set_direct_sender(None)
         await registry.unregister(identity.device_id, session)
         await session.close(code=CLOSE_REPLACED, reason="carrier closed")
         log_event(log, logging.INFO, "link.ws.closed", device_id=identity.device_id)

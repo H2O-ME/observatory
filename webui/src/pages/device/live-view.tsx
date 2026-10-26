@@ -17,6 +17,13 @@ const NORM = 10000;
 const CONTROL_TTL_S = 600;
 const PING_INTERVAL_MS = 3_000;
 
+/** 触屏手势参数（对齐 Windows/安卓远程桌面的手感）。 */
+const TOUCH_MOVE_SLOP_PX = 12;
+const LONG_PRESS_MS = 450;
+const DOUBLE_TAP_MS = 300;
+const DOUBLE_TAP_SLOP_PX = 40;
+const WHEEL_STEP_PX = 36;
+
 type ControlStatus = "idle" | "granting" | "connecting" | "streaming" | "error" | "closed";
 
 interface ControlSession {
@@ -166,6 +173,22 @@ export function LiveView({ device }: Props) {
   // F41: 修饰键按下状态——keydown 对修饰键只发 down、keyup 补 up，组合键
   // （Ctrl+C / Alt+F4 / Win 组合）才可用；repeat 事件靠该集合去重。
   const heldModifiersRef = useRef<Set<number>>(new Set());
+  // 触屏手势状态：单指点按/双击/长按拖拽、双指滚轮（与 Pointer 事件互斥）。
+  const touchRef = useRef({
+    startX: 0,
+    startY: 0,
+    lastX: 0,
+    lastY: 0,
+    moved: false,
+    dragging: false,
+    longPress: 0,
+    lastTapAt: 0,
+    lastTapX: 0,
+    lastTapY: 0,
+    twoFinger: false,
+    wheelY: 0,
+    wheelAccum: 0,
+  });
 
   const uid = device.uid;
   const issue = controlUnavailableReason(device.presence);
@@ -390,6 +413,9 @@ export function LiveView({ device }: Props) {
   };
 
   const onPointerMove = (event: React.PointerEvent) => {
+    // 触屏手势统一走 touch 处理器：Pointer 与 Touch 对同一次触摸都会触发，
+    // 两边都送会变成双倍输入。
+    if (event.pointerType === "touch") return;
     // 30 Hz input throttle: monotonic stopwatch, unrelated to the server clock.
     const stamp = performance.now();
     if (stamp - lastMoveRef.current < 33) return;
@@ -399,6 +425,7 @@ export function LiveView({ device }: Props) {
   };
 
   const onPointerDown = (event: React.PointerEvent) => {
+    if (event.pointerType === "touch") return;
     event.preventDefault();
     (event.target as HTMLElement).setPointerCapture?.(event.pointerId);
     const { x, y } = normalized(event.clientX, event.clientY);
@@ -408,9 +435,158 @@ export function LiveView({ device }: Props) {
   };
 
   const onPointerUp = (event: React.PointerEvent) => {
+    if (event.pointerType === "touch") return;
     const { x, y } = normalized(event.clientX, event.clientY);
     const button = event.button === 2 ? 3 : event.button === 1 ? 2 : 1;
     send({ type: "input", ev: { kind: "mouse", action: "up", button, x, y, norm: true } });
+  };
+
+  // -- 触屏手势（移动端远程桌面惯例）--------------------------------------
+  //   单指点按         = 左键单击
+  //   快速双击         = 左键双击（两次 down/up）
+  //   单指滑动         = 只移动光标，不点击
+  //   单指长按后拖动   = 按住左键拖拽，抬起结束
+  //   双指上下滑       = 滚轮上/下
+  // `touch-none` 已经在 stage 上关掉了浏览器的滚动与缩放，所以不需要
+  // preventDefault，React 的合成 touch 事件够用。
+
+  const sendMouseAt = (action: "move" | "down" | "up", clientX: number, clientY: number, button = 1) => {
+    const { x, y } = normalized(clientX, clientY);
+    send({ type: "input", ev: { kind: "mouse", action, x, y, button, norm: true } });
+  };
+
+  const cancelLongPress = () => {
+    const touch = touchRef.current;
+    if (touch.longPress) {
+      window.clearTimeout(touch.longPress);
+      touch.longPress = 0;
+    }
+  };
+
+  const onTouchStart = (event: React.TouchEvent) => {
+    if (!sessionRef.current) return;
+    const touch = touchRef.current;
+    if (event.touches.length >= 2) {
+      cancelLongPress();
+      if (touch.dragging) {
+        touch.dragging = false;
+        sendMouseAt("up", touch.lastX, touch.lastY);
+      }
+      touch.twoFinger = true;
+      touch.wheelY = (event.touches[0].clientY + event.touches[1].clientY) / 2;
+      touch.wheelAccum = 0;
+      return;
+    }
+    const first = event.touches[0];
+    touch.startX = touch.lastX = first.clientX;
+    touch.startY = touch.lastY = first.clientY;
+    touch.moved = false;
+    touch.dragging = false;
+    touch.twoFinger = false;
+    cancelLongPress();
+    touch.longPress = window.setTimeout(() => {
+      touch.longPress = 0;
+      touch.dragging = true;
+      // 长按判定成功：先落点再按下左键，随后拖动沿用 move。
+      sendMouseAt("move", touch.lastX, touch.lastY);
+      sendMouseAt("down", touch.lastX, touch.lastY);
+      navigator.vibrate?.(10);
+    }, LONG_PRESS_MS);
+  };
+
+  const onTouchMove = (event: React.TouchEvent) => {
+    if (!sessionRef.current) return;
+    const touch = touchRef.current;
+    if (touch.twoFinger) {
+      if (event.touches.length < 2) return;
+      const midpointY = (event.touches[0].clientY + event.touches[1].clientY) / 2;
+      // 手指上滑 → 滚轮上滑（正值 = 远端向上滚）。
+      touch.wheelAccum += touch.wheelY - midpointY;
+      touch.wheelY = midpointY;
+      const steps = Math.trunc(touch.wheelAccum / WHEEL_STEP_PX);
+      if (steps !== 0) {
+        touch.wheelAccum -= steps * WHEEL_STEP_PX;
+        const delta = steps > 0 ? 1 : -1;
+        // 一次最多补 3 格，避免快速滑动积累出巨大的滚轮跳变。
+        for (let i = 0; i < Math.min(3, Math.abs(steps)); i += 1) {
+          send({ type: "input", ev: { kind: "wheel", delta } });
+        }
+      }
+      return;
+    }
+    const first = event.touches[0];
+    if (!first) return;
+    touch.lastX = first.clientX;
+    touch.lastY = first.clientY;
+    if (!touch.dragging && !touch.moved) {
+      const dx = first.clientX - touch.startX;
+      const dy = first.clientY - touch.startY;
+      if (Math.hypot(dx, dy) > TOUCH_MOVE_SLOP_PX) {
+        touch.moved = true;
+        cancelLongPress();
+      }
+    }
+    if (touch.dragging || touch.moved) {
+      // 与鼠标一致的 30 Hz 节流。
+      const stamp = performance.now();
+      if (stamp - lastMoveRef.current < 33) return;
+      lastMoveRef.current = stamp;
+      sendMouseAt("move", touch.lastX, touch.lastY);
+    }
+  };
+
+  const onTouchEnd = (event: React.TouchEvent) => {
+    const touch = touchRef.current;
+    if (touch.twoFinger) {
+      if (event.touches.length < 2) {
+        touch.twoFinger = false;
+        touch.wheelAccum = 0;
+        // 剩余手指抬起时不能再当点按处理。
+        touch.moved = true;
+      }
+      return;
+    }
+    cancelLongPress();
+    if (!sessionRef.current) return;
+    if (touch.dragging) {
+      touch.dragging = false;
+      sendMouseAt("up", touch.lastX, touch.lastY);
+      return;
+    }
+    if (touch.moved) return;
+    const nowStamp = performance.now();
+    const isDouble =
+      nowStamp - touch.lastTapAt <= DOUBLE_TAP_MS &&
+      Math.abs(touch.lastX - touch.lastTapX) <= DOUBLE_TAP_SLOP_PX &&
+      Math.abs(touch.lastY - touch.lastTapY) <= DOUBLE_TAP_SLOP_PX;
+    stageRef.current?.focus();
+    if (isDouble) {
+      touch.lastTapAt = 0;
+      sendMouseAt("move", touch.lastX, touch.lastY);
+      sendMouseAt("down", touch.lastX, touch.lastY);
+      sendMouseAt("up", touch.lastX, touch.lastY);
+      sendMouseAt("down", touch.lastX, touch.lastY);
+      sendMouseAt("up", touch.lastX, touch.lastY);
+      return;
+    }
+    touch.lastTapAt = nowStamp;
+    touch.lastTapX = touch.lastX;
+    touch.lastTapY = touch.lastY;
+    sendMouseAt("move", touch.lastX, touch.lastY);
+    sendMouseAt("down", touch.lastX, touch.lastY);
+    sendMouseAt("up", touch.lastX, touch.lastY);
+  };
+
+  const onTouchCancel = () => {
+    const touch = touchRef.current;
+    cancelLongPress();
+    if (touch.dragging) {
+      touch.dragging = false;
+      sendMouseAt("up", touch.lastX, touch.lastY);
+    }
+    touch.twoFinger = false;
+    touch.wheelAccum = 0;
+    touch.moved = false;
   };
 
   // F41: 滚轮只走下面的原生非 passive 监听。React 根节点的 wheel 是
@@ -605,6 +781,10 @@ export function LiveView({ device }: Props) {
             onPointerMove={onPointerMove}
             onPointerDown={onPointerDown}
             onPointerUp={onPointerUp}
+            onTouchStart={onTouchStart}
+            onTouchMove={onTouchMove}
+            onTouchEnd={onTouchEnd}
+            onTouchCancel={onTouchCancel}
             onKeyDown={onKeyDown}
             onKeyUp={onKeyUp}
             onContextMenu={(event) => event.preventDefault()}
@@ -690,7 +870,8 @@ export function LiveView({ device }: Props) {
       </div>
 
       <p className="text-xs leading-relaxed text-faint">
-        画面与输入经服务器中转并全程审计；点击画面聚焦后键盘快捷键才生效。
+        画面与输入经服务器中转并全程审计；点击画面聚焦后键盘快捷键才生效。移动端：点按 = 单击，双击 = 双击，长按后拖动 =
+        拖拽，双指上下滑 = 滚轮。
       </p>
     </div>
   );

@@ -34,6 +34,9 @@ log = logging.getLogger(__name__)
 CONTROL_QUEUE_MAX = 4
 
 CloseHook = Callable[[int, str], Awaitable[None]]
+#: ``envelope -> written?`` — the WS carrier's immediate writer. Transient
+#: envelopes use it to skip the reliable outbox entirely.
+DirectSender = Callable[[Envelope], Awaitable[bool]]
 #: ``(device_id, agent_version) -> offer dict | None`` — injected by the assembly
 #: so link never imports console (A4). The provider owns the package table read.
 UpdateOfferProvider = Callable[[int, str], Awaitable[dict[str, Any] | None]]
@@ -173,6 +176,11 @@ class AgentSession:
 
         self._send_lock = asyncio.Lock()
         self._close_hook: CloseHook | None = None
+        #: Installed by the WS carrier only. Live-control input uses it instead
+        #: of the outbox: at 30 Hz the bounded at-least-once queue filled with
+        #: envelopes nobody acks, and every later command (files/drives) failed
+        #: at enqueue with "下行队列已满" (reported 2026-10-27).
+        self._direct_sender: DirectSender | None = None
         self._control_streams: dict[str, ControlStream] = {}
         self._seen: OrderedDict[str, int] = OrderedDict()
         self._stats: dict[str, int] = {
@@ -197,6 +205,56 @@ class AgentSession:
 
     def set_close_hook(self, hook: CloseHook | None) -> None:
         self._close_hook = hook
+
+    def set_direct_sender(self, sender: DirectSender | None) -> None:
+        """Install/clear the carrier's immediate (unacked) writer."""
+
+        self._direct_sender = sender
+
+    async def send_transient(self, kind: str, body: dict[str, Any]) -> bool:
+        """Best-effort downlink that never occupies the reliable outbox.
+
+        Only live-control input uses this. Those events are superseded by the
+        next pointer move, so losing one is harmless; keeping them in the
+        at-least-once outbox is not — they stay queued until an ack, and a
+        30 Hz stream saturates the bounded queue within seconds, after which
+        *every* command for that device fails at enqueue.
+        """
+
+        if self.closed:
+            return False
+        sender = self._direct_sender
+        if sender is None:
+            log_event(
+                log,
+                logging.WARNING,
+                "session.transient_no_carrier",
+                device_id=self.device_id,
+                kind=kind,
+            )
+            return False
+        envelope = new_envelope(kind, dict(body or {}), clock=self.clock)
+        try:
+            ok = bool(await sender(envelope))
+        except Exception as exc:  # noqa: BLE001 - one dropped event must not end the viewer
+            log_event(
+                log,
+                logging.DEBUG,
+                "session.transient_failed",
+                device_id=self.device_id,
+                kind=kind,
+                error=str(exc),
+            )
+            return False
+        if not ok:
+            log_event(
+                log,
+                logging.DEBUG,
+                "session.transient_failed",
+                device_id=self.device_id,
+                kind=kind,
+            )
+        return ok
 
     def stats(self) -> dict[str, int]:
         return dict(self._stats)
@@ -371,18 +429,21 @@ class AgentSession:
         self._stats["uplink"] += 1
         self.last_uplink_id = envelope.id
         kind = envelope.t
+        #: Any carrier that cannot piggyback the downlink cursor on a batch
+        #: response (WS) reports it on every uplink envelope instead. Without
+        #: this a long-lived WS link never acked a single non-command downlink,
+        #: so `control` envelopes piled up until the outbox was full.
+        self._ack_from_body(envelope.body)
 
         if kind == "hello":
             self._apply_agent_info(envelope.body)
             self.protocol = envelope.v
             await self._persist_device_report(envelope.body, envelope.v)
-            self._ack_from_body(envelope.body)
             return [await self._welcome()]
 
         if kind == "heartbeat":
             self._apply_agent_info(envelope.body)
             await self._persist_device_report(envelope.body, envelope.v)
-            self._ack_from_body(envelope.body)
             # F1: the only automatic update loop for v3 devices. The agent picks
             # the offer up from the reply batch on either carrier.
             offer = await self._maybe_update_offer()
