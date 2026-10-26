@@ -1,10 +1,10 @@
 @echo off
 rem Observatory agent installer -- double-click to install.
 rem
-rem This file carries a ONE-TIME install token when the server renders one
-rem (single use, short TTL, bound to the first device). Never put a long-lived
-rem shared credential into a distributable file; the legacy shared enrollment
-rem code was removed in 0.3.1.
+rem This file carries a deployment ticket rendered by the server. It is
+rem long-lived and reusable across machines by default, because it only gates
+rem who may download and enrol the agent; revoke it in the console to kill it.
+rem The legacy shared enrollment code was removed in 0.3.1.
 rem
 rem Rendered per request by the server:
 rem   * the install token and version are already inside
@@ -41,7 +41,7 @@ if defined TOKEN (
 
 if not defined CRED_Q (
   echo.
-  echo   FAILED: this installer has no install token inside.
+  echo   FAILED: this installer has no deployment ticket inside.
   echo   Download it again from the console: Settings - Installer.
   echo.
   pause

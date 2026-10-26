@@ -418,7 +418,7 @@ class AgentConfig:
     token: str = ""
     base_urls: list[str] = field(default_factory=default_base_urls)
     enroll_code: str = ""
-    #: 一次性安装令牌（A18）：与 enroll_code 二选一，服务端优先校验它。
+    #: 部署票据（A18）：与 enroll_code 二选一，服务端优先校验它。默认长期有效、可复用多台。
     install_token: str = ""
     server_version: str = ""
     settings: dict[str, Any] = field(default_factory=dict)

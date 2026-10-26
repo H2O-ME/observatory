@@ -36,7 +36,7 @@ from .log import log_event
 log = logging.getLogger(__name__)
 
 #: Bump this and append a migration function when the schema changes.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 #: 每个连接都执行的 PRAGMA（W7/F56：journal_mode 需要短暂拿写锁且只需设一次，
 #: 移到迁移路径；NullPool 下每会话新建连接，这里只留真正 per-connection 的项）。
@@ -357,12 +357,68 @@ async def _migration_v5_archive_frame_ts(conn: AsyncConnection) -> None:
     )
 
 
+async def _migration_v6_install_tickets(conn: AsyncConnection) -> None:
+    """部署票据改为"长期有效 + 可绑定多台设备"（2026-10-27）。
+
+    旧模型把 ``used_at_ms`` 当"一次性"标志：管理员重装同一台机器时，受控端
+    因为 config.json 里已有设备令牌而跳过注册，票据永远显示"未使用"，而撤销
+    又会悄悄掐掉这台机器唯一的重认证凭据。新模型用 ``install_token_uses``
+    记录"票据 → 设备"的去重绑定关系，``used_count`` 是已绑定台数，
+    ``max_uses = 0`` 表示不限、``expires_at_ms = 0`` 表示长期有效。
+    """
+
+    await _ensure_column(conn, "install_tokens", "used_count", "INTEGER NOT NULL DEFAULT 0")
+    await _ensure_column(conn, "install_tokens", "last_used_at_ms", "BIGINT NULL")
+    await _ensure_column(conn, "install_tokens", "revoked_at_ms", "BIGINT NULL")
+    await conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS install_token_uses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_id INTEGER NOT NULL,
+                device_id INTEGER NOT NULL,
+                used_at_ms BIGINT NOT NULL,
+                ip VARCHAR(64) NOT NULL DEFAULT '',
+                hostname VARCHAR(128) NOT NULL DEFAULT ''
+            )
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_install_token_uses_pair "
+            "ON install_token_uses (token_id, device_id)"
+        )
+    )
+    await conn.execute(
+        text("CREATE INDEX IF NOT EXISTS ix_install_token_uses_token ON install_token_uses (token_id)")
+    )
+    await conn.execute(
+        text("CREATE INDEX IF NOT EXISTS ix_install_token_uses_device ON install_token_uses (device_id)")
+    )
+    # 旧行回填：曾经"用过一次"的票据视为绑定过 1 台设备。
+    await conn.execute(
+        text(
+            "UPDATE install_tokens SET used_count = 1, last_used_at_ms = used_at_ms "
+            "WHERE used_at_ms IS NOT NULL AND used_count = 0"
+        )
+    )
+    await conn.execute(
+        text(
+            "INSERT OR IGNORE INTO install_token_uses (token_id, device_id, used_at_ms) "
+            "SELECT id, used_device_id, COALESCE(used_at_ms, created_at_ms) "
+            "FROM install_tokens WHERE used_device_id IS NOT NULL"
+        )
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline_0_2_10", _migration_v1_baseline),
     Migration(2, "link_v3_0_3_0", _migration_v2_link_v3),
     Migration(3, "device_token_index", _migration_v3_device_token_index),
     Migration(4, "tombstones_and_indexes", _migration_v4_tombstones_and_indexes),
     Migration(5, "archive_frame_ts_and_indexes", _migration_v5_archive_frame_ts),
+    Migration(6, "install_tickets_multi_device", _migration_v6_install_tickets),
 )
 
 

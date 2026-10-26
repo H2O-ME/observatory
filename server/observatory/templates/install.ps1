@@ -10,12 +10,12 @@
     * 双域名热备：control.tianhw.top 与 observatory.123423.xyz 互为备份，
       任意一个可达即可完成安装与上报。
     * 版本号在开头显著显示，且与服务器、控制台完全一致。
-    * 安装凭据只接受**一次性安装令牌**（单次使用、有 TTL、绑定首台设备）；
+    * 安装凭据只接受**部署票据**（默认长期有效、可绑定多台设备；撤销后失效）；
       旧版共享注册码已于 0.3.1 随 0.2.x 兼容层一并移除。
 
 .PARAMETER Token
-    一次性安装令牌（必填，控制台「安装令牌」页生成；单次使用、绑定首台设备、
-    过期或已被使用则安装失败）。
+    部署票据（必填，控制台「安装」页生成；默认长期有效、可绑定任意多台设备，
+    管理员撤销后立即失效）。
 
 .PARAMETER Uninstall
     卸载受控端（需要提权一次）。
@@ -83,7 +83,7 @@ function Show-Banner {
     Write-Host "     安装到 : $InstallDir" -ForegroundColor Gray
     Write-Host "     服务器 : $($BaseUrls -join '  |  ')" -ForegroundColor Gray
     if ($HasToken) {
-        Write-Host "     凭据   : 一次性安装令牌（单次）" -ForegroundColor Gray
+        Write-Host "     凭据   : 部署票据（长期、可复用多台）" -ForegroundColor Gray
     }
     Write-Host '  ==================================================' -ForegroundColor DarkGray
     Write-Host ''
@@ -139,7 +139,7 @@ function Request-Elevation {
         Write-Fail '两个域名都不可达，无法继续安装。请检查网络或代理。'
         exit 3
     }
-    # 提权子进程从服务器重新下载脚本；凭据放在 query 里（令牌单次使用）。
+    # 提权子进程从服务器重新下载脚本；凭据放在 query 里（撤销后失效）。
     $childQuery = "token=$([uri]::EscapeDataString($Token))"
     $childUrl = "$primary/api/v1/public/install.ps1?$childQuery"
     $arguments = @(
@@ -225,7 +225,7 @@ function Install-Service {
     if (-not (Test-Path $exe)) { throw "找不到 $exe" }
 
     Write-Step '注册并启动服务'
-    # 一次性安装令牌由受控端在注册时消费（绑定首台设备）。
+    # 部署票据由受控端在注册时提交；同一张票据可注册任意多台机器。
     $arguments = @('--install', '--exe', "`"$exe`"", '--install-token', $Token)
     foreach ($url in $BaseUrls) { $arguments += @('--base-url', $url) }
 
@@ -286,7 +286,7 @@ if ($Uninstall) {
 }
 
 if (-not $HasToken) {
-    Write-Fail '缺少安装凭据（一次性安装令牌）。请从控制台复制完整安装命令。'
+    Write-Fail '缺少安装凭据（部署票据）。请从控制台复制完整安装命令。'
     exit 2
 }
 if (-not $BaseUrls -or $BaseUrls.Count -eq 0) {

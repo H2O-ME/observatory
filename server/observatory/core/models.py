@@ -184,7 +184,13 @@ class FrameArchive(Base):
 
 
 class InstallToken(Base):
-    """One-shot installer credential (A18); business logic lives in console/install."""
+    """部署票据：可长期有效、可绑定多台设备的一次性凭据池。
+
+    语义（2026-10-27 改版）：``max_uses`` 是**可绑定设备数**而不是"注册次数"——
+    同一台设备重复注册（401 自愈、重装）不会重复计数，见
+    :class:`InstallTokenUse`。``max_uses = 0`` 表示不限台数；
+    ``expires_at_ms = 0`` 表示长期有效（需显式撤销）。
+    """
 
     __tablename__ = "install_tokens"
 
@@ -196,10 +202,45 @@ class InstallToken(Base):
     used_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     used_device_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_uses: Mapped[int] = mapped_column(Integer, default=1)
+    #: 已绑定的设备数量（由 install_token_uses 去重维护，见 enroll）。
+    used_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_used_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    #: 软撤销：保留行与绑定记录用于审计，列表默认不展示。
+    revoked_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     @property
-    def remaining_uses(self) -> int:
-        return max(0, int(self.max_uses or 1) - (1 if self.used_at_ms else 0))
+    def unlimited_uses(self) -> bool:
+        return int(self.max_uses or 0) <= 0
+
+    @property
+    def permanent(self) -> bool:
+        return int(self.expires_at_ms or 0) <= 0
+
+    @property
+    def remaining_uses(self) -> int | None:
+        """还能绑定几台设备；``None`` 表示不限。"""
+
+        if self.unlimited_uses:
+            return None
+        return max(0, int(self.max_uses) - int(self.used_count or 0))
+
+
+class InstallTokenUse(Base):
+    """一条"某票据绑定过某设备"的记录。
+
+    ``(token_id, device_id)`` 唯一：同一台机器重装/自愈注册只更新这一行，
+    不会重复消耗名额。"已绑定 N 台"和"绑定的是哪些设备"都来自这里。
+    """
+
+    __tablename__ = "install_token_uses"
+    __table_args__ = (UniqueConstraint("token_id", "device_id", name="ux_install_token_uses_pair"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    token_id: Mapped[int] = mapped_column(Integer, index=True)
+    device_id: Mapped[int] = mapped_column(Integer, index=True)
+    used_at_ms: Mapped[int] = mapped_column(BigInteger, default=now_ms)
+    ip: Mapped[str] = mapped_column(String(64), default="")
+    hostname: Mapped[str] = mapped_column(String(128), default="")
 
 
 class DeletedDevice(Base):
@@ -230,6 +271,7 @@ __all__ = [
     "Frame",
     "FrameArchive",
     "InstallToken",
+    "InstallTokenUse",
     "Package",
     "Setting",
 ]

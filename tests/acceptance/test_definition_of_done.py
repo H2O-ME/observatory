@@ -937,8 +937,12 @@ def test_a17_pipe_acl_and_401_reregistration(tmp_dir: Path) -> None:
         assert recovered.status_code == 200, recovered.text
 
 
-def test_a18_install_token_single_use_ttl_bound(tmp_dir: Path) -> None:
-    """A18：安装令牌一次性 + TTL + 绑定首台设备；脚本只嵌入一次性令牌。"""
+def test_a18_install_ticket_multi_device_long_lived(tmp_dir: Path) -> None:
+    """A18（2026-10-27 改版）：部署票据默认长期有效、可绑定多台；撤销即失效。
+
+    票据的定位是"授权下载并安装受控端"，不是每台机器独立的秘密。同机重装
+    不重复占用台数，撤销只影响后续注册。
+    """
 
     from tests.helpers import TEST_ADMIN_PASSWORD, running_app
 
@@ -946,53 +950,84 @@ def test_a18_install_token_single_use_ttl_bound(tmp_dir: Path) -> None:
         login = client.post("/api/v1/auth/login", json={"password": TEST_ADMIN_PASSWORD})
         assert login.status_code == 200, login.text
 
-        created = client.post("/api/v1/install-tokens", json={"ttl_s": 120})
+        created = client.post("/api/v1/install-tokens", json={})
         assert created.status_code == 200, created.text
         issued = created.json()["data"]
         token = issued["token"]
         assert isinstance(token, str) and len(token) >= 32
-        assert issued["max_uses"] == 1
+        assert issued["permanent"] is True, "默认必须长期有效"
+        assert int(issued["expires_at_ms"]) == 0
+        assert issued["max_uses"] == 0, "默认不限台数"
 
-        # TTL 被服务端限制在 60..86400 秒（越界拒绝，而不是静默截断）
-        ttl_left_ms = int(issued["expires_at_ms"]) - int(time.time() * 1000)
+        # 显式限时/限台数仍然支持，越界拒绝而不是静默截断
+        limited = client.post("/api/v1/install-tokens", json={"ttl_s": 120, "max_uses": 2})
+        assert limited.status_code == 200, limited.text
+        ttl_left_ms = int(limited.json()["data"]["expires_at_ms"]) - int(time.time() * 1000)
         assert 60_000 <= ttl_left_ms <= 120_000 + 5_000, ttl_left_ms
-        too_short = client.post("/api/v1/install-tokens", json={"ttl_s": 10})
-        assert too_short.status_code == 422
-        assert too_short.json()["code"] == "BAD_REQUEST"
+        assert limited.json()["data"]["max_uses"] == 2
+        assert client.post("/api/v1/install-tokens", json={"ttl_s": 10}).status_code == 422
+        assert client.post("/api/v1/install-tokens", json={"max_uses": -1}).status_code == 422
 
-        # 下载脚本只嵌入一次性令牌（0.3.1 起不再接受共享注册码）
+        # 下载脚本只嵌入部署票据（0.3.1 起不再接受共享注册码）
         cmd = client.get("/api/v1/public/install.cmd", params={"token": token})
         assert cmd.status_code == 200, cmd.text
-        assert token in cmd.text, "install.cmd 必须携带一次性令牌"
+        assert token in cmd.text, "install.cmd 必须携带部署票据"
         assert "@@ENROLL_CODE@@" not in cmd.text
         code_query = client.get("/api/v1/public/install.cmd", params={"code": "whatever"})
         assert code_query.status_code == 401, "注册码路径必须被拒绝"
 
-        # 一次性：首次 enroll 消耗成功，复用失败（即使换设备）
-        payload = {
-            "uid": "OBS-A18-DEVICE",
-            "hostname": "a18",
-            "install_token": token,
-        }
-        first = client.post("/api/v1/agent/enroll", json=payload)
-        assert first.status_code == 200, first.text
+        def enroll(uid: str) -> object:
+            return client.post(
+                "/api/v1/agent/enroll",
+                json={"uid": uid, "hostname": uid.lower(), "install_token": token},
+            )
 
-        replayed = dict(payload)
-        replayed["uid"] = "OBS-REPLAY-OTHER"
-        second = client.post("/api/v1/agent/enroll", json=replayed)
-        assert second.status_code == 401, second.text
-        assert "令牌" in second.json()["message"]
+        # 同一张票据可以绑定多台设备
+        assert enroll("OBS-A18-A").status_code == 200
+        assert enroll("OBS-A18-B").status_code == 200
+        # 同一台设备重装/自愈：不重复占用名额
+        assert enroll("OBS-A18-A").status_code == 200
 
-        # 绑定首台设备：列表里 used=True 且 used_device_id 指向首次注册的设备
         listed = client.get("/api/v1/install-tokens").json()["data"]["tokens"]
-        assert listed and listed[0]["used"] is True
-        assert listed[0]["used_device_id"] is not None
+        row = next(item for item in listed if item["id"] == issued["id"])
+        assert row["used_count"] == 2, row
+        assert row["unlimited"] is True and row["remaining"] is None
+        assert row["permanent"] is True
+        assert {item["uid"] for item in row["devices"]} == {"OBS-A18-A", "OBS-A18-B"}
 
-        # 同设备重消费放行（A17 自愈路径：401 后带同一令牌重新入网）
-        again = dict(payload)
-        again["install_token"] = token
-        third = client.post("/api/v1/agent/enroll", json=again)
-        assert third.status_code == 200, third.text
+        # 撤销：列表不再返回、下载 401、新设备注册被拒；已装好的设备仍在线
+        revoked = client.delete(f"/api/v1/install-tokens/{issued['id']}")
+        assert revoked.status_code == 200, revoked.text
+        assert "2 台" in revoked.json()["data"]["message"]
+        after = client.get("/api/v1/install-tokens").json()["data"]["tokens"]
+        assert all(item["id"] != issued["id"] for item in after)
+        assert client.get("/api/v1/public/install.cmd", params={"token": token}).status_code == 401
+        rejected = enroll("OBS-A18-C")
+        assert rejected.status_code == 401, rejected.text
+        assert "撤销" in rejected.json()["message"]
+
+
+def test_a18b_install_ticket_cap_counts_devices(tmp_dir: Path) -> None:
+    """max_uses 计的是"绑定过的设备台数"，不是注册次数。"""
+
+    from tests.helpers import TEST_ADMIN_PASSWORD, running_app
+
+    with running_app(tmp_dir) as client:
+        login = client.post("/api/v1/auth/login", json={"password": TEST_ADMIN_PASSWORD})
+        assert login.status_code == 200, login.text
+        token = client.post("/api/v1/install-tokens", json={"max_uses": 1}).json()["data"]["token"]
+
+        def enroll(uid: str) -> object:
+            return client.post(
+                "/api/v1/agent/enroll",
+                json={"uid": uid, "hostname": uid.lower(), "install_token": token},
+            )
+
+        assert enroll("OBS-CAP-A").status_code == 200
+        assert enroll("OBS-CAP-A").status_code == 200, "同一台设备重复注册不得占用第二个名额"
+        refused = enroll("OBS-CAP-B")
+        assert refused.status_code == 401, refused.text
+        assert "台数" in refused.json()["message"]
 
 
 def test_a19_docs_and_version_consistency() -> None:

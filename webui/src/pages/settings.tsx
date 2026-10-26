@@ -103,16 +103,10 @@ const GROUPS: Array<{ id: string; title: string; hint: string; icon: IconType; k
   {
     id: "install",
     title: "安装",
-    hint: "安装令牌默认有效期与脚本提示",
+    hint: "安装票据默认有效期（0 = 长期有效）与脚本提示",
     icon: Rocket,
     keys: ["install_token_ttl_minutes", "install_script_note"],
   },
-];
-
-const TTL_OPTIONS = [
-  { value: 1800, label: "30 分钟" },
-  { value: 21600, label: "6 小时" },
-  { value: 86400, label: "24 小时" },
 ];
 
 function specLabel(key: string, spec: SettingSpec): string {
@@ -152,8 +146,13 @@ export function SettingsPage() {
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [copied, setCopied] = useState("");
-  const [ttl, setTtl] = useState(1800);
-  const [created, setCreated] = useState<{ token: string; cmd: string; ps1: string; expires: number } | null>(null);
+  const [created, setCreated] = useState<{
+    token: string;
+    cmd: string;
+    ps1: string;
+    expires: number;
+    permanent: boolean;
+  } | null>(null);
   const [pendingToken, setPendingToken] = useState<InstallToken | null>(null);
 
   const query = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
@@ -258,13 +257,14 @@ export function SettingsPage() {
   };
 
   const createToken = useMutation({
-    mutationFn: () => api.createInstallToken(ttl),
+    mutationFn: () => api.createInstallToken(),
     onSuccess: (result) => {
       setCreated({
         token: result.token,
         cmd: result.install_cmd_url,
         ps1: result.install_ps1_url,
         expires: result.expires_at_ms,
+        permanent: result.permanent,
       });
       setError("");
       void queryClient.invalidateQueries({ queryKey: ["install-tokens"] });
@@ -403,36 +403,24 @@ export function SettingsPage() {
             {/* ------------------------------------------------ install launchpad */}
             <div className="min-w-0">
               <SettingsCard
-                title="安装令牌"
-                description="令牌只用于一次安装，绑定第一台使用它的机器；下载脚本本身不会消耗它。"
+                title="安装票据"
+                description="长期有效、可绑定多台设备；它只是下载/安装授权，不是每台机器独立的秘密。撤销后已装好的设备保持在线，但不能再拿它重新注册。"
                 actions={
                   <>
                     <MetaChip tone="ok">可用 {install?.available_tokens ?? 0}</MetaChip>
-                    <MetaChip>默认 {install?.token_ttl_minutes ?? "—"} 分钟</MetaChip>
+                    <MetaChip>默认长期有效</MetaChip>
                   </>
                 }
               >
                   <div className="min-w-0">
-                    <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,10rem)_auto] sm:items-end sm:gap-3">
-                      <div className="min-w-0">
-                        <Label className="text-xs text-faint">有效期</Label>
-                        <Select value={String(ttl)} onValueChange={(value) => setTtl(Number(value) || 1800)}>
-                          <SelectTrigger size="sm" className={cn("mt-1 w-full", touch && "tap")}>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {TTL_OPTIONS.map((option) => (
-                              <SelectItem key={option.value} value={String(option.value)}>
-                                {option.label}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
+                    <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end sm:gap-3">
+                      <p className="text-xs leading-relaxed text-muted-foreground">
+                        生成一张票据后，安装脚本里会带上它；同一张票据可以装任意多台机器（按需在服务端设置里限制有效期或台数）。
+                      </p>
                       <div className="min-w-0">
                         <Button disabled={createToken.isPending} onClick={() => createToken.mutate()}>
                           {createToken.isPending ? <Spinner className="size-4" /> : <KeyRound className="size-4" />}
-                          生成令牌
+                          生成票据
                         </Button>
                       </div>
                     </div>
@@ -441,9 +429,12 @@ export function SettingsPage() {
                       <div className="mt-3 min-w-0 overflow-hidden rounded-md border border-border bg-muted p-3">
                         <div className="min-w-0">
                           <div className="min-w-0">
-                            <p className="text-sm font-semibold text-primary">令牌只显示这一次</p>
+                            <p className="text-sm font-semibold text-primary">票据只显示这一次</p>
                             <p className="text-xs leading-relaxed text-muted-foreground">
-                              有效至 <span className="tnum">{formatDateTime(created.expires)}</span>；请立即复制或下载安装脚本。
+                              {created.permanent
+                                ? "长期有效（随时可在下方撤销）"
+                                : `有效至 ${formatDateTime(created.expires)}`}
+                              ；请立即复制或下载安装脚本。
                             </p>
                           </div>
 
@@ -520,9 +511,9 @@ export function SettingsPage() {
                       <div className="mt-3 min-w-0 overflow-hidden rounded-md border border-dashed border-border bg-muted px-3 py-6 text-center">
                         <div>
                           <KeyRound className="mx-auto size-5 text-faint" />
-                          <p className="mt-2 text-sm font-medium text-foreground">还没有可用的安装令牌</p>
+                          <p className="mt-2 text-sm font-medium text-foreground">还没有可用的安装票据</p>
                           <p className="mx-auto mt-1 max-w-sm text-xs leading-relaxed text-muted-foreground">
-                            生成一枚令牌后即可下载安装脚本；脚本下载不会消耗令牌，首次安装时才会绑定设备。
+                            生成一张票据后即可下载安装脚本；同一张票据可以装任意多台机器，撤销前一直有效。
                           </p>
                           <Button
                             size="sm"
@@ -532,21 +523,22 @@ export function SettingsPage() {
                             disabled={createToken.isPending}
                           >
                             <KeyRound className="size-3.5" />
-                            生成第一枚令牌
+                            生成第一张票据
                           </Button>
                         </div>
                       </div>
                     ) : (
                       <ul className="mt-3 grid min-w-0 gap-1.5">
                         {(tokensQuery.data?.tokens ?? []).map((token) => {
-                          const state = token.used ? "已使用" : token.expired ? "已过期" : "可用";
+                          const state = token.exhausted ? "已用完" : token.expired ? "已过期" : "可用";
+                          const bound = token.devices ?? [];
                           return (
                             <li
                               key={token.id}
                               className="grid min-w-0 gap-2 rounded-md border border-border bg-card p-2.5 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center sm:gap-3"
                             >
                               <Badge
-                                variant={state === "可用" ? "success" : state === "已使用" ? "neutral" : "warning"}
+                                variant={state === "可用" ? "success" : state === "已过期" ? "warning" : "neutral"}
                                 className="w-fit text-xs font-semibold"
                               >
                                 {state}
@@ -555,11 +547,22 @@ export function SettingsPage() {
                                 <p className="min-w-0 break-all text-xs text-foreground">
                                   <span className="tnum font-mono text-muted-foreground">#{token.id}</span>
                                   <span className="ml-2 text-faint">由 {token.created_by || "console"} 创建</span>
+                                  <span className="ml-2 text-faint">
+                                    {token.unlimited ? `已绑定 ${token.used_count} 台` : `已绑定 ${token.used_count}/${token.max_uses} 台`}
+                                  </span>
                                 </p>
                                 <p className="mt-0.5 min-w-0 break-all text-xs leading-relaxed text-faint">
-                                  有效至 {formatDateTime(token.expires_at_ms)}
-                                  {token.used_at_ms ? ` · 使用于 ${formatDateTime(token.used_at_ms)}` : ""}
+                                  {token.permanent ? "长期有效" : `有效至 ${formatDateTime(token.expires_at_ms)}`}
+                                  {token.last_used_at_ms ? ` · 最近使用 ${formatDateTime(token.last_used_at_ms)}` : ""}
                                 </p>
+                                {bound.length ? (
+                                  <p className="mt-0.5 min-w-0 break-all text-xs leading-relaxed text-muted-foreground">
+                                    绑定设备：
+                                    {bound
+                                      .map((item) => `${item.name || item.uid}（${formatDateTime(item.used_at_ms)}）`)
+                                      .join("、")}
+                                  </p>
+                                ) : null}
                               </div>
                               <Button
                                 size="sm"
@@ -655,10 +658,14 @@ export function SettingsPage() {
         onOpenChange={(open) => {
           if (!open) setPendingToken(null);
         }}
-        title="撤销安装令牌"
+        title="撤销安装票据"
         description={
           pendingToken
-            ? `撤销令牌 #${pendingToken.id}？已下载但尚未使用的安装脚本将立即失效（已安装完成的设备不受影响）。`
+            ? `撤销票据 #${pendingToken.id}？${
+                pendingToken.used_count > 0
+                  ? `它已绑定 ${pendingToken.used_count} 台设备：这些设备保持在线，但今后不能用该票据重新注册。`
+                  : "尚未绑定任何设备：带它的安装脚本立即失效。"
+              }`
             : ""
         }
         confirmLabel="撤销"

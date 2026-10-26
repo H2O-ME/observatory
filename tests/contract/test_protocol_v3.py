@@ -354,7 +354,9 @@ def test_delete_then_reinstall_with_fresh_token_reenrolls(tmp_dir: Path) -> None
         assert _link(client, new_device_token).status_code == 200
 
 
-def test_used_token_cannot_resurrect_tombstoned_uid(tmp_dir: Path) -> None:
+def test_revoked_ticket_cannot_resurrect_tombstoned_uid(tmp_dir: Path) -> None:
+    """撤销后的票据不能再复活任何设备（新语义：有效票据才代表管理员同意）。"""
+
     from tests.helpers import running_app  # noqa: PLC0415
 
     with running_app(tmp_dir) as client:
@@ -362,6 +364,9 @@ def test_used_token_cannot_resurrect_tombstoned_uid(tmp_dir: Path) -> None:
 
         consumed = _mint(client, headers)
         assert _enroll(client, "OBS-TOMB-A", consumed).status_code == 200
+        listed = client.get("/api/v1/install-tokens", headers=headers).json()["data"]["tokens"]
+        target = next(item for item in listed if item["used_count"] == 1)
+        assert client.delete(f"/api/v1/install-tokens/{target['id']}", headers=headers).status_code == 200
 
         assert _enroll(client, "OBS-TOMB-B", _mint(client, headers)).status_code == 200
         _age_out(tmp_dir, "OBS-TOMB-B")
@@ -369,7 +374,7 @@ def test_used_token_cannot_resurrect_tombstoned_uid(tmp_dir: Path) -> None:
 
         response = _enroll(client, "OBS-TOMB-B", consumed)
         assert response.status_code == 401, response.text
-        assert "删除" in response.text
+        assert "撤销" in response.text
 
 
 def test_tombstoned_uid_with_invalid_token_still_rejected(tmp_dir: Path) -> None:

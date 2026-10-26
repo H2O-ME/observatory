@@ -1,15 +1,17 @@
 """Installer artifacts, one-time install tokens and package downloads.
 
 A18 replaced the shared enrolment code inside the download with a
-single-use token:
+deployment ticket:
 
-* an admin mints a token (TTL, one use, bound to the first device that redeems
-  it); only the HMAC hash is stored;
-* downloading ``install.ps1`` / ``install.cmd`` only *validates* the token -- it
-  is consumed at enrolment (``console/enroll.py``), so a leaked download cannot
-  be replayed after the first machine uses it;
+* an admin mints a ticket (default: long-lived, unlimited machines); only the
+  HMAC hash is stored, and bindings live in ``install_token_uses``;
+* downloading ``install.ps1`` / ``install.cmd`` only *validates* the ticket -- it
+  is bound at enrolment (``console/enroll.py``); the same machine re-enrolling
+  never consumes another slot;
+* revoking a ticket is a soft delete: the row stays for audit and already
+  installed devices keep working, they just cannot use it to re-register;
 * the shared ``OBS_ENROLL_CODE`` path was removed in 0.3.1 together with the
-  0.2.x protocol layer; credentials are tokens only.
+  0.2.x protocol layer; credentials are tickets only.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import FileResponse, PlainTextResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.clock import now_ms
@@ -30,7 +32,7 @@ from ..core.config import resolve_version
 from ..core.crypto import device_token_hash
 from ..core.db import get_session
 from ..core.errors import AppError
-from ..core.models import InstallToken
+from ..core.models import Device, InstallToken, InstallTokenUse
 from . import audit
 from .deps import client_ip, get_settings, require_admin, store
 from .dto import stamp
@@ -42,10 +44,13 @@ log = logging.getLogger(__name__)
 router = APIRouter(tags=["install"], dependencies=[Depends(require_admin)], route_class=ConsoleRoute)
 public_router = APIRouter(prefix="/public", tags=["public"])
 
-DEFAULT_TOKEN_TTL_S = 1800
 MIN_TOKEN_TTL_S = 60
-MAX_TOKEN_TTL_S = 24 * 3600
-MAX_TOKEN_USES = 1
+MAX_TOKEN_TTL_S = 30 * 24 * 3600
+#: ``ttl_s = 0`` 表示长期有效（只受撤销约束），用于 U 盘/车队这种长期部署票据。
+PERMANENT_TTL_S = 0
+#: 默认不限绑定台数；``max_uses`` 是"可绑定设备数"，同一台设备重装不重复计数。
+DEFAULT_TOKEN_USES = 0
+MAX_TOKEN_USES = 1000
 
 
 def _template_dir() -> Path:
@@ -139,8 +144,15 @@ async def install_info(request: Request, session: AsyncSession) -> dict[str, Any
         (
             await session.execute(
                 select(func.count(InstallToken.id)).where(
-                    InstallToken.expires_at_ms > now_ms(),
-                    InstallToken.used_at_ms.is_(None),
+                    InstallToken.revoked_at_ms.is_(None),
+                    or_(
+                        InstallToken.expires_at_ms == 0,
+                        InstallToken.expires_at_ms > now_ms(),
+                    ),
+                    or_(
+                        InstallToken.max_uses == 0,
+                        InstallToken.used_count < InstallToken.max_uses,
+                    ),
                 )
             )
         ).scalar()
@@ -178,7 +190,7 @@ async def install_info(request: Request, session: AsyncSession) -> dict[str, Any
 
 
 async def validate_install_token(session: AsyncSession, token: str, *, settings: Any) -> InstallToken:
-    """Validate without consuming; consumption happens at enrolment (A18)."""
+    """Validate without consuming; consumption happens at enrolment."""
 
     digest = _token_hash(token, settings)
     row = (
@@ -186,10 +198,13 @@ async def validate_install_token(session: AsyncSession, token: str, *, settings:
     ).scalars().first()
     if row is None:
         raise AppError.auth("安装令牌无效")
-    if int(row.expires_at_ms or 0) <= now_ms():
+    if row.revoked_at_ms is not None:
+        raise AppError.auth("安装令牌已被撤销")
+    if not row.permanent and int(row.expires_at_ms or 0) <= now_ms():
         raise AppError.auth("安装令牌已过期")
-    if row.used_at_ms is not None and int(row.max_uses or 1) <= 1:
-        raise AppError.auth("安装令牌已被使用")
+    remaining = row.remaining_uses
+    if remaining is not None and remaining <= 0:
+        raise AppError.auth("安装令牌的可绑定设备数已用完")
     return row
 
 
@@ -218,23 +233,35 @@ async def create_install_token(
     settings = get_settings(request)
     values = await store().load(session)
     if payload.get("ttl_s") is None:
-        ttl_s = int(values.get("install_token_ttl_minutes", DEFAULT_TOKEN_TTL_S // 60)) * 60
+        ttl_s = int(values.get("install_token_ttl_minutes", 0) or 0) * 60
     else:
         try:
             ttl_s = int(payload["ttl_s"])
         except (TypeError, ValueError) as exc:
             raise AppError.bad_request("ttl_s 必须是整数") from exc
-    if ttl_s < MIN_TOKEN_TTL_S or ttl_s > MAX_TOKEN_TTL_S:
-        raise AppError.bad_request(f"ttl_s 必须在 {MIN_TOKEN_TTL_S}..{MAX_TOKEN_TTL_S} 秒之间")
+    if ttl_s != PERMANENT_TTL_S and not (MIN_TOKEN_TTL_S <= ttl_s <= MAX_TOKEN_TTL_S):
+        raise AppError.bad_request(
+            f"ttl_s 必须是 0（长期有效）或 {MIN_TOKEN_TTL_S}..{MAX_TOKEN_TTL_S} 秒"
+        )
+    if payload.get("max_uses") is None:
+        max_uses = DEFAULT_TOKEN_USES
+    else:
+        try:
+            max_uses = int(payload["max_uses"])
+        except (TypeError, ValueError) as exc:
+            raise AppError.bad_request("max_uses 必须是整数") from exc
+    if max_uses != 0 and not (1 <= max_uses <= MAX_TOKEN_USES):
+        raise AppError.bad_request(f"max_uses 必须是 0（不限）或 1..{MAX_TOKEN_USES}")
     plaintext = secrets.token_urlsafe(32)
     row = InstallToken(
         token_hash=_token_hash(plaintext, settings),
         created_by=str((await _admin_id(request)) or "console"),
         created_at_ms=now_ms(),
-        expires_at_ms=now_ms() + ttl_s * 1000,
+        expires_at_ms=now_ms() + ttl_s * 1000 if ttl_s else 0,
         used_at_ms=None,
         used_device_id=None,
-        max_uses=MAX_TOKEN_USES,
+        max_uses=max_uses,
+        used_count=0,
     )
     session.add(row)
     await session.commit()
@@ -243,13 +270,14 @@ async def create_install_token(
         session,
         action=audit.ACTION_INSTALL_TOKEN_CREATE,
         ip=client_ip(request),
-        detail={"token_id": row.id, "ttl_s": ttl_s},
+        detail={"token_id": row.id, "ttl_s": ttl_s, "max_uses": max_uses},
     )
     return stamp(
         {
             "id": row.id,
             "token": plaintext,
             "expires_at_ms": row.expires_at_ms,
+            "permanent": row.permanent,
             "max_uses": row.max_uses,
             "install_cmd_url": f"/api/v1/public/install.cmd?token={quote(plaintext, safe='')}",
             "install_ps1_url": f"/api/v1/public/install.ps1?token={quote(plaintext, safe='')}&download=1",
@@ -268,7 +296,45 @@ async def _admin_id(request: Request) -> str:
 @router.get("/install-tokens")
 @router.get("/install/tokens", include_in_schema=False)
 async def list_install_tokens(session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
-    rows = list((await session.execute(select(InstallToken).order_by(InstallToken.id.desc()))).scalars().all())
+    rows = list(
+        (
+            await session.execute(
+                select(InstallToken)
+                .where(InstallToken.revoked_at_ms.is_(None))
+                .order_by(InstallToken.id.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    # 绑定关系单独取一次，避免 N+1：每张票据"绑过哪些设备"是运维最关心的事实。
+    bound: dict[int, list[dict[str, Any]]] = {}
+    if rows:
+        pairs = (
+            await session.execute(
+                select(InstallTokenUse, Device)
+                # 左连接：设备被删除后绑定记录仍要显示，否则"已绑定 N 台"和
+                # 列表对不上（used_count 不会因为删设备而减少）。
+                .outerjoin(Device, Device.id == InstallTokenUse.device_id)
+                .where(InstallTokenUse.token_id.in_([row.id for row in rows]))
+                .order_by(InstallTokenUse.used_at_ms)
+            )
+        ).all()
+        for use, device in pairs:
+            bound.setdefault(use.token_id, []).append(
+                {
+                    "device_id": use.device_id,
+                    "uid": device.uid if device is not None else "",
+                    "name": (
+                        (device.name or device.hostname or device.uid)
+                        if device is not None
+                        else f"已删除的设备 #{use.device_id}"
+                    ),
+                    "deleted": device is None,
+                    "used_at_ms": use.used_at_ms,
+                    "ip": use.ip,
+                }
+            )
     return stamp(
         {
             "tokens": [
@@ -277,11 +343,18 @@ async def list_install_tokens(session: AsyncSession = Depends(get_session)) -> d
                     "created_by": row.created_by,
                     "created_at_ms": row.created_at_ms,
                     "expires_at_ms": row.expires_at_ms,
+                    "permanent": row.permanent,
                     "used_at_ms": row.used_at_ms,
                     "used_device_id": row.used_device_id,
                     "max_uses": row.max_uses,
-                    "expired": int(row.expires_at_ms or 0) <= now_ms(),
-                    "used": row.used_at_ms is not None,
+                    "unlimited": row.unlimited_uses,
+                    "used_count": int(row.used_count or 0),
+                    "remaining": row.remaining_uses,
+                    "last_used_at_ms": row.last_used_at_ms,
+                    "expired": not row.permanent and int(row.expires_at_ms or 0) <= now_ms(),
+                    "exhausted": row.remaining_uses == 0,
+                    "used": int(row.used_count or 0) > 0,
+                    "devices": bound.get(row.id, []),
                 }
                 for row in rows
             ]
@@ -297,17 +370,30 @@ async def delete_install_token(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     row = await session.get(InstallToken, token_id)
-    if row is None:
+    if row is None or row.revoked_at_ms is not None:
         raise AppError.gone("安装令牌不存在")
-    await session.delete(row)
+    # 软撤销：保留行与绑定记录。硬删除会让"这台机器靠哪张票据进来的"永久丢失，
+    # 而且会让管理员以为已经装好的设备不受影响（它的 config 里还留着该令牌）。
+    row.revoked_at_ms = now_ms()
     await session.commit()
+    bound = int(row.used_count or 0)
     await audit.record(
         session,
         action=audit.ACTION_INSTALL_TOKEN_DELETE,
         ip=client_ip(request),
-        detail={"token_id": token_id},
+        detail={"token_id": token_id, "used_count": bound},
     )
-    return stamp({"ok": True, "message": "安装令牌已撤销"})
+    return stamp(
+        {
+            "ok": True,
+            "message": (
+                f"安装令牌已撤销（曾绑定 {bound} 台设备；这些设备保持在线，"
+                "但不再能用它重新注册）"
+                if bound
+                else "安装令牌已撤销，未绑定的安装脚本立即失效"
+            ),
+        }
+    )
 
 
 @router.get("/install")
@@ -425,7 +511,6 @@ async def download_agent(
 
 
 __all__ = [
-    "DEFAULT_TOKEN_TTL_S",
     "MAX_TOKEN_USES",
     "install_info",
     "public_router",

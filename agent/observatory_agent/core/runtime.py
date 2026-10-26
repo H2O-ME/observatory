@@ -386,7 +386,7 @@ class ServiceRuntime:
         return str(config.enroll_code or os.environ.get("OBS_ENROLL_CODE", "")).strip()
 
     def _install_token(self) -> str:
-        """一次性安装令牌（A18）：安装器只传 ``--install-token``，不传注册码。"""
+        """部署票据（A18）：安装器只传 ``--install-token``，不传注册码。"""
 
         config = self._store.config
         return str(config.install_token or os.environ.get("OBS_INSTALL_TOKEN", "")).strip()
