@@ -7,7 +7,7 @@ import { legacyCss } from "./vite-plugin-legacy-css";
 import { legacyJs } from "./vite-plugin-legacy-js";
 
 // The console is served by the API container itself (data_dir/webui), so the
-// production build talks to the same origin. `npm run dev` proxies to a local
+// production build talks to the same origin. `pnpm dev` proxies to a local
 // or remote server instead, which keeps a single code path for API URLs.
 export default defineConfig({
   plugins: [react(), tailwindcss(), legacyCss(), legacyJs()],
@@ -37,7 +37,7 @@ export default defineConfig({
       },
     },
   },
-  // `npm run preview` serves the minified build through the same proxy, so the
+  // `pnpm preview` serves the minified build through the same proxy, so the
   // artifact that actually ships can be exercised against a real server without
   // having to trust its (usually self-signed) certificate in the browser.
   preview: {

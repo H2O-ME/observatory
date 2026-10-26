@@ -1042,7 +1042,7 @@ def test_a19_docs_and_version_consistency() -> None:
     assert "OBS_INSTALL_TOKEN_TTL_MINUTES" not in (root / "server/.env.example").read_text(encoding="utf-8")
     assert "OBS_INSTALL_TOKEN_TTL_MINUTES" not in docs["部署.md"]
 
-    # --check 必须覆盖 README/docs/package-lock，且当前仓库是同步的
+    # --check 必须覆盖 README/docs/README artwork，且当前仓库是同步的
     completed = subprocess.run(
         [sys.executable, str(root / "tools/set_version.py"), "--check"],
         cwd=str(root),

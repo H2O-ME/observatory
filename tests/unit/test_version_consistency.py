@@ -60,11 +60,10 @@ def test_set_version_targets_cover_the_copies() -> None:
         "server/observatory/core/config.py",
         "agent/observatory_agent/version.py",
         "webui/package.json",
-        "webui/package-lock.json",
     ):
         assert fragment.split("/")[-1] in source or fragment in source, fragment
     # TARGETS / PACKAGE_JSONS 结构仍在（W3 可能改为生成式，届时改测试并保留 --check 行为）
-    assert "TARGETS" in source and "PACKAGE_JSONS" in source and "PACKAGE_LOCK" in source
+    assert "TARGETS" in source and "PACKAGE_JSONS" in source
 
 
 def test_set_version_check_covers_readme_and_docs() -> None:

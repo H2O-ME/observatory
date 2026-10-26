@@ -8,7 +8,7 @@ Usage::
 
 The repository root ``VERSION`` file wins. The two ``FALLBACK_VERSION`` constants
 (server + agent) are rewritten to match so an offline build still reports the
-right number, the WebUI/agent package.json versions are kept in step, and the
+right number, the WebUI package.json version is kept in step, and the
 version statements in ``README.md`` / ``docs/*.md`` / README artwork are checked
 and synced (A19).
 """
@@ -63,40 +63,6 @@ DOC_PLACEHOLDER = re.compile(r"\{\{\s*VERSION\s*\}\}")
 #: 历史快照文档永久保留审计时的版本号（0.2.10 通读报告、0.3.0 契约规格），
 #: 不随 VERSION 漂移——它们是“当时约定”的证据，不是当前版本声明。
 HISTORICAL_DOCS = frozenset({"项目通读报告.md", "0.3.0-重构规格.md"})
-
-#: npm lockfile 的 version 字段跟随 package.json（顶层与 packages[""] 两处）。
-PACKAGE_LOCK = ROOT / "webui" / "package-lock.json"
-
-
-def _lock_versions(data: dict) -> list[str]:
-    found: list[str] = []
-    top = data.get("version")
-    if isinstance(top, str):
-        found.append(top)
-    packages = data.get("packages")
-    if isinstance(packages, dict):
-        root = packages.get("")
-        if isinstance(root, dict) and isinstance(root.get("version"), str):
-            found.append(root["version"])
-    return found
-
-
-def _sync_lock(version: str) -> bool:
-    if not PACKAGE_LOCK.exists():
-        return False
-    data = json.loads(PACKAGE_LOCK.read_text(encoding="utf-8"))
-    changed = False
-    if data.get("version") != version:
-        data["version"] = version
-        changed = True
-    root = data.get("packages", {}).get("") if isinstance(data.get("packages"), dict) else None
-    if isinstance(root, dict) and root.get("version") != version:
-        root["version"] = version
-        changed = True
-    if changed:
-        PACKAGE_LOCK.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="\n")
-    return changed
-
 
 def _doc_targets() -> list[Path]:
     targets = [README_PATH, *sorted(DOCS_DIR.glob("*.md")), *README_ASSETS]
@@ -194,9 +160,6 @@ def sync(version: str) -> list[str]:
             pkg_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="\n")
             changed.append(str(pkg_path.relative_to(ROOT)))
 
-    if _sync_lock(version):
-        changed.append(str(PACKAGE_LOCK.relative_to(ROOT)))
-
     changed.extend(_sync_docs(version))
     return changed
 
@@ -219,12 +182,6 @@ def check() -> int:
         data = json.loads(pkg_path.read_text(encoding="utf-8"))
         if data.get("version") != version:
             problems.append(f"{pkg_path.relative_to(ROOT)}: {data.get('version')} != {version}")
-    if PACKAGE_LOCK.exists():
-        lock_data = json.loads(PACKAGE_LOCK.read_text(encoding="utf-8"))
-        for found in _lock_versions(lock_data):
-            if found != version:
-                problems.append(f"{PACKAGE_LOCK.relative_to(ROOT)}: {found} != {version}")
-                break
     problems.extend(_check_docs(version))
     for problem in problems:
         print(f"DRIFT {problem}")

@@ -14,8 +14,8 @@
 #   sudo bash deploy/build-agent.sh                        # 在服务器上用 Wine 构建（兜底）
 #   sudo bash deploy/build-agent.sh --from-release v0.2.8  # 取 CI 已发布的 Release 资产
 #
-# 注意：`--from-release` 在私有仓库下需要凭据（gh 已登录，或提供令牌），
-# 因此正常情况下请优先用 deploy/fetch-agent-package.sh（复用已有 git 访问）。
+# 注意：`--from-release` 在私有仓库下需要凭据（gh 已登录，或提供令牌）；
+# 正常链路里服务器侧由 deploy/pull-and-restart.sh 用 .gh_read_token 自行下载登记。
 #
 # 无论哪种方式，产物都会：校验版本号 -> 放进数据卷 -> 调用 CLI 登记。
 # 登记之后，旧版本受控端会在下一次心跳自动更新，不需要重新安装。
@@ -51,21 +51,23 @@ register_package() {
   [[ "$name" == observatory-agent-*.zip ]] || die "包名必须形如 observatory-agent-<版本>.zip"
 
   # 完整性：这个 zip 会被推给所有在线受控端自动执行，登记前必须校验。
-  # 优先与 agent-dist 分支的 SHA256SUMS 比对（fetch-agent-package.sh 同源）；
-  # 分支不可用时退化为本地重算 + 明示指纹（人工核对），绝不静默跳过。
-  expected="$(git show "refs/remotes/origin/agent-dist:SHA256SUMS" 2>/dev/null \
-    | awk -v n="$name" '{ f=$2; sub(/^\*/,"",f); if (f==n) { print $1; exit } }' || true)"
+  # --from-release 模式下与 Release 的 SHA256SUMS 比对；本地 Wine 构建没有
+  # 外部参照，退化为本地重算 + 明示指纹（人工核对），绝不静默跳过。
+  expected=""
+  if [[ -f "$OUT_DIR/SHA256SUMS" ]]; then
+    expected="$(awk -v n="$name" '{ f=$2; sub(/^\*/,"",f); if (f==n) { print $1; exit } }' "$OUT_DIR/SHA256SUMS")"
+  fi
   actual="$(sha256sum "$zip" | cut -d' ' -f1)"
   if [[ -n "$expected" ]]; then
-    [[ "$expected" == "$actual" ]] || die "sha256 与 agent-dist 分支不匹配：分支=$expected 本地=$actual"
-    log "sha256 与 agent-dist 一致：$actual"
+    [[ "$expected" == "$actual" ]] || die "sha256 与 Release SHA256SUMS 不匹配：清单=$expected 本地=$actual"
+    log "sha256 与 Release SHA256SUMS 一致：$actual"
   else
-    warn "agent-dist 无 SHA256SUMS 可比对。本地 sha256=$actual（请人工核对后再信任）"
+    warn "无 SHA256SUMS 可比对。本地 sha256=$actual（请人工核对后再信任）"
   fi
 
   log "登记 $name"
   # 不能直接 docker cp 到 /data/packages：文件会归 root，而容器以 10001 运行，
-  # package-add 复制时会 PermissionError（与 fetch-agent-package.sh 的教训一致）。
+  # package-add 复制时会 PermissionError（容器以 10001 运行，见 compose）。
   # 走 /data/tmp 中转 + 预清理同名的旧 root 属主文件。
   local remote_tmp="/data/tmp/${name}"
   docker cp "$zip" "observatory-api:${remote_tmp}" \
