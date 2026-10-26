@@ -57,7 +57,8 @@ done
 [[ "$fetch_ok" == "1" ]] || die "git fetch 连续失败；检查网络/代理后重跑"
 local_head="$(git rev-parse HEAD)"
 remote_head="$(git rev-parse origin/main)"
-[[ "$local_head" == "$remote_head" ]] || die "本地 main 与 origin/main 不一致（ahead/behind）；先 push/pull"
+behind="$(git rev-list --count HEAD..origin/main)"
+[[ "$behind" == "0" ]] || die "本地落后 origin/main $behind 个提交；先 pull --rebase（领先没关系，本脚本会连 tag 一起推）"
 
 # ---- 版本 bump ------------------------------------------------------------
 log "bump 版本（$BUMP）…"
