@@ -370,6 +370,11 @@ rollback() {
   if [[ -n "${OLD_COMMIT:-}" ]]; then
     if git -C "$APP_DIR" reset --hard "$OLD_COMMIT" >/dev/null 2>&1; then
       log "代码已回退到 ${OLD_COMMIT:0:12}"
+      # 老提交里可能还没有部署脚本本身（CI 直推管线的首个版本）——
+      # 从目标 tag 恢复，避免回滚把 deploy.sh/ci-gate.sh 一起删掉、网关失联。
+      if [[ ! -f "$APP_DIR/deploy/deploy.sh" && -n "${TARGET_TAG:-}" ]]; then
+        git -C "$APP_DIR" checkout "$TARGET_TAG" -- deploy/deploy.sh deploy/ci-gate.sh 2>/dev/null || true
+      fi
     else
       warn "git reset --hard $OLD_COMMIT 失败；仍尝试旧镜像回滚"
     fi
@@ -562,11 +567,16 @@ cmd_phase2() {
   status_write "phase=preflight" "result=pending" "tag=$TARGET_TAG" "commit=$TARGET_COMMIT" \
     "started=$DEPLOY_STARTED" "log=$LOG_FILE"
 
-  local avail_mb
-  avail_mb="$(df -PM /var/lib/docker 2>/dev/null | awk 'NR==2{print $4}' || echo 0)"
-  if (( avail_mb < 2048 )); then
+  # 磁盘余量：df 读不到（data-root 路径不存在等）只 warn 不拦——
+  # 把"探测失败"当"0MB"会误杀部署（2026-10-26 v0.3.7 首发教训）。
+  avail_mb="$(df -PM /var/lib/docker 2>/dev/null | awk 'NR==2{print $4}' || true)"
+  if [[ -z "$avail_mb" ]]; then
+    avail_mb="$(df -PM /var/lib 2>/dev/null | awk 'NR==2{print $4}' || true)"
+  fi
+  if [[ -n "$avail_mb" ]] && (( avail_mb < 2048 )); then
     rollback "磁盘剩余 ${avail_mb}MB 不足 2GB，拒绝部署"
   fi
+  [[ -n "$avail_mb" ]] && log "磁盘剩余 ${avail_mb}MB" || warn "无法探测磁盘余量（继续部署）"
 
   ensure_cert_owner || rollback "证书属主/存在性校正失败"
   ensure_volume_owner || rollback "数据卷属主校正失败"
