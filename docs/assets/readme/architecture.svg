@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="arch-title arch-desc">
+  <title id="arch-title">Observatory architecture: one envelope, two carriers</title>
+  <desc id="arch-desc">The React console talks to a FastAPI control server over HTTPS and WSS. The server talks to the Windows agent over a single envelope link, carried by WebSocket or HTTP long polling. The agent's SYSTEM service and per-session workers share the same envelope over named pipes.</desc>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L8 4 L0 8 z" fill="#52525b"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="420" rx="24" fill="#09090b"/>
+  <rect x="0.5" y="0.5" width="1199" height="419" rx="24" fill="none" stroke="#27272a"/>
+
+  <text x="48" y="52" fill="#a1a1aa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="18" letter-spacing="2.4">ONE ENVELOPE · TWO CARRIERS</text>
+  <text x="48" y="98" fill="#fafafa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="38" font-weight="700" letter-spacing="-0.8">一条链路，从控制台到用户会话</text>
+  <text x="1152" y="96" text-anchor="end" fill="#71717a" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">v3 · server_time_ms · deadline_ms</text>
+
+  <!-- console -->
+  <g id="console">
+    <rect x="48" y="132" width="320" height="198" rx="14" fill="#111113" stroke="#27272a"/>
+    <text x="64" y="162" fill="#71717a" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" letter-spacing="1.6">01 / CONSOLE</text>
+    <text x="64" y="192" fill="#fafafa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="22" font-weight="600">控制台 WebUI</text>
+    <text x="64" y="228" fill="#d4d4d8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="18">React 18 · Vite · shadcn/ui</text>
+    <text x="64" y="256" fill="#a1a1aa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="18">设备墙 · 时间线 · 文件</text>
+    <text x="64" y="284" fill="#a1a1aa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="18">Chromium 81 兼容</text>
+    <text x="64" y="312" fill="#71717a" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="18">单页应用随镜像交付</text>
+  </g>
+
+  <line x1="368" y1="231" x2="440" y2="231" stroke="#52525b" stroke-width="1.4" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+  <text x="404" y="214" text-anchor="middle" fill="#71717a" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16">HTTPS/WSS</text>
+
+  <!-- server -->
+  <g id="server">
+    <rect x="440" y="132" width="320" height="198" rx="14" fill="#111113" stroke="#27272a"/>
+    <text x="456" y="162" fill="#71717a" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" letter-spacing="1.6">02 / CONTROL SERVER</text>
+    <text x="456" y="192" fill="#fafafa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="22" font-weight="600">FastAPI 控制服务器</text>
+    <text x="456" y="228" fill="#d4d4d8" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">link · presence · media</text>
+    <text x="456" y="256" fill="#a1a1aa" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">server_time_ms / deadline_ms</text>
+    <text x="456" y="284" fill="#a1a1aa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="18">唯一在线判定</text>
+    <text x="456" y="312" fill="#71717a" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="18">SQLite · 帧存储 · 归档</text>
+  </g>
+
+  <line x1="760" y1="231" x2="832" y2="231" stroke="#52525b" stroke-width="1.4" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+  <text x="796" y="214" text-anchor="middle" fill="#71717a" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16">v3 信封</text>
+  <text x="796" y="252" text-anchor="middle" fill="#52525b" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="16">WS / 轮询</text>
+
+  <!-- agent -->
+  <g id="agent">
+    <rect x="832" y="132" width="320" height="198" rx="14" fill="#111113" stroke="#27272a"/>
+    <text x="848" y="162" fill="#71717a" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" letter-spacing="1.6">03 / WINDOWS AGENT</text>
+    <text x="848" y="192" fill="#fafafa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="22" font-weight="600">受控端</text>
+    <text x="848" y="228" fill="#d4d4d8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="18">SYSTEM：链路 + outbox</text>
+    <text x="848" y="256" fill="#a1a1aa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="18">worker：采集 / 输入 / 文件</text>
+    <text x="848" y="284" fill="#a1a1aa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="18">命名管道 · 同一信封</text>
+    <text x="848" y="312" fill="#71717a" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="18">自动更新 · 远程卸载</text>
+  </g>
+
+  <line x1="48" y1="352" x2="1152" y2="352" stroke="#27272a"/>
+  <text x="48" y="382" fill="#71717a" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16">POST /api/v1/agent/link · WS /api/v1/agent/link · POST /api/v1/agent/frames</text>
+  <text x="48" y="406" fill="#3f3f46" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" letter-spacing="1.2">AUTHORIZED DEVICES ONLY</text>
+  <text x="1152" y="406" text-anchor="end" fill="#3f3f46" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" letter-spacing="0.8">OBSERVATORY 0.3.7</text>
+</svg>

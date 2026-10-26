@@ -9,7 +9,8 @@ Usage::
 The repository root ``VERSION`` file wins. The two ``FALLBACK_VERSION`` constants
 (server + agent) are rewritten to match so an offline build still reports the
 right number, the WebUI/agent package.json versions are kept in step, and the
-version statements in ``README.md`` / ``docs/*.md`` are checked and synced (A19).
+version statements in ``README.md`` / ``docs/*.md`` / README artwork are checked
+and synced (A19).
 """
 
 from __future__ import annotations
@@ -44,6 +45,15 @@ DOCS_DIR = ROOT / "docs"
 
 #: README 的权威声明：`当前版本：**0.3.0**`
 README_VERSION = re.compile(r"当前版本：\*\*([0-9]+\.[0-9]+\.[0-9]+)\*\*")
+#: README 顶部的静态版本徽章：`version-0.3.0-111111`
+README_BADGE_VERSION = re.compile(r"version-([0-9]+\.[0-9]+\.[0-9]+)-[0-9a-fA-F]{6}")
+#: README 主图里直接展示的版本号（hero 的 chip 与 architecture 页脚）。
+README_ASSETS = (
+    ROOT / "docs" / "assets" / "readme" / "hero.svg",
+    ROOT / "docs" / "assets" / "readme" / "architecture.svg",
+)
+README_ASSET_VERSION = re.compile(r"(?<=>)([0-9]+\.[0-9]+\.[0-9]+)(?=</text>)")
+README_ASSET_FOOTER = re.compile(r"OBSERVATORY ([0-9]+\.[0-9]+\.[0-9]+)")
 #: 文档标题里的版本：`# 部署（Observatory 0.3.0）`
 DOC_HEADING_VERSION = re.compile(r"^#\s+.*（Observatory\s+([0-9]+\.[0-9]+\.[0-9]+)）", re.MULTILINE)
 #: 文档顶部的版本块：`> 版本：0.3.0（...）`
@@ -89,13 +99,15 @@ def _sync_lock(version: str) -> bool:
 
 
 def _doc_targets() -> list[Path]:
-    targets = [README_PATH, *sorted(DOCS_DIR.glob("*.md"))]
+    targets = [README_PATH, *sorted(DOCS_DIR.glob("*.md")), *README_ASSETS]
     return [path for path in targets if path.exists()]
 
 
 def _version_patterns(path: Path) -> list[re.Pattern[str]]:
     if path == README_PATH:
-        return [README_VERSION]
+        return [README_VERSION, README_BADGE_VERSION]
+    if path in README_ASSETS:
+        return [README_ASSET_VERSION, README_ASSET_FOOTER]
     if path.name in HISTORICAL_DOCS:
         return []
     return [DOC_HEADING_VERSION, DOC_HEADER_VERSION]
@@ -220,7 +232,7 @@ def check() -> int:
         print(f"\n{len(problems)} place(s) out of sync with VERSION={version}.")
         return 1
     print(f"VERSION={version} consistent everywhere.")
-    print("checked: VERSION, FALLBACK_VERSION x2, webui/package.json, webui/package-lock.json, README.md, docs/*.md")
+    print("checked: VERSION, FALLBACK_VERSION x2, webui/package.json, webui/package-lock.json, README.md, docs/*.md, README artwork")
     return 0
 
 

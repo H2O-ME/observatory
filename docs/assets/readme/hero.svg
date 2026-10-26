@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="hero-title hero-desc">
+  <title id="hero-title">Observatory — self-hosted device observation and remote control</title>
+  <desc id="hero-desc">A dark mission-control hero. On the left: the Observatory wordmark, the running version badge, and the promise of one control server for authorized Windows devices. On the right: a schematic console showing a device wall and a timeline.</desc>
+
+  <rect width="1200" height="420" rx="24" fill="#09090b"/>
+  <rect x="0.5" y="0.5" width="1199" height="419" rx="24" fill="none" stroke="#27272a"/>
+
+  <!-- left: identity and promise -->
+  <g id="title-block">
+    <text x="64" y="66" fill="#a1a1aa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="18" letter-spacing="2.6">SELF-HOSTED · MISSION CONTROL</text>
+    <text x="62" y="152" fill="#fafafa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="72" font-weight="700" letter-spacing="-2.2">OBSERVATORY</text>
+    <text x="64" y="198" fill="#e4e4e7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="27" font-weight="500">自托管设备观测与远程控制</text>
+    <text x="64" y="236" fill="#a1a1aa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="20">一台控制服务器 · Windows 受控端 · 一块控制台</text>
+    <text x="64" y="272" fill="#d4d4d8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="20">WS 与 HTTP 长轮询只是同一条链路的两个载体。</text>
+
+    <g id="meta-chips">
+      <rect x="64" y="300" width="164" height="40" rx="10" fill="#111113" stroke="#27272a"/>
+      <circle cx="82" cy="320" r="4" fill="#34d399"/>
+      <text x="94" y="326" fill="#fafafa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" font-weight="600">0.3.7</text>
+      <text x="140" y="326" fill="#a1a1aa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="16">运行中</text>
+
+      <rect x="240" y="300" width="164" height="40" rx="10" fill="#111113" stroke="#27272a"/>
+      <text x="254" y="326" fill="#a1a1aa" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16">WS / HTTP</text>
+      <text x="338" y="326" fill="#fafafa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="16">单链路</text>
+
+      <rect x="416" y="300" width="184" height="40" rx="10" fill="#111113" stroke="#27272a"/>
+      <text x="430" y="326" fill="#a1a1aa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16">Chromium 81</text>
+      <text x="526" y="326" fill="#71717a" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="16">控制台</text>
+    </g>
+  </g>
+
+  <!-- right: schematic of the real console -->
+  <g id="console-schematic">
+    <rect x="640" y="42" width="512" height="304" rx="18" fill="#111113" stroke="#27272a"/>
+    <line x1="640" y1="84" x2="1152" y2="84" stroke="#27272a"/>
+
+    <circle cx="664" cy="63" r="3.5" fill="#3f3f46"/>
+    <circle cx="678" cy="63" r="3.5" fill="#3f3f46"/>
+    <circle cx="692" cy="63" r="3.5" fill="#3f3f46"/>
+    <text x="714" y="68" fill="#a1a1aa" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16">Observatory / wall</text>
+
+    <rect x="1060" y="52" width="76" height="24" rx="12" fill="#0b2e26"/>
+    <circle cx="1072" cy="64" r="3" fill="#34d399"/>
+    <text x="1080" y="69" fill="#34d399" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" font-weight="600">LIVE</text>
+
+    <!-- side rail -->
+    <rect x="640" y="84" width="88" height="262" fill="#0c0c0e"/>
+    <line x1="728" y1="84" x2="728" y2="346" stroke="#27272a"/>
+    <rect x="650" y="104" width="68" height="32" rx="6" fill="#18181b"/>
+    <rect x="650" y="110" width="2" height="20" rx="1" fill="#fafafa"/>
+    <text x="664" y="125" fill="#fafafa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="18">概览</text>
+    <text x="664" y="163" fill="#71717a" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="18">实时</text>
+    <text x="664" y="197" fill="#71717a" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="18">时间线</text>
+    <text x="664" y="231" fill="#71717a" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="18">文件</text>
+    <text x="664" y="265" fill="#71717a" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="18">设置</text>
+
+    <!-- device wall -->
+    <text x="748" y="120" fill="#fafafa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="22" font-weight="600">设备墙</text>
+    <rect x="830" y="102" width="56" height="24" rx="7" fill="#18181b" stroke="#27272a"/>
+    <text x="840" y="118" fill="#a1a1aa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="16">3 台</text>
+    <rect x="894" y="102" width="92" height="24" rx="7" fill="#0b2e26"/>
+    <circle cx="906" cy="114" r="3" fill="#34d399"/>
+    <text x="914" y="118" fill="#34d399" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="16">WS 实时</text>
+
+    <g transform="translate(748 140)">
+      <rect width="190" height="96" rx="10" fill="#18181b" stroke="#27272a"/>
+      <rect x="8" y="8" width="174" height="50" rx="6" fill="#0c0c0e"/>
+      <rect x="16" y="16" width="58" height="34" rx="3" fill="#1f2937"/>
+      <rect x="82" y="16" width="92" height="14" rx="3" fill="#27272a"/>
+      <rect x="82" y="36" width="66" height="6" rx="3" fill="#3f3f46"/>
+      <text x="8" y="78" fill="#fafafa" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" font-weight="600">DESKTOP-01</text>
+      <circle cx="12" cy="90" r="3" fill="#34d399"/>
+      <text x="22" y="94" fill="#a1a1aa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="16">在线 · WS</text>
+    </g>
+
+    <g transform="translate(956 140)">
+      <rect width="190" height="96" rx="10" fill="#18181b" stroke="#27272a"/>
+      <rect x="8" y="8" width="174" height="50" rx="6" fill="#0c0c0e"/>
+      <rect x="16" y="16" width="74" height="34" rx="3" fill="#27272a"/>
+      <rect x="98" y="16" width="76" height="8" rx="3" fill="#3f3f46"/>
+      <rect x="98" y="30" width="52" height="6" rx="3" fill="#3f3f46"/>
+      <text x="8" y="78" fill="#fafafa" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" font-weight="600">LAPTOP-02</text>
+      <circle cx="12" cy="90" r="3" fill="#fb923c"/>
+      <text x="22" y="94" fill="#a1a1aa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="16">受限 · 轮询</text>
+    </g>
+
+    <!-- timeline -->
+    <text x="748" y="274" fill="#a1a1aa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="20">时间线</text>
+    <text x="812" y="274" fill="#52525b" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif" font-size="16">按小时分组</text>
+
+    <g transform="translate(748 286)">
+      <rect width="76" height="50" rx="6" fill="#18181b" stroke="#34d399"/>
+      <rect x="8" y="8" width="60" height="26" rx="3" fill="#0c0c0e"/>
+      <rect x="8" y="40" width="34" height="3" rx="1.5" fill="#3f3f46"/>
+      <rect x="54" y="40" width="14" height="3" rx="1.5" fill="#3f3f46"/>
+
+      <g transform="translate(90 0)">
+        <rect width="76" height="50" rx="6" fill="#18181b" stroke="#27272a"/>
+        <rect x="8" y="8" width="60" height="26" rx="3" fill="#0c0c0e"/>
+        <rect x="8" y="40" width="34" height="3" rx="1.5" fill="#3f3f46"/>
+        <rect x="54" y="40" width="14" height="3" rx="1.5" fill="#3f3f46"/>
+      </g>
+      <g transform="translate(180 0)">
+        <rect width="76" height="50" rx="6" fill="#18181b" stroke="#27272a"/>
+        <rect x="8" y="8" width="60" height="26" rx="3" fill="#0c0c0e"/>
+        <rect x="8" y="40" width="34" height="3" rx="1.5" fill="#3f3f46"/>
+        <rect x="54" y="40" width="14" height="3" rx="1.5" fill="#3f3f46"/>
+      </g>
+      <g transform="translate(270 0)">
+        <rect width="76" height="50" rx="6" fill="#18181b" stroke="#27272a"/>
+        <rect x="8" y="8" width="60" height="26" rx="3" fill="#0c0c0e"/>
+        <rect x="8" y="40" width="34" height="3" rx="1.5" fill="#3f3f46"/>
+        <rect x="54" y="40" width="14" height="3" rx="1.5" fill="#3f3f46"/>
+      </g>
+    </g>
+  </g>
+
+  <!-- footer -->
+  <line x1="64" y1="362" x2="1136" y2="362" stroke="#27272a"/>
+  <text x="64" y="392" fill="#52525b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" letter-spacing="1.2">AUTHORIZED DEVICES ONLY</text>
+  <text x="1136" y="392" text-anchor="end" fill="#52525b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" letter-spacing="0.8">OBSERVATORY 0.3.7</text>
+</svg>
