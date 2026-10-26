@@ -124,15 +124,14 @@ def test_deploy_worker_preflights_non_root_ownership_and_fails_closed() -> None:
     assert "/data/webui/.version" in deploy
 
 
-def test_ci_gate_whitelists_only_release_verbs() -> None:
-    """CI 部署密钥是 forced-command 网关：只能点火/查状态/看日志。"""
+def test_release_script_runs_tests_locally_and_deploys_via_ssh() -> None:
+    """CI 已删除（0.3.7 末）：发布脚本必须自带本地测试与 SSH 部署盯守。"""
 
-    gate = _read("ci-gate.sh")
-    assert "SSH_ORIGINAL_COMMAND" in gate
-    assert "ci-gate: 拒绝命令" in gate
-    assert "no-pty" in gate
-    # tag 形态严格校验（拒绝元字符进入 deploy.sh 参数位）
-    assert "v[0-9]" in gate and "exit 127" in gate
+    release = (REPO_ROOT / "tools" / "release.sh").read_text(encoding="utf-8")
+    assert "pytest tests/unit tests/integration tests/contract tests/acceptance" in release
+    assert "deploy.sh release $TAG" in release
+    assert "result=failed" in release
+    assert "actions/runs" not in release, "不应再依赖 GitHub Actions"
 
 
 def test_nginx_templates_log_origin_traffic_for_521_diagnosis() -> None:

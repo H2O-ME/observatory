@@ -151,9 +151,9 @@ sudo REPO_URL=git@github.com:<you>/observatory.git \
 tools/release.sh
 ```
 
-0.3.7 起部署是 **CI 直推**：`tools/release.sh` 打 tag → Actions 全门禁（含 Windows
-受控端构建）→ `deploy` job SSH 点火服务器 `deploy/deploy.sh`（快备份、幂等 no-op、
-多点健康验证、失败自动回滚、熔断）。`main` 普通推送只跑测试不部署。
+0.3.7 起没有 CI：`tools/release.sh` 本地测试 → tag → push → SSH 触发服务器
+`deploy/deploy.sh`（快备份、幂等 no-op、多点健康验证、失败自动回滚、熔断）。
+受控端 exe 也是本地构建（`--agent`）。
 详见 [docs/发布与更新链路.md](docs/发布与更新链路.md)（手工兜底与排障见 [docs/部署.md](docs/部署.md)）。
 
 ## 容器与安全默认值

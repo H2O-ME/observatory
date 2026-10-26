@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 一键发布（本机入口）：版本 bump → 提交 → 打 tag → 推送 → 盯 CI → 盯生产部署。
+# 一键发布（本机入口，0.3.7 起 CI 已删除、全本地）：版本 bump → 本地测试 →
+# 提交 → 打 tag → 推送 → SSH 触发服务器部署 → 盯到结束。
 #
 #   tools/release.sh                # patch +1（0.3.7 → 0.3.8）
 #   tools/release.sh minor          # minor +1
@@ -31,6 +32,7 @@ BUMP="patch"
 MSG=""
 WATCH=1
 RUN_TESTS=1
+BUILD_AGENT=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     patch|minor|major) BUMP="$1"; shift ;;
@@ -38,6 +40,7 @@ while [[ $# -gt 0 ]]; do
     -m|--message) MSG="${2:-}"; shift 2 ;;
     --no-watch) WATCH=0; shift ;;
     --no-test) RUN_TESTS=0; shift ;;
+    --agent) BUILD_AGENT=1; shift ;;
     -h|--help) usage ;;
     *) die "未知参数：$1（--help 看用法）" ;;
   esac
@@ -124,52 +127,52 @@ for i in 1 2 3; do
 done
 [[ "$push_ok" == "1" ]] || die "推送连续失败（令牌过期/无 workflow 权限/网络）"
 unset push_url
-log "已推送 main + $TAG → GitHub；CI 开始跑全门禁"
+log "已推送 main + $TAG → GitHub"
 
-[[ "$WATCH" == "1" ]] || { log "--no-watch：到此为止。部署结果看 Actions 的 deploy job。"; exit 0; }
+# ---- 受控端 exe：本地构建（--agent 时），scp 到服务器待登记 -----------------
+if [[ "$BUILD_AGENT" == "1" ]]; then
+  log "本地构建受控端 exe（PyInstaller）…"
+  pwsh -NoProfile -File agent/build/build.ps1 || die "受控端本地构建失败"
+  zip="agent/dist/observatory-agent-$VER.zip"
+  [[ -f "$zip" ]] || die "构建产物缺失：$zip"
+  log "上传受控端包到服务器（$(du -h "$zip" | cut -f1)）…"
+  for i in 1 2 3; do
+    if scp -q -o IdentitiesOnly=yes -o ConnectTimeout=15 -i "$SSH_KEY" -P "$SSH_PORT" \
+      "$zip" "$SSH_USER@$SSH_HOST:/opt/observatory/agent/dist/"; then break; fi
+    warn "scp 失败（第 $i/3 次）"; sleep 8
+  done
+fi
 
-# ---- 盯 CI（含 deploy job，一次 run 的 conclusion 覆盖全部 job）------------
-log "盯 CI run（head=$local_head，超时 $((CI_TIMEOUT_S / 60)) 分钟）…"
-deadline=$(( $(date +%s) + CI_TIMEOUT_S ))
-run_id=""
-while (( $(date +%s) < deadline )); do
-  sleep 20
-  resp="$(curl -fsS --max-time 20 \
-    -H "Authorization: Bearer $TOKEN" \
-    -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/repos/${REPO_SLUG}/actions/runs?head_sha=${local_head}" 2>/dev/null || true)"
-  run_id="$(python -c "
-import json,sys
-try:
-    d=json.loads(sys.stdin.read() or '{}')
-    runs=[r for r in d.get('workflow_runs',[]) if r.get('name')=='build' or 'build' in (r.get('path') or '')]
-    print(runs[0]['id'] if runs else '')
-except Exception:
-    print('')
-" <<<"$resp")"
-  [[ -n "$run_id" ]] && break
-done
-[[ -n "$run_id" ]] || die "找不到 CI run（tag 是否推上去了？Actions 是否被禁用？）"
+[[ "$WATCH" == "1" ]] || { log "--no-watch：到此为止。手动部署：ssh obs -- bash /opt/observatory/deploy/deploy.sh release $TAG"; exit 0; }
 
-conclusion=""
-while (( $(date +%s) < deadline )); do
-  line="$(curl -fsS --max-time 20 \
-    -H "Authorization: Bearer $TOKEN" \
-    -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/repos/${REPO_SLUG}/actions/runs/${run_id}" 2>/dev/null \
-    | python -c "import json,sys; d=json.load(sys.stdin); print(d.get('status',''), d.get('conclusion',''))" 2>/dev/null || echo '')"
-  status="${line%% *}"
-  echo "  [$(date +%H:%M:%S)] CI $line"
-  if [[ "$status" == "completed" ]]; then
-    conclusion="${line#* }"
+# ---- 触发服务器部署（GitHub Actions 已删除；服务器直接拉 tag 部署）---------
+log "SSH 触发生产部署：deploy.sh release $TAG"
+for i in 1 2 3; do
+  if ssh -o IdentitiesOnly=yes -o ConnectTimeout=15 -i "$SSH_KEY" -p "$SSH_PORT" \
+    "$SSH_USER@$SSH_HOST" "bash /opt/observatory/deploy/deploy.sh release $TAG" 2>&1; then
     break
   fi
-  sleep 30
+  warn "SSH 点火失败（第 $i/3 次，代理抖动？）8 秒后重试"
+  sleep 8
 done
-if [[ "$conclusion" != "success" ]]; then
-  die "CI 结论：${conclusion:-unknown}（run $run_id）——生产未动，去 Actions 看红灯 job"
-fi
-log "CI 全绿（含 deploy job 的服务器部署）"
+
+# 盯服务器状态文件直到 done（含 docker build，给 35 分钟）
+deadline=$(( $(date +%s) + CI_TIMEOUT_S ))
+while (( $(date +%s) < deadline )); do
+  sleep 25
+  st="$(ssh -o IdentitiesOnly=yes -o ConnectTimeout=15 -i "$SSH_KEY" -p "$SSH_PORT" \
+    "$SSH_USER@$SSH_HOST" "cat /opt/observatory/deploy.status" 2>/dev/null | tr '\n' ' ')"
+  echo "  [$(date +%H:%M:%S)] $st"
+  if grep -q "result=success" <<<"$st"; then
+    log "服务器部署成功"
+    break
+  fi
+  if grep -q "result=failed" <<<"$st"; then
+    ssh -o IdentitiesOnly=yes -o ConnectTimeout=15 -i "$SSH_KEY" -p "$SSH_PORT" \
+      "$SSH_USER@$SSH_HOST" "bash /opt/observatory/deploy/deploy.sh logs 80" >&2 || true
+    die "服务器部署失败（已自动回滚；日志见上）"
+  fi
+done
 
 # ---- 终验 -----------------------------------------------------------------
 log "生产终验…"
