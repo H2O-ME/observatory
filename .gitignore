@@ -54,3 +54,14 @@ tmp_w0/
 tmp_w1/
 # win_smoke 本机冒烟产物（tools/win_smoke.py 的运行目录）
 .win-smoke/
+
+# ---- 本机一次性运维脚本与状态（含服务器信息，绝不入库） ----
+await_deploy.sh
+await_deploy.status
+
+# ---- 本机工具缓存 ----
+.tmp_pip/
+.w0probe/
+pytest-cache-files-*/
+.ruff_cache/
+.pytest_cache/
