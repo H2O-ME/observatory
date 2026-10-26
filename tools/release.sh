@@ -65,7 +65,14 @@ log "bump 版本（$BUMP）…"
 if [[ "$BUMP" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   python tools/set_version.py "$BUMP"
 else
-  python tools/set_version.py "--$BUMP"
+  # set_version.py 只认 --bump 和显式版本号；minor/major 在这里算好再传
+  cur="$(tr -d '[:space:]' < VERSION)"
+  IFS=. read -r ma mi pa <<<"$cur"
+  case "$BUMP" in
+    patch) python tools/set_version.py "$ma.$mi.$((pa + 1))" ;;
+    minor) python tools/set_version.py "$ma.$((mi + 1)).0" ;;
+    major) python tools/set_version.py "$((ma + 1)).0.0" ;;
+  esac
 fi
 python tools/set_version.py --check || die "版本副本不一致（set_version --check 失败）"
 VER="$(tr -d '[:space:]' < VERSION)"
