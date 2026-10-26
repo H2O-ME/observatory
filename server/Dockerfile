@@ -20,7 +20,7 @@ RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
 # lockfile 失配必须让构建失败（与 CI 的 F62 红线一致）——回退安装会在生产
 # 镜像里拉入从未验证过的依赖树（供应链漂移），绝不允许静默发生。
 RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
-    pnpm install --frozen-lockfile --no-fund --no-audit
+    pnpm install --frozen-lockfile
 COPY webui/ ./
 RUN pnpm run build
 
