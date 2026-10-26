@@ -33,13 +33,11 @@ function isTabValue(value: string): value is TabValue {
 }
 
 /**
- * Device shell（0.4 重写）：mission-control hero + 遥测条 + 自滚动的 tab 条。
+ * Device shell: identity hero, telemetry strip, then a scrollable tab strip.
  *
  * The active tab lives in the URL (`/device/:uid/<tab>`), so a link to the live
  * view stays a link to the live view after a reload. The 0.2.x URLs (`/` and
- * `/devices/:uid`) are served by the same component. The tab strip scrolls
- * inside itself only — never the page — and the trigger heights are driven
- * inline because the shared Tabs primitive pins a 32px list height.
+ * `/devices/:uid`) are served by the same component.
  */
 export function DevicePage() {
   const params = useParams();
@@ -51,7 +49,6 @@ export function DevicePage() {
   const viewport = useViewport();
   const connected = useLive((state) => state.connected);
   const watch = viewport === "watch";
-  const desktop = viewport === "desktop";
 
   const query = useQuery({
     queryKey: ["device", uid],
@@ -73,7 +70,7 @@ export function DevicePage() {
       <div className="min-w-0 space-y-3">
         <Link
           to="/wall"
-          className="inline-flex min-h-11 items-center text-[0.8rem] text-soft no-underline"
+          className="inline-flex min-h-11 items-center text-xs text-muted-foreground no-underline hover:text-foreground"
         >
           <ChevronLeft className="mr-1 size-4" aria-hidden />
           返回设备墙
@@ -88,13 +85,15 @@ export function DevicePage() {
   if (!device) {
     return (
       <div className={cn("min-w-0", spacing)}>
-        <div className="surface min-w-0 animate-pulse" style={{ height: watch ? 120 : 148 }} />
-        <div className="grid grid-cols-2 gap-2 sm:gap-3 md:grid-cols-4">
-          {[0, 1, 2, 3].map((index) => (
-            <Skeleton key={index} className="h-[76px] w-full rounded-panel" />
-          ))}
+        <div className="flex items-start gap-3">
+          <Skeleton className="size-8 shrink-0 rounded-md" />
+          <div className="space-y-2">
+            <Skeleton className="h-7 w-56" />
+            <Skeleton className="h-3 w-72" />
+          </div>
         </div>
-        <Skeleton className="h-64 w-full rounded-panel" />
+        <Skeleton className="h-[74px] w-full rounded-md" />
+        <Skeleton className="h-64 w-full rounded-md" />
       </div>
     );
   }
@@ -103,74 +102,37 @@ export function DevicePage() {
     <div className={cn("min-w-0", spacing)}>
       <DeviceHero device={device} isFetching={query.isFetching} onRefresh={() => void query.refetch()} />
 
-
-      <Tabs value={tab} onValueChange={selectTab} className="flex min-w-0 flex-col">
-        <div className="surface min-w-0 p-1">
-          <div className="scroll-x hide-scrollbar w-full max-w-full">
-            <TabsList
-              className="items-center"
-              style={{
-                height: "auto",
-                width: "max-content",
-                padding: 0,
-                backgroundColor: "transparent",
-                borderRadius: 999,
-              }}
-            >
-              {TABS.map((item) => {
-                const active = tab === item.value;
-                return (
-                  <TabsTrigger
-                    key={item.value}
-                    value={item.value}
-                    className={cn(
-                      "relative min-w-0 whitespace-nowrap border border-transparent font-medium transition-colors",
-                      active ? "text-brand-ink" : "text-soft hover:text-ink",
-                    )}
-                    style={{
-                      height: desktop ? 36 : 40,
-                      paddingLeft: desktop ? 18 : 13,
-                      paddingRight: desktop ? 18 : 13,
-                      borderRadius: 999,
-                      fontSize: watch ? "0.78rem" : "0.84rem",
-                      ...(active
-                        ? {
-                            backgroundColor: "var(--c-brand)",
-                            borderColor: "var(--c-brand)",
-                            color: "var(--c-brand-ink)",
-                            boxShadow: "var(--sh-card)",
-                          }
-                        : { color: "var(--c-soft)" }),
-                    }}
-                  >
-                    {item.label}
-                  </TabsTrigger>
-                );
-              })}
-            </TabsList>
-          </div>
+      <Tabs value={tab} onValueChange={selectTab} className="flex min-w-0 flex-col gap-0">
+        <div className="scroll-x hide-scrollbar mb-6 w-full max-w-full border-b border-border">
+          <TabsList variant="line" className="h-9 w-full justify-start border-0">
+            {TABS.map((item) => (
+              <TabsTrigger key={item.value} value={item.value} className="h-full flex-none px-3 py-2">
+                {item.label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
         </div>
 
-        <TabsContent value="overview" className={watch ? "mt-2" : "mt-3 sm:mt-4"}>
+        <TabsContent value="overview">
           <OverviewView device={device} onRefresh={() => void query.refetch()} />
         </TabsContent>
         {/* keepMounted: switching tabs used to unmount these views — a live
             control session was silently revoked, a file transfer aborted, a
             journal page position lost. Cheap views (overview/timeline/settings)
             still unmount to stop their timers. */}
-        <TabsContent value="live" keepMounted className={watch ? "mt-2" : "mt-3 sm:mt-4"}>
+        <TabsContent value="live" keepMounted>
           <LiveView device={device} />
         </TabsContent>
-        <TabsContent value="timeline" className={watch ? "mt-2" : "mt-3 sm:mt-4"}>
+        <TabsContent value="timeline">
           <TimelineView device={device} />
         </TabsContent>
-        <TabsContent value="files" keepMounted className={watch ? "mt-2" : "mt-3 sm:mt-4"}>
+        <TabsContent value="files" keepMounted>
           <FilesView device={device} />
         </TabsContent>
-        <TabsContent value="commands" keepMounted className={watch ? "mt-2" : "mt-3 sm:mt-4"}>
+        <TabsContent value="commands" keepMounted>
           <CommandsView device={device} />
         </TabsContent>
-        <TabsContent value="settings" className={watch ? "mt-2" : "mt-3 sm:mt-4"}>
+        <TabsContent value="settings">
           <DeviceSettingsView device={device} />
         </TabsContent>
       </Tabs>

@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { Expand, Keyboard, MousePointer2, Power, RefreshCw, WifiOff } from "lucide-react";
 
-import { GlowCard } from "@/components/aceternity";
 import { FrameStage } from "@/components/frame-view";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api, isApiError } from "@/lib/api";
@@ -37,20 +37,20 @@ const STATUS_LABEL: Record<ControlStatus, string> = {
 };
 
 const STATUS_TONE: Record<ControlStatus, string> = {
-  idle: "text-soft",
-  granting: "text-warn",
-  connecting: "text-warn",
-  streaming: "text-ok",
-  error: "text-danger",
-  closed: "text-soft",
+  idle: "text-muted-foreground",
+  granting: "text-warning",
+  connecting: "text-warning",
+  streaming: "text-success",
+  error: "text-destructive",
+  closed: "text-muted-foreground",
 };
 
 const STATUS_DOT: Record<ControlStatus, string> = {
   idle: "bg-faint",
-  granting: "bg-warn animate-sm-pulse",
-  connecting: "bg-warn animate-sm-pulse",
-  streaming: "bg-ok animate-sm-pulse",
-  error: "bg-danger",
+  granting: "bg-warning animate-sm-pulse",
+  connecting: "bg-warning animate-sm-pulse",
+  streaming: "bg-success animate-sm-pulse",
+  error: "bg-destructive",
   closed: "bg-faint",
 };
 
@@ -113,13 +113,13 @@ function LiveMetric({
   tone?: string;
 }) {
   return (
-    <div className="min-w-0 rounded-lg border border-line bg-panel px-2.5 py-2">
-      <p className="eyebrow truncate">{label}</p>
-      <p className={cn("tnum mt-0.5 truncate text-[0.95rem] font-semibold leading-tight", tone ?? "text-ink")}>
+    <div className="min-w-0 px-6 py-3">
+      <p className="truncate text-xs font-medium tracking-[0.08em] text-muted-foreground uppercase">{label}</p>
+      <p className={cn("tnum mt-1.5 truncate text-lg font-semibold leading-none tracking-[-0.02em]", tone ?? "text-foreground")}>
         {value}
-        {unit ? <span className="ml-0.5 text-[0.68rem] font-medium text-faint">{unit}</span> : null}
+        {unit ? <span className="ml-0.5 text-xs font-medium text-faint">{unit}</span> : null}
       </p>
-      {hint ? <p className="mt-0.5 truncate text-[0.68rem] text-faint">{hint}</p> : null}
+      {hint ? <p className="mt-1 truncate text-xs text-faint">{hint}</p> : null}
     </div>
   );
 }
@@ -493,33 +493,33 @@ export function LiveView({ device }: Props) {
     return (
       <div className={cn("min-w-0", watch ? "space-y-3" : "space-y-4")}>
         <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-          <p className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2 text-[0.8rem] font-medium text-warn">
-            <span className="size-2 shrink-0 rounded-full bg-warn" aria-hidden />
+          <p className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2 text-sm font-medium text-warning">
+            <span className="size-2 shrink-0 rounded-full bg-warning" aria-hidden />
             <span className="truncate">实时控制不可用</span>
           </p>
           <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center sm:gap-2">
-            <Button disabled className="min-h-11" title={issue}>
+            <Button disabled className="min-h-9" title={issue}>
               <MousePointer2 className="size-4" aria-hidden />
               开始实时控制
             </Button>
-            <Button variant="outline" disabled className="min-h-11" title={issue}>
+            <Button variant="outline" disabled className="min-h-9" title={issue}>
               <Expand className="size-4" aria-hidden />
               全屏
             </Button>
           </div>
         </div>
 
-        <div className="surface-warn grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-start gap-2 p-3">
-          <WifiOff className="mt-0.5 size-4 shrink-0 text-warn" aria-hidden />
+        <Alert variant="warning" className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-2">
+          <WifiOff className="mt-0.5 size-4 shrink-0" aria-hidden />
           <div className="min-w-0">
-            <p className="break-words text-[0.8rem] leading-relaxed text-soft">{issue}</p>
-            <p className="mt-1 break-words text-[0.74rem] leading-relaxed text-faint">
+            <AlertDescription className="break-words text-warning">{issue}</AlertDescription>
+            <p className="mt-1 break-words text-xs leading-relaxed text-muted-foreground">
               {pollMode
                 ? "轮询模式下截图、文件、命令与历史画面仍可用；受控端恢复实时通道后会自动可用。"
                 : "截图、文件管理、命令下发与历史画面仍可正常使用。"}
             </p>
           </div>
-        </div>
+        </Alert>
       </div>
     );
   }
@@ -534,7 +534,7 @@ export function LiveView({ device }: Props) {
       <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
         <p
           className={cn(
-            "grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2 text-[0.8rem] font-medium",
+            "grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2 text-sm font-medium",
             STATUS_TONE[status],
           )}
           title={message || STATUS_LABEL[status]}
@@ -548,7 +548,7 @@ export function LiveView({ device }: Props) {
           {session ? (
             <Button
               variant="destructive"
-              className="col-span-2 min-h-11 sm:col-span-1"
+              className="col-span-2 min-h-9 sm:col-span-1"
               onClick={() => stop("已结束控制会话")}
             >
               <Power className="size-4" aria-hidden />
@@ -556,7 +556,7 @@ export function LiveView({ device }: Props) {
             </Button>
           ) : (
             <Button
-              className="col-span-2 min-h-11 sm:col-span-1"
+              className="col-span-2 min-h-9 sm:col-span-1"
               onClick={() => void start()}
               disabled={status === "granting" || status === "connecting"}
             >
@@ -566,7 +566,7 @@ export function LiveView({ device }: Props) {
           )}
           <Button
             variant="outline"
-            className="min-h-11"
+            className="min-h-9"
             onClick={() => void start()}
             disabled={status === "granting" || status === "connecting"}
           >
@@ -576,14 +576,14 @@ export function LiveView({ device }: Props) {
             />
             重新连接
           </Button>
-          <Button variant="outline" className="min-h-11" onClick={requestFullscreen}>
+          <Button variant="outline" className="min-h-9" onClick={requestFullscreen}>
             <Expand className="size-4" aria-hidden />
             全屏
           </Button>
         </div>
       </div>
 
-      <GlowCard className="min-w-0" contentClassName="relative p-2 sm:p-2.5" tint="rgba(99, 146, 255, 0.2)">
+      <div className="min-w-0 rounded-md border border-border bg-card p-2 sm:p-2.5">
         <div
           className={cn(
             "relative flex min-w-0 justify-center",
@@ -595,10 +595,10 @@ export function LiveView({ device }: Props) {
             ref={stageRef}
             tabIndex={0}
             className={cn(
-              "ratio-16-9 relative mx-auto block w-full touch-none select-none overflow-hidden bg-sunken outline-none",
-              "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand",
+              "ratio-16-9 relative mx-auto block w-full touch-none select-none overflow-hidden bg-muted outline-none",
+              "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
               session ? "cursor-crosshair" : "cursor-default",
-              !isFullscreen && "rounded-lg border border-line",
+              !isFullscreen && "rounded-md border border-border",
               watch && "max-h-[48vh]",
             )}
             style={stageSizeStyle}
@@ -623,9 +623,9 @@ export function LiveView({ device }: Props) {
                   }}
                 />
               ) : (
-                <div className="flex h-full w-full flex-col items-center justify-center bg-sunken px-3 text-center">
+                <div className="flex h-full w-full flex-col items-center justify-center bg-muted px-3 text-center">
                   <MousePointer2 className={cn("shrink-0 text-faint", watch ? "size-5" : "size-6")} aria-hidden />
-                  <p className="mt-2 break-words text-[0.8rem] text-soft">
+                  <p className="mt-2 break-words text-sm text-muted-foreground">
                     {status === "idle" ? "点击“开始实时控制”建立会话" : message || "等待画面…"}
                   </p>
                 </div>
@@ -633,41 +633,39 @@ export function LiveView({ device }: Props) {
             </FrameStage>
           </div>
         </div>
-      </GlowCard>
+      </div>
 
       {/* Status strip: every number is server-clock / measured, tabular. */}
-      <div className="surface-quiet min-w-0 p-2.5 sm:p-3">
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      <div className="stat-strip min-w-0 overflow-hidden rounded-md border border-border bg-card">
           <LiveMetric
             label="帧率"
             value={streaming ? String(fps) : "—"}
             unit="fps"
             hint={session ? `目标 ${session.fps} fps` : undefined}
-            tone={streaming ? "text-ok" : undefined}
+            tone={streaming ? "text-success" : undefined}
           />
           <LiveMetric label="画质" value={session ? String(session.quality) : "—"} />
           <LiveMetric
             label="往返"
             value={rttMs === null ? "—" : rttMs.toFixed(0)}
             unit="ms"
-            tone={rttMs !== null && rttMs > 400 ? "text-warn" : undefined}
+            tone={rttMs !== null && rttMs > 400 ? "text-warning" : undefined}
           />
           <LiveMetric
             label="剩余"
             value={secondsLeft === null ? "—" : String(secondsLeft)}
             unit="s"
             hint="服务端时钟"
-            tone={secondsLeft !== null && secondsLeft <= 60 ? "text-warn" : undefined}
+            tone={secondsLeft !== null && secondsLeft <= 60 ? "text-warning" : undefined}
           />
-        </div>
       </div>
 
       {/* Keyboard text row: on a watch the send button drops to its own row. */}
-      <div className="surface-quiet grid grid-cols-[auto_minmax(0,1fr)] items-center gap-2 p-2.5 sm:grid-cols-[auto_minmax(0,1fr)_auto]">
-        <Keyboard className="size-4 shrink-0 text-soft" aria-hidden />
+      <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-2 rounded-md border border-border bg-card p-2.5 sm:grid-cols-[auto_minmax(0,1fr)_auto]">
+        <Keyboard className="size-4 shrink-0 text-muted-foreground" aria-hidden />
         <Input
           placeholder="在此输入文字并按回车，直接发送到受控端"
-          className="h-11 text-[0.82rem]"
+          className="h-11 text-sm sm:h-9"
           aria-label="发送文字到受控端"
           value={textValue}
           onChange={(event) => setTextValue(event.target.value)}
@@ -681,7 +679,7 @@ export function LiveView({ device }: Props) {
         />
         <Button
           variant="outline"
-          className="col-span-2 min-h-11 sm:col-span-1"
+          className="col-span-2 min-h-9 sm:col-span-1"
           onClick={() => {
             sendText(textValue);
             setTextValue("");
@@ -691,7 +689,7 @@ export function LiveView({ device }: Props) {
         </Button>
       </div>
 
-      <p className="text-[0.72rem] leading-relaxed text-faint">
+      <p className="text-xs leading-relaxed text-faint">
         画面与输入经服务器中转并全程审计；点击画面聚焦后键盘快捷键才生效。
       </p>
     </div>

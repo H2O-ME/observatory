@@ -1,21 +1,18 @@
 /**
  * Application shell.
  *
- * One component, three navigation variants:
- *  - desktop: a floating glass sidebar with the brand, 6 destinations and a
- *    live-status footer;
- *  - mobile: a compact top bar + Aceternity FloatingDock (5 visible entries;
- *    the fifth opens a "more" sheet with system/settings/account);
- *  - watch: a 40px brand bar + icon-only compact dock, no bottom overlap.
+ * Three navigation variants over one router:
+ *  - desktop: a quiet sidebar (brand, two labelled nav groups, status footer);
+ *  - mobile: a compact top bar plus a bottom dock (four destinations + "more");
+ *  - watch: the same dock, icon-only and tighter.
  *
- * The visual language lives in DESIGN_SYSTEM.md; this file only wires it to the
- * router, auth store and live socket state.
+ * The chrome is one hairline border and a value step; it never competes with the
+ * page content. No decorative layers, no coloured active pill.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
-  Activity,
   Archive,
   ChevronRight,
   LogOut,
@@ -29,18 +26,17 @@ import {
   Sun,
   SunMoon,
   UserRound,
-  WifiOff,
 } from "lucide-react";
 
-import { FloatingDock } from "@/components/aceternity";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useViewport } from "@/hooks/use-viewport";
 import { THEME_LABEL, useTheme, type ThemeMode } from "@/lib/theme";
 import { cn } from "@/lib/utils";
@@ -56,16 +52,28 @@ interface NavEntry {
   icon: Icon;
 }
 
-const NAV: NavEntry[] = [
-  { to: "/wall", label: "设备墙", hint: "全部受控端", icon: MonitorSmartphone },
-  { to: "/backup", label: "归档", hint: "远端备份", icon: Archive },
-  { to: "/updates", label: "更新", hint: "受控端版本", icon: PackageCheck },
-  { to: "/audit", label: "审计", hint: "操作留痕", icon: ScrollText },
-  { to: "/system", label: "系统", hint: "服务端状态", icon: ServerCog },
-  { to: "/settings", label: "设置", hint: "全局配置", icon: SettingsIcon },
+const NAV_GROUPS: Array<{ label: string; items: NavEntry[] }> = [
+  {
+    label: "监控",
+    items: [
+      { to: "/wall", label: "设备墙", hint: "全部受控端", icon: MonitorSmartphone },
+      { to: "/backup", label: "归档", hint: "远端备份", icon: Archive },
+      { to: "/updates", label: "更新", hint: "受控端版本", icon: PackageCheck },
+      { to: "/audit", label: "审计", hint: "操作留痕", icon: ScrollText },
+    ],
+  },
+  {
+    label: "管理",
+    items: [
+      { to: "/system", label: "系统", hint: "服务端状态", icon: ServerCog },
+      { to: "/settings", label: "设置", hint: "全局配置", icon: SettingsIcon },
+    ],
+  },
 ];
 
-/** Mobile dock shows the four most-used destinations + a more sheet. */
+const NAV = NAV_GROUPS.flatMap((group) => group.items);
+
+/** The four most-used destinations live in the dock; the rest behind "more". */
 const DOCK_ROUTES = ["/wall", "/backup", "/updates", "/audit"];
 
 const THEME_ICON: Record<ThemeMode, Icon> = {
@@ -77,157 +85,205 @@ const THEME_ICON: Record<ThemeMode, Icon> = {
 function useActivePath() {
   const { pathname } = useLocation();
   return useCallback(
-    (to: string) => pathname === to || pathname.startsWith(`${to}/`),
+    (to: string) =>
+      pathname === to ||
+      pathname.startsWith(`${to}/`) ||
+      (to === "/wall" && pathname.startsWith("/device/")),
     [pathname],
   );
 }
 
-
-function LiveDot({ verbose = false }: { verbose?: boolean }) {
+function LiveDot({ className }: { className?: string }) {
   const connected = useLive((state) => state.connected);
+  const version = useLive((state) => state.version);
+  const authVersion = useAuth((state) => state.version);
   return (
-    <span
-      className={cn(
-        "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[0.7rem] font-medium",
-        connected
-          ? "border-line bg-ok-soft text-ok"
-          : "border-line bg-warn-soft text-warn",
-      )}
-      title={
-        connected
-          ? "控制台实时连接正常"
-          : "控制台与服务器的实时连接已断开，页面改用轮询"
-      }
-    >
-      {connected ? (
-        <Activity className="size-3.5 animate-sm-pulse" />
-      ) : (
-        <WifiOff className="size-3.5" />
-      )}
-      {verbose ? <span>{connected ? "实时" : "轮询"}</span> : null}
-    </span>
+    <div className={cn("flex min-w-0 items-center gap-1.5 text-xs", className)}>
+      <span
+        className={cn("size-1 shrink-0 rounded-full", connected ? "bg-success" : "bg-warning")}
+        aria-hidden
+      />
+      <span className={connected ? "text-muted-foreground" : "text-warning"}>
+        {connected ? "实时" : "轮询"}
+      </span>
+      <span className="ml-auto tnum shrink-0 text-faint">v{version || authVersion || "—"}</span>
+    </div>
   );
 }
 
 function BrandMark({ compact = false }: { compact?: boolean }) {
   return (
-    <span className="flex min-w-0 items-center gap-2.5">
-      <span className="relative flex size-8 shrink-0 items-center justify-center rounded-md border border-line bg-brand-soft text-brand">
-        <span className="text-[0.62rem] font-bold tracking-tight">Ob</span>
-      </span>
-      {!compact ? (
-        <span className="min-w-0">
-          <span className="block truncate text-[0.9rem] font-semibold tracking-tight text-ink">
-            Observatory
+    <div className="flex min-w-0 items-center gap-3">
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border text-xs font-bold">
+        Ob
+      </div>
+      {compact ? null : (
+        <div className="flex min-w-0 flex-col">
+          <span className="truncate text-sm leading-tight font-semibold">Observatory</span>
+          <span className="mt-0.5 truncate text-[10px] tracking-widest text-muted-foreground uppercase">
+            Mission Control
           </span>
-          <span className="eyebrow block text-[0.52rem] leading-tight">mission control</span>
-        </span>
-      ) : null}
-    </span>
+        </div>
+      )}
+    </div>
   );
 }
 
-function ThemeButton({ className }: { className?: string }) {
+function IconAction({
+  label,
+  onClick,
+  children,
+  className,
+}: {
+  label: string;
+  onClick?: () => void;
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label={label}
+            onClick={onClick}
+            className={className}
+          />
+        }
+      >
+        {children}
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+function ThemeButton() {
   const { mode, cycle } = useTheme();
   const Icon = THEME_ICON[mode];
   return (
-    <button
-      type="button"
-      onClick={cycle}
-      aria-label={THEME_LABEL[mode]}
-      title={THEME_LABEL[mode]}
-      className={cn(
-        "flex size-8 shrink-0 items-center justify-center rounded-md border border-line bg-sunken text-soft transition-colors hover:text-ink",
-        className,
-      )}
-    >
-      <Icon className="size-4" />
-    </button>
-  );
-}
-
-function AccountLink({ className }: { className?: string }) {
-  return (
-    <NavLink
-      to="/account"
-      aria-label="账户与安全"
-      title="账户与安全"
-      className={cn(
-        "flex size-8 shrink-0 items-center justify-center rounded-md border border-line bg-sunken text-soft no-underline transition-colors hover:text-ink",
-        className,
-      )}
-    >
-      <UserRound className="size-4" />
-    </NavLink>
+    <IconAction label={THEME_LABEL[mode]} onClick={cycle} className="size-8 rounded-md p-2">
+      <Icon className="size-4 stroke-[1.5]" />
+    </IconAction>
   );
 }
 
 function LogoutButton({ className }: { className?: string }) {
   const logout = useAuth((state) => state.logout);
   return (
-    <button
-      type="button"
+    <IconAction
+      label="退出登录"
       onClick={() => void logout()}
-      aria-label="退出登录"
-      title="退出登录"
-      className={cn(
-        "flex size-8 shrink-0 items-center justify-center rounded-md border border-line bg-sunken text-soft transition-colors hover:text-danger",
-        className,
-      )}
+      className={cn("size-8 rounded-md p-2", className)}
     >
-      <LogOut className="size-4" />
-    </button>
+      <LogOut className="size-4 stroke-[1.5]" />
+    </IconAction>
+  );
+}
+
+function NavItem({
+  entry,
+  active,
+}: {
+  entry: NavEntry;
+  active: (to: string) => boolean;
+}) {
+  const Icon = entry.icon;
+  const isActive = active(entry.to);
+  return (
+    <li>
+      <NavLink
+        to={entry.to}
+        aria-current={isActive ? "page" : undefined}
+        className={cn(
+          "flex items-center gap-3 rounded-md px-2 py-2 text-sm no-underline transition-colors",
+          isActive
+            ? "relative bg-secondary font-medium text-secondary-foreground"
+            : "text-muted-foreground hover:bg-muted",
+        )}
+      >
+        {isActive ? (
+          <span
+            className="absolute top-2 left-0 h-4 w-1 rounded-r bg-foreground"
+            aria-hidden
+          />
+        ) : null}
+        <Icon
+          className={cn(
+            "h-4 w-4 shrink-0 stroke-[1.5]",
+            isActive ? "text-foreground" : "text-muted-foreground",
+          )}
+          aria-hidden
+        />
+        <span className="truncate">{entry.label}</span>
+      </NavLink>
+    </li>
+  );
+}
+
+function SidebarStatus() {
+  const connected = useLive((state) => state.connected);
+  const version = useLive((state) => state.version);
+  const authVersion = useAuth((state) => state.version);
+  return (
+    <div className="flex items-center justify-between px-4 py-3 text-xs text-muted-foreground">
+      <div className="flex items-center gap-1.5">
+        <span
+          className={cn("h-1.5 w-1.5 rounded-full", connected ? "bg-success" : "bg-warning")}
+          aria-hidden
+        />
+        <span>{connected ? "实时" : "轮询"}</span>
+      </div>
+      <span className="font-mono text-[10px]">v{version || authVersion || "—"}</span>
+    </div>
   );
 }
 
 function DesktopSidebar({ active }: { active: (to: string) => boolean }) {
-  const version = useAuth((state) => state.version);
-  const liveVersion = useLive((state) => state.version);
-  const connected = useLive((state) => state.connected);
-
   return (
-    <aside className="glass-chrome hidden w-[220px] shrink-0 border-r border-line lg:block">
-      <div className="flex h-full w-full flex-col px-3 py-4">
-        <div className="px-2 pb-5 pt-1">
-          <BrandMark />
-          <p className="mt-2.5 flex items-center gap-2 text-[0.68rem] text-faint">
-            <span className={cn("size-1.5 shrink-0 rounded-full", connected ? "bg-ok" : "bg-warn")} />
-            <span className={connected ? "text-ok" : "text-warn"}>{connected ? "实时连接" : "轮询连接"}</span>
-            <span className="ml-auto tnum">v{liveVersion || version || "—"}</span>
-          </p>
-        </div>
+    <aside className="hidden w-[240px] shrink-0 flex-col border-r border-border bg-background lg:flex">
+      <div className="flex items-center gap-3 px-4 py-5">
+        <BrandMark />
+      </div>
 
-        <nav aria-label="主导航" className="min-h-0 flex-1 overflow-y-auto hide-scrollbar">
-          <ul className="space-y-0.5">
-            {NAV.map((entry) => {
-              const Icon = entry.icon;
-              const isActive = active(entry.to);
-              return (
-                <li key={entry.to}>
-                  <NavLink to={entry.to} className="block no-underline" aria-current={isActive ? "page" : undefined}>
-                    <span
-                      className={cn(
-                        "flex items-center gap-2.5 rounded-md px-2.5 py-2 text-[0.85rem]",
-                        isActive
-                          ? "bg-brand-soft font-medium text-brand"
-                          : "text-soft hover:bg-sunken hover:text-ink",
-                      )}
-                    >
-                      <Icon className="size-4" />
-                      {entry.label}
-                    </span>
-                  </NavLink>
-                </li>
-              );
-            })}
-          </ul>
-        </nav>
-
-        <div className="mt-4 flex items-center justify-between border-t border-line pt-3">
-          <div className="flex items-center gap-1">
-            <AccountLink />
-            <ThemeButton />
+      <nav aria-label="主导航" className="min-h-0 flex-1 overflow-y-auto hide-scrollbar px-3 pb-4">
+        {NAV_GROUPS.map((group, index) => (
+          <div key={group.label} className={index > 0 ? "mt-6" : undefined}>
+            <div className="px-2 py-2 text-xs font-semibold text-muted-foreground">{group.label}</div>
+            <ul className="flex flex-col gap-0.5">
+              {group.items.map((entry) => (
+                <NavItem key={entry.to} entry={entry} active={active} />
+              ))}
+            </ul>
           </div>
+        ))}
+      </nav>
+
+      <div className="mt-auto flex flex-col border-t">
+        <SidebarStatus />
+
+        <div className="flex items-center justify-between px-4 pb-4">
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <NavLink
+                  to="/account"
+                  aria-label="账户与安全"
+                  className={cn(
+                    buttonVariants({ variant: "ghost", size: "icon-sm" }),
+                    "size-8 rounded-md p-2 no-underline",
+                  )}
+                />
+              }
+            >
+              <UserRound className="size-4 stroke-[1.5]" />
+            </TooltipTrigger>
+            <TooltipContent>账户与安全</TooltipContent>
+          </Tooltip>
+          <ThemeButton />
           <LogoutButton />
         </div>
       </div>
@@ -242,15 +298,15 @@ function MobileTopBar() {
   return (
     <header
       className={cn(
-        "glass-chrome relative z-20 flex shrink-0 items-center border-b border-line px-3 pt-safe",
-        watch ? "h-11" : "h-14",
+        "relative z-20 flex shrink-0 items-center border-b border-border bg-background px-3 pt-safe",
+        watch ? "h-11" : "h-12",
       )}
     >
       <BrandMark compact={watch} />
       <div className="min-w-0 flex-1" />
       <div className="flex shrink-0 items-center gap-1.5">
-        <LiveDot />
-        {!watch ? <ThemeButton /> : null}
+        <LiveDot className="mr-1" />
+        {watch ? null : <ThemeButton />}
       </div>
     </header>
   );
@@ -279,54 +335,51 @@ function MoreSheet({
   const modeOptions: ThemeMode[] = ["system", "light", "dark"];
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent size="sm" className="pb-6">
-        <DialogHeader>
-          <DialogTitle>更多</DialogTitle>
-          <DialogDescription>系统状态、设置、账户与显示偏好</DialogDescription>
-        </DialogHeader>
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent side="bottom" className="pb-[calc(1rem+env(safe-area-inset-bottom))]">
+        <SheetHeader>
+          <SheetTitle>更多</SheetTitle>
+          <SheetDescription>系统状态、设置、账户与显示偏好</SheetDescription>
+        </SheetHeader>
 
-        <div className="space-y-1.5">
+        <div className="flex flex-col gap-0.5 px-3">
           {NAV.slice(4).map((entry) => {
             const Icon = entry.icon;
+            const isActive = active(entry.to);
             return (
               <button
                 key={entry.to}
                 type="button"
                 onClick={() => go(entry.to)}
                 className={cn(
-                  "tap-row flex w-full items-center gap-3 rounded-xl border px-3 text-left",
-                  active(entry.to)
-                    ? "border-transparent bg-brand text-brand-ink"
-                    : "border-line bg-sunken text-ink",
+                  "tap-row flex w-full items-center gap-3 rounded-md px-3 text-left transition-colors",
+                  isActive ? "bg-accent text-foreground" : "text-foreground hover:bg-accent",
                 )}
               >
-                <Icon className="size-4" />
+                <Icon className="size-4 shrink-0 text-muted-foreground" />
                 <span className="min-w-0 flex-1">
-                  <span className="block text-[0.85rem] font-medium">{entry.label}</span>
-                  <span className={cn("block text-[0.68rem]", active(entry.to) ? "text-brand-ink" : "text-faint")}>
-                    {entry.hint}
-                  </span>
+                  <span className="block text-sm font-medium">{entry.label}</span>
+                  <span className="block text-xs text-muted-foreground">{entry.hint}</span>
                 </span>
-                <ChevronRight className="size-4 opacity-60" />
+                <ChevronRight className="size-4 shrink-0 text-faint" />
               </button>
             );
           })}
           <button
             type="button"
             onClick={() => go("/account")}
-            className="tap-row flex w-full items-center gap-3 rounded-xl border border-line bg-sunken px-3 text-left text-ink"
+            className="tap-row flex w-full items-center gap-3 rounded-md px-3 text-left text-foreground hover:bg-accent"
           >
-            <UserRound className="size-4" />
+            <UserRound className="size-4 shrink-0 text-muted-foreground" />
             <span className="min-w-0 flex-1">
-              <span className="block text-[0.85rem] font-medium">账户与安全</span>
-              <span className="block text-[0.68rem] text-faint">密码 · 二次验证</span>
+              <span className="block text-sm font-medium">账户与安全</span>
+              <span className="block text-xs text-muted-foreground">密码 · 二次验证</span>
             </span>
-            <ChevronRight className="size-4 opacity-60" />
+            <ChevronRight className="size-4 shrink-0 text-faint" />
           </button>
         </div>
 
-        <div className="rounded-xl border border-line bg-sunken p-3">
+        <div className="px-3">
           <p className="eyebrow mb-2">主题</p>
           <div className="grid grid-cols-3 gap-1.5">
             {modeOptions.map((option) => {
@@ -337,10 +390,10 @@ function MoreSheet({
                   type="button"
                   onClick={() => set(option)}
                   className={cn(
-                    "tap-row flex flex-col items-center justify-center gap-1 rounded-lg border py-2 text-[0.7rem]",
+                    "tap-row flex flex-col items-center justify-center gap-1 rounded-md border py-2 text-xs transition-colors",
                     mode === option
-                      ? "border-transparent bg-brand text-brand-ink"
-                      : "border-line bg-panel text-soft",
+                      ? "border-foreground bg-foreground text-background"
+                      : "border-border bg-card text-muted-foreground hover:bg-accent",
                   )}
                 >
                   <Icon className="size-4" />
@@ -351,8 +404,10 @@ function MoreSheet({
           </div>
         </div>
 
-        <div className="flex items-center justify-between rounded-xl border border-line bg-sunken px-3 py-2.5">
-          <span className="tnum text-[0.72rem] text-faint">v{liveVersion || version || "—"}</span>
+        <div className="mx-3 flex items-center justify-between border-t border-border pt-3">
+          <span className="tnum text-xs text-faint">
+            v{liveVersion || version || "—"}
+          </span>
           <Button
             variant="outline"
             size="sm"
@@ -365,8 +420,8 @@ function MoreSheet({
             退出登录
           </Button>
         </div>
-      </DialogContent>
-    </Dialog>
+      </SheetContent>
+    </Sheet>
   );
 }
 
@@ -374,33 +429,49 @@ function BottomDock({ active }: { active: (to: string) => boolean }) {
   const viewport = useViewport();
   const watch = viewport === "watch";
   const [moreOpen, setMoreOpen] = useState(false);
-  const items = NAV.filter((entry) => DOCK_ROUTES.includes(entry.to)).map((entry) => {
-    const Icon = entry.icon;
-    return {
-      href: entry.to,
-      label: entry.label,
-      icon: <Icon />,
-      active: active(entry.to),
-    };
-  });
 
   return (
     <>
-      <FloatingDock
-        compact={watch}
-        className="ace-dock--floating"
-        label="主导航"
-        items={[
-          ...items,
-          {
-            href: "#more",
-            label: "更多",
-            icon: <MoreHorizontal />,
-            active: false,
-            onClick: () => setMoreOpen(true),
-          },
-        ]}
-      />
+      <nav
+        aria-label="主导航"
+        className="fixed right-0 bottom-0 left-0 z-20 flex items-stretch border-t border-border bg-background pb-safe"
+      >
+        {NAV.filter((entry) => DOCK_ROUTES.includes(entry.to)).map((entry) => {
+          const Icon = entry.icon;
+          const isActive = active(entry.to);
+          return (
+            <NavLink
+              key={entry.to}
+              to={entry.to}
+              aria-current={isActive ? "page" : undefined}
+              className={cn(
+                "flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 no-underline transition-colors",
+                watch ? "min-h-11 py-1" : "min-h-14 py-1.5",
+                isActive
+                  ? "font-medium text-foreground"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              <Icon className={cn(watch ? "size-4" : "size-[1.15rem]")} aria-hidden />
+              <span className={cn("truncate", watch ? "text-[0.58rem]" : "text-xs")}>
+                {entry.label}
+              </span>
+            </NavLink>
+          );
+        })}
+        <button
+          type="button"
+          onClick={() => setMoreOpen(true)}
+          aria-label="更多"
+          className={cn(
+            "flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 text-muted-foreground transition-colors hover:text-foreground",
+            watch ? "min-h-11 py-1" : "min-h-14 py-1.5",
+          )}
+        >
+          <MoreHorizontal className={cn(watch ? "size-4" : "size-[1.15rem]")} aria-hidden />
+          <span className={cn("truncate", watch ? "text-[0.58rem]" : "text-xs")}>更多</span>
+        </button>
+      </nav>
       <MoreSheet open={moreOpen} onOpenChange={setMoreOpen} active={active} />
     </>
   );
@@ -422,23 +493,29 @@ export function AppShell() {
   }, [pathname]);
 
   return (
-    <div className="relative flex app-vh w-full flex-col overflow-hidden">
+    <div className="relative flex app-vh w-full flex-col overflow-hidden bg-background">
       <div className="relative z-10 flex min-h-0 w-full flex-1">
         {desktop ? <DesktopSidebar active={active} /> : null}
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {desktop ? null : <MobileTopBar />}
 
-          <main ref={mainRef} className={cn("min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain", !desktop && "pb-dock")}>
+          <main
+            ref={mainRef}
+            className={cn(
+              "min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain",
+              desktop ? null : "pb-dock",
+            )}
+          >
             <div
               key={pathname}
               className={cn(
                 "page-enter mx-auto w-full min-w-0",
                 watch
-                  ? "max-w-none px-2.5 py-3"
+                  ? "max-w-none px-2.5 pt-3 pb-4"
                   : desktop
-                    ? "max-w-[1320px] px-6 py-6 xl:px-10 xl:py-8"
-                    : "max-w-3xl px-4 py-5",
+                    ? "max-w-[1360px] px-8 pt-7 pb-10 xl:px-10"
+                    : "max-w-3xl px-4 pt-5 pb-8",
               )}
             >
               <Outlet />
@@ -451,4 +528,3 @@ export function AppShell() {
     </div>
   );
 }
-

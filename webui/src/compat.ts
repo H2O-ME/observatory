@@ -6,9 +6,32 @@
  * block is feature-detected, so on a current browser this module executes a few
  * `in` checks and nothing else.
  *
- * `WeakRef` deliberately has no shim: Base UI already feature-detects it and
- * falls back to a strong reference, so nothing is needed here.
+ * `WeakRef` needs a shim after all: Base UI's focus-guard registry constructs
+ * one unconditionally (`new WeakRef(element)`), and Chromium 81 throws. The
+ * fallback keeps a strong reference; the registry is capped, so the leak is
+ * bounded by the number of focusable popups, not by DOM size.
  */
+
+// Chromium 84. Base UI focus guards: `new WeakRef(element)`.
+if (typeof (globalThis as { WeakRef?: unknown }).WeakRef !== "function") {
+  const WeakRefShim = function WeakRef(this: { _target: object }, target: object) {
+    this._target = target;
+  } as unknown as { new (target: object): { deref(): object } };
+
+  Object.defineProperty(WeakRefShim.prototype, "deref", {
+    value: function deref(this: { _target: object }) {
+      return this._target;
+    },
+    writable: true,
+    configurable: true,
+  });
+
+  Object.defineProperty(globalThis, "WeakRef", {
+    value: WeakRefShim,
+    writable: true,
+    configurable: true,
+  });
+}
 
 // Chromium 93. Called by Base UI's useRender and toast store on every render.
 if (typeof Object.hasOwn !== "function") {

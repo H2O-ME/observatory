@@ -1,14 +1,23 @@
 import { useState } from "react";
 import type { FormEvent, ReactNode } from "react";
-import { Check, Copy, KeyRound, LogOut, MonitorSmartphone, ShieldCheck, ShieldOff, UserRound } from "lucide-react";
+import {
+  Check,
+  Copy,
+  KeyRound,
+  LogOut,
+  MonitorSmartphone,
+  ShieldCheck,
+  ShieldOff,
+  UserRound,
+} from "lucide-react";
 
-import { ShimmerButton } from "@/components/aceternity";
 import { Banner } from "@/components/async-state";
 import { MetaChip, PageHeader } from "@/components/page-header";
-import { Section, SectionHeader } from "@/components/section";
+import { Section } from "@/components/section";
 import { Button } from "@/components/ui/button";
+import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Spinner } from "@/components/ui/spinner";
 import { useViewport } from "@/hooks/use-viewport";
 import { api, isApiError } from "@/lib/api";
 import { useAuth } from "@/store/auth";
@@ -25,9 +34,6 @@ import { cn } from "@/lib/utils";
  * The TOTP secret is shown as text (secret + `otpauth://` URI): that is the
  * documented fallback for the QR code — no QR image is generated locally, so
  * nothing about the secret leaves the server.
- *
- * Presentation (0.4): security cards in a two-column desktop grid, one column on
- * phones/watches; the TOTP setup panel is the only "lit" surface on the page.
  */
 export function AccountPage() {
   const { totpEnabled, version, consoleHost, baseUrls, refresh, logout } = useAuth();
@@ -35,7 +41,7 @@ export function AccountPage() {
   const desktop = viewport === "desktop";
   const watch = viewport === "watch";
   const touch = !desktop;
-  const stack = watch ? "space-y-3" : "space-y-5";
+  const stack = watch ? "space-y-3" : "space-y-4";
 
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
@@ -169,8 +175,8 @@ export function AccountPage() {
         description="修改控制台密码、管理二次验证；新密码至少 10 位，开启/关闭 TOTP 都需要有效验证码与当前密码确认。"
       />
 
-      <div className={cn("mt-4 min-w-0 sm:mt-5", stack)}>
-        <div className="grid min-w-0 gap-5 lg:grid-cols-2">
+      <div className={cn("mt-4 min-w-0", stack)}>
+        <div className="grid min-w-0 gap-4 lg:grid-cols-2">
           {/* ------------------------------------------------------ password card */}
           <Section title="修改密码" icon={KeyRound}>
             <form className="grid min-w-0 gap-3" onSubmit={submitPassword}>
@@ -203,60 +209,54 @@ export function AccountPage() {
               {passwordMessage ? <Banner tone="ok">{passwordMessage}</Banner> : null}
               {passwordError ? <Banner tone="error">{passwordError}</Banner> : null}
 
-              <div className="grid min-w-0 border-t border-line pt-3">
-                <ShimmerButton
+              <div className="grid min-w-0 border-t border-border pt-3">
+                <Button
                   type="submit"
-                  busy={passwordBusy}
                   disabled={passwordBusy || !current || !next || !confirm}
                   className="justify-self-start sm:justify-self-end"
                 >
-                  <Check className="mr-1.5 size-4" />
+                  {passwordBusy ? <Spinner className="size-4" /> : <Check className="size-4" />}
                   保存新密码
-                </ShimmerButton>
+                </Button>
               </div>
             </form>
           </Section>
 
           {/* --------------------------------------------------------- TOTP card */}
-          <div className="surface min-w-0 p-3 sm:p-4">
-            <SectionHeader
-              title="二次验证（TOTP）"
-              icon={totpEnabled ? ShieldCheck : ShieldOff}
-              actions={
-                <MetaChip tone={totpEnabled ? "ok" : "default"}>{totpEnabled ? "已启用" : "未启用"}</MetaChip>
-              }
-            />
-
-            <div className="mt-3 grid min-w-0 gap-3">
+          <Section
+            title="二次验证（TOTP）"
+            icon={totpEnabled ? ShieldCheck : ShieldOff}
+            actions={<MetaChip tone={totpEnabled ? "ok" : "default"}>{totpEnabled ? "已启用" : "未启用"}</MetaChip>}
+          >
+            <div className="grid min-w-0 gap-3">
               {totpMessage ? <Banner tone="ok">{totpMessage}</Banner> : null}
               {totpError ? <Banner tone="error">{totpError}</Banner> : null}
 
               {!totpEnabled && !setup ? (
                 <>
-                  <p className="text-[0.8rem] leading-relaxed text-soft">
+                  <p className="text-xs leading-relaxed text-muted-foreground">
                     开启后每次登录需要验证器上的 6 位验证码；启用过程中会显示一次性密钥。
                   </p>
                   <div className="flex min-w-0">
-                    <ShimmerButton busy={totpBusy} onClick={() => void startSetup()}>
-                      <ShieldCheck className="mr-1.5 size-4" />
+                    <Button disabled={totpBusy} onClick={() => void startSetup()}>
+                      {totpBusy ? <Spinner className="size-4" /> : <ShieldCheck className="size-4" />}
                       开始绑定
-                    </ShimmerButton>
+                    </Button>
                   </div>
                 </>
               ) : null}
 
               {setup ? (
-                <div className="relative min-w-0 overflow-hidden rounded-xl border border-line bg-sunken p-3">
-                  <div className="relative grid min-w-0 gap-2.5">
+                <div className="grid min-w-0 gap-2.5 rounded-sm border border-border bg-muted p-3">
                     <Banner tone="info">
                       在该浏览器打开验证器 App，选择「手动输入密钥」：粘贴下方密钥或 otpauth URI（二维码的文本降级形式），
                       然后输入验证器显示的 6 位验证码完成启用。
                     </Banner>
 
                     <div className="grid min-w-0 gap-1">
-                      <p className="text-[0.7rem] text-faint">密钥（一次性显示，请立即保存）</p>
+                      <p className="text-xs text-faint">密钥（一次性显示，请立即保存）</p>
                       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5">
-                        <code className="min-w-0 break-all rounded-lg border border-line bg-panel px-2.5 py-2 font-mono text-[0.72rem] leading-relaxed text-ink">
+                        <code className="min-w-0 break-all rounded-md border border-border bg-card px-2.5 py-2 font-mono text-xs leading-relaxed text-foreground">
                           {setup.secret}
                         </code>
                         <Button
@@ -273,9 +273,9 @@ export function AccountPage() {
                     </div>
 
                     <div className="grid min-w-0 gap-1">
-                      <p className="text-[0.7rem] text-faint">otpauth URI</p>
+                      <p className="text-xs text-faint">otpauth URI</p>
                       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5">
-                        <code className="min-w-0 break-all rounded-lg border border-line bg-panel px-2.5 py-2 font-mono text-[0.72rem] leading-relaxed text-ink">
+                        <code className="min-w-0 break-all rounded-md border border-border bg-card px-2.5 py-2 font-mono text-xs leading-relaxed text-foreground">
                           {setup.uri}
                         </code>
                         <Button
@@ -292,10 +292,10 @@ export function AccountPage() {
                     </div>
 
                     <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,9rem)_minmax(0,11rem)_auto_auto] sm:items-end">
-                      <div className="min-w-0">
-                        <Label htmlFor="setup-code" className="text-[0.72rem] text-faint">
+                      <Field>
+                        <FieldLabel htmlFor="setup-code" className="text-xs">
                           验证器上的 6 位验证码
-                        </Label>
+                        </FieldLabel>
                         <Input
                           id="setup-code"
                           inputMode="numeric"
@@ -303,53 +303,51 @@ export function AccountPage() {
                           maxLength={6}
                           value={setupCode}
                           onChange={(event) => setSetupCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
-                          className={cn("mt-1 h-9 text-center font-mono tracking-[0.3em]", touch && "tap")}
+                          className={cn("text-center font-mono tracking-[0.3em]", touch && "h-11")}
                         />
-                      </div>
-                      <div className="min-w-0">
-                        <Label htmlFor="setup-password" className="text-[0.72rem] text-faint">
+                      </Field>
+                      <Field>
+                        <FieldLabel htmlFor="setup-password" className="text-xs">
                           当前密码（防会话劫持）
-                        </Label>
+                        </FieldLabel>
                         <Input
                           id="setup-password"
                           type="password"
                           autoComplete="current-password"
                           value={setupPassword}
                           onChange={(event) => setSetupPassword(event.target.value)}
-                          className={cn("mt-1 h-9", touch && "tap")}
+                          className={cn(touch && "h-11")}
                         />
-                      </div>
-                      <ShimmerButton
-                        busy={totpBusy}
+                      </Field>
+                      <Button
                         disabled={totpBusy || setupCode.length !== 6 || !setupPassword}
                         onClick={() => void enableTotp()}
-                      >
-                        <Check className="mr-1.5 size-4" />
-                        启用二次验证
-                      </ShimmerButton>
-                      <Button
-                        size="sm"
-                        variant="ghost"
                         className="h-11 sm:h-9"
+                      >
+                        {totpBusy ? <Spinner className="size-4" /> : <Check className="size-4" />}
+                        启用二次验证
+                      </Button>
+                      <Button
+                        variant="ghost"
                         onClick={() => {
                           setSetup(null);
                           setSetupCode("");
                         }}
+                        className="h-11 sm:h-9"
                       >
                         取消
                       </Button>
                     </div>
-                  </div>
                 </div>
               ) : null}
 
               {totpEnabled ? (
-                <div className="grid min-w-0 gap-2 border-t border-line pt-3">
+                <div className="grid min-w-0 gap-2 border-t border-border pt-3">
                   <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,9rem)_minmax(0,11rem)_auto] sm:items-end">
-                    <div className="min-w-0">
-                      <Label htmlFor="disable-code" className="text-[0.72rem] text-faint">
+                    <Field>
+                      <FieldLabel htmlFor="disable-code" className="text-xs">
                         当前 6 位验证码
-                      </Label>
+                      </FieldLabel>
                       <Input
                         id="disable-code"
                         inputMode="numeric"
@@ -357,24 +355,23 @@ export function AccountPage() {
                         maxLength={6}
                         value={disableCode}
                         onChange={(event) => setDisableCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
-                        className={cn("mt-1 h-9 text-center font-mono tracking-[0.3em]", touch && "tap")}
+                        className={cn("text-center font-mono tracking-[0.3em]", touch && "h-11")}
                       />
-                    </div>
-                    <div className="min-w-0">
-                      <Label htmlFor="disable-password" className="text-[0.72rem] text-faint">
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="disable-password" className="text-xs">
                         当前密码（防会话劫持）
-                      </Label>
+                      </FieldLabel>
                       <Input
                         id="disable-password"
                         type="password"
                         autoComplete="current-password"
                         value={disablePassword}
                         onChange={(event) => setDisablePassword(event.target.value)}
-                        className={cn("mt-1 h-9", touch && "tap")}
+                        className={cn(touch && "h-11")}
                       />
-                    </div>
+                    </Field>
                     <Button
-                      size="sm"
                       variant="destructive"
                       className="h-11 sm:h-9"
                       onClick={() => void disableTotp()}
@@ -386,7 +383,7 @@ export function AccountPage() {
                 </div>
               ) : null}
             </div>
-          </div>
+          </Section>
         </div>
 
         {/* --------------------------------------------------------- session card */}
@@ -403,12 +400,27 @@ export function AccountPage() {
             </InfoRow>
           </dl>
           <div className="mt-3 grid min-w-0">
-            <Button size="sm" variant="outline" className="tap h-11 justify-self-start sm:h-9" onClick={() => void logout()}>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-11 justify-self-start sm:h-9"
+              onClick={() => void logout()}
+            >
               <LogOut className="size-3.5" />
               退出当前会话
             </Button>
           </div>
         </Section>
+
+        {totpEnabled ? (
+          <p className="px-1 text-xs leading-relaxed text-faint">
+            当前会话已启用二次验证；操作者信息与所有变更都会写入审计日志。
+          </p>
+        ) : (
+          <p className="px-1 text-xs leading-relaxed text-faint">
+            建议为控制台启用二次验证。备份码请离线保存，遗失后只能用服务端配置重置。
+          </p>
+        )}
       </div>
     </div>
   );
@@ -435,10 +447,10 @@ function PasswordField({
   return (
     <div className="grid min-w-0 gap-1.5 sm:grid-cols-[minmax(0,9rem)_minmax(0,1fr)] sm:items-center sm:gap-3">
       <div className="min-w-0">
-        <Label htmlFor={id} className="text-[0.82rem] font-medium text-ink">
+        <label htmlFor={id} className="text-sm font-medium text-foreground">
           {label}
-        </Label>
-        {hint ? <p className="mt-0.5 text-[0.68rem] leading-relaxed text-faint">{hint}</p> : null}
+        </label>
+        {hint ? <p className="mt-0.5 text-xs leading-relaxed text-faint">{hint}</p> : null}
       </div>
       <Input
         id={id}
@@ -446,7 +458,7 @@ function PasswordField({
         autoComplete={autoComplete}
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className={cn("h-9", touch && "tap")}
+        className={cn(touch && "h-11")}
         required
       />
     </div>
@@ -456,9 +468,9 @@ function PasswordField({
 /** One session key/value line. */
 function InfoRow({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="grid min-w-0 grid-cols-[minmax(0,6.5rem)_minmax(0,1fr)] items-baseline gap-2 border-b border-line py-1.5 last:border-0 last:pb-0">
-      <dt className="min-w-0 break-all text-[0.7rem] text-faint">{label}</dt>
-      <dd className="min-w-0 break-all text-[0.78rem] leading-relaxed text-soft">{children}</dd>
+    <div className="grid min-w-0 grid-cols-[minmax(0,6.5rem)_minmax(0,1fr)] items-baseline gap-2 border-b border-border py-1.5 last:border-0 last:pb-0">
+      <dt className="min-w-0 break-all text-xs text-faint">{label}</dt>
+      <dd className="min-w-0 break-all text-xs leading-relaxed text-muted-foreground">{children}</dd>
     </div>
   );
 }

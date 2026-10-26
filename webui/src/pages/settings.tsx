@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { ComponentType } from "react";
+import type { ComponentType, ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import {
@@ -16,21 +16,18 @@ import {
   Rocket,
   RotateCcw,
   Save,
-  ServerCog,
   Settings2,
-  ShieldCheck,
-  SlidersHorizontal,
   Timer,
   Trash2,
   Wifi,
 } from "lucide-react";
 
-import { GlowCard, GridPattern, ShimmerButton } from "@/components/aceternity";
 import { Banner, ErrorBlock, LoadingBlock } from "@/components/async-state";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { MetaChip, PageHeader } from "@/components/page-header";
-import { Section } from "@/components/section";
+import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -308,7 +305,6 @@ export function SettingsPage() {
     return (
       <div className="w-full min-w-0">
         <PageHeader
-          icon={SlidersHorizontal}
           title="设置"
           description="修改只在点“保存”后生效并推送给在线受控端；草稿只保存在本页。"
         />
@@ -322,7 +318,7 @@ export function SettingsPage() {
   if (query.isError) {
     return (
       <div className="w-full min-w-0">
-        <PageHeader icon={SlidersHorizontal} title="设置" description="服务端全局配置" />
+        <PageHeader title="设置" description="服务端全局配置" />
         <div className="mt-4">
           <ErrorBlock
             message={isApiError(query.error) ? query.error.message : "无法读取设置"}
@@ -342,19 +338,18 @@ export function SettingsPage() {
   return (
     <div className={cn("w-full min-w-0", !desktop && "pb-32")}>
       <PageHeader
-        icon={SlidersHorizontal}
         title="设置"
         description="修改只在点“保存”后生效并推送给在线受控端；草稿只保存在本页。"
         actions={
           <>
-            <Button size="sm" variant="outline" onClick={reset} disabled={!canSave}>
+            <Button size="sm" variant="outline" className="h-9 px-3" onClick={reset} disabled={!canSave}>
               <RotateCcw className="size-3.5" />
               放弃
             </Button>
-            <ShimmerButton busy={saving} disabled={!canSave} onClick={() => void save()}>
-              <Save className="mr-1.5 size-4" />
+            <Button size="sm" className="h-9 px-3" disabled={!canSave} onClick={() => void save()}>
+              {saving ? <Spinner className="size-4" /> : <Save className="size-4" />}
               保存{dirtyCount > 0 ? `（${dirtyCount}）` : ""}
-            </ShimmerButton>
+            </Button>
           </>
         }
       />
@@ -367,83 +362,60 @@ export function SettingsPage() {
           </Banner>
         ) : null}
 
-        <div className={cn("mx-auto w-full min-w-0 max-w-4xl", stack)}>
+        <div className={cn("w-full min-w-0", stack)}>
             {fieldSections.map((group) => {
-              const Icon = group.icon;
               const changed = group.keys.filter(
                 (key) => dirtyKeys.includes(key) || (secrets[key] ?? "").trim() !== "",
               ).length;
               return (
-                <div key={group.id} className="min-w-0">
-                  <Section
-                    title={group.title}
-                    hint={group.hint}
-                    icon={Icon}
-                    actions={
-                      changed > 0 ? (
-                        <MetaChip tone="warn" className="text-[0.68rem]">
-                          {changed} 项改动
-                        </MetaChip>
-                      ) : undefined
-                    }
-                  >
-                    <div className="grid min-w-0 gap-3">
-                      {group.keys.map((key) => (
-                        <SettingField
-                          key={key}
-                          name={key}
-                          spec={specs[key]}
-                          value={draft?.[key]}
-                          secretValue={secrets[key] ?? ""}
-                          dirty={dirtyKeys.includes(key) || (secrets[key] ?? "").trim() !== ""}
-                          touch={touch}
-                          onChange={(value) => update(key, value)}
-                          onSecretChange={(value) => setSecrets((current) => ({ ...current, [key]: value }))}
-                        />
-                      ))}
-                    </div>
-                  </Section>
-                </div>
+                <SettingsCard
+                  key={group.id}
+                  padded={false}
+                  title={group.title}
+                  description={group.hint}
+                  actions={
+                    changed > 0 ? (
+                      <MetaChip tone="warn" className="text-xs">
+                        {changed} 项改动
+                      </MetaChip>
+                    ) : undefined
+                  }
+                >
+                  <div className="divide-y divide-border">
+                    {group.keys.map((key) => (
+                      <SettingField
+                        key={key}
+                        name={key}
+                        spec={specs[key]}
+                        value={draft?.[key]}
+                        secretValue={secrets[key] ?? ""}
+                        dirty={dirtyKeys.includes(key) || (secrets[key] ?? "").trim() !== ""}
+                        touch={touch}
+                        onChange={(value) => update(key, value)}
+                        onSecretChange={(value) => setSecrets((current) => ({ ...current, [key]: value }))}
+                      />
+                    ))}
+                  </div>
+                </SettingsCard>
               );
             })}
 
             {/* ------------------------------------------------ install launchpad */}
             <div className="min-w-0">
-              <GlowCard
-                isStatic={!desktop}
-                contentClassName="p-0"
-                className="min-w-0"
-                tint="rgba(99, 146, 255, 0.22)"
+              <SettingsCard
+                title="安装令牌"
+                description="令牌只用于一次安装，绑定第一台使用它的机器；下载脚本本身不会消耗它。"
+                actions={
+                  <>
+                    <MetaChip tone="ok">可用 {install?.available_tokens ?? 0}</MetaChip>
+                    <MetaChip>默认 {install?.token_ttl_minutes ?? "—"} 分钟</MetaChip>
+                  </>
+                }
               >
-                <div className="relative min-w-0 overflow-hidden rounded-panel">
-                  <GridPattern
-                    className="pointer-events-none absolute inset-full opacity-40"
-                    stroke="var(--c-grid-line)"
-                    strokeDasharray="4 6"
-                    fade="top"
-                  />
-                  <div className="relative min-w-0 p-3 sm:p-5">
-                    <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start sm:gap-4">
+                  <div className="min-w-0">
+                    <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,10rem)_auto] sm:items-end sm:gap-3">
                       <div className="min-w-0">
-                        <h2 className="flex min-w-0 items-center text-[0.98rem] font-semibold tracking-tight text-ink">
-                          <span className="mr-2 flex size-7 shrink-0 items-center justify-center rounded-lg border border-line bg-brand-soft text-brand">
-                            <ShieldCheck className="size-3.5" />
-                          </span>
-                          <span className="truncate">安装令牌</span>
-                        </h2>
-                        <p className="mt-1.5 text-[0.78rem] leading-relaxed text-soft">
-                          令牌只用于一次安装，绑定第一台使用它的机器；下载脚本本身不会消耗它。
-                        </p>
-                      </div>
-                      <div className="flex min-w-0 flex-wrap items-center sm:justify-end">
-                        <MetaChip tone="ok">可用 {install?.available_tokens ?? 0}</MetaChip>
-                        <MetaChip className="ml-1.5">默认 {install?.token_ttl_minutes ?? "—"} 分钟</MetaChip>
-                      </div>
-                    </div>
-
-                    <div className="mt-3 grid min-w-0 gap-2 sm:grid-cols-[minmax(0,10rem)_auto] sm:items-end sm:gap-3">
-                      <div className="min-w-0">
-                        <Label className="text-[0.72rem] text-faint">有效期</Label>
+                        <Label className="text-xs text-faint">有效期</Label>
                         <Select value={String(ttl)} onValueChange={(value) => setTtl(Number(value) || 1800)}>
                           <SelectTrigger size="sm" className={cn("mt-1 w-full", touch && "tap")}>
                             <SelectValue />
@@ -458,30 +430,25 @@ export function SettingsPage() {
                         </Select>
                       </div>
                       <div className="min-w-0">
-                        <ShimmerButton busy={createToken.isPending} onClick={() => createToken.mutate()}>
-                          <KeyRound className="mr-1.5 size-4" />
+                        <Button disabled={createToken.isPending} onClick={() => createToken.mutate()}>
+                          {createToken.isPending ? <Spinner className="size-4" /> : <KeyRound className="size-4" />}
                           生成令牌
-                        </ShimmerButton>
+                        </Button>
                       </div>
                     </div>
 
                     {created ? (
-                      <div className="relative mt-3 min-w-0 overflow-hidden rounded-xl border border-line bg-sunken p-3">
-                        <GridPattern
-                          className="pointer-events-none absolute inset-full opacity-25"
-                          stroke="var(--c-grid-line)"
-                          fade="radial"
-                        />
-                        <div className="relative min-w-0">
+                      <div className="mt-3 min-w-0 overflow-hidden rounded-md border border-border bg-muted p-3">
+                        <div className="min-w-0">
                           <div className="min-w-0">
-                            <p className="text-[0.82rem] font-semibold text-brand">令牌只显示这一次</p>
-                            <p className="text-[0.72rem] leading-relaxed text-soft">
+                            <p className="text-sm font-semibold text-primary">令牌只显示这一次</p>
+                            <p className="text-xs leading-relaxed text-muted-foreground">
                               有效至 <span className="tnum">{formatDateTime(created.expires)}</span>；请立即复制或下载安装脚本。
                             </p>
                           </div>
 
                           <div className="mt-2 grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5">
-                            <code className="min-w-0 break-all rounded-lg border border-line bg-panel px-2.5 py-2 font-mono text-[0.72rem] leading-relaxed text-ink">
+                            <code className="min-w-0 break-all rounded-md border border-border bg-card px-2.5 py-2 font-mono text-xs leading-relaxed text-foreground">
                               {created.token}
                             </code>
                             <Button
@@ -550,16 +517,11 @@ export function SettingsPage() {
                         <LoadingBlock label="正在读取令牌…" rows={2} />
                       </div>
                     ) : tokenTotal === 0 ? (
-                      <div className="relative mt-3 min-w-0 overflow-hidden rounded-xl border border-dashed border-line bg-sunken px-3 py-6 text-center">
-                        <GridPattern
-                          className="pointer-events-none absolute inset-full opacity-30"
-                          stroke="var(--c-grid-line)"
-                          fade="radial"
-                        />
-                        <div className="relative">
+                      <div className="mt-3 min-w-0 overflow-hidden rounded-md border border-dashed border-border bg-muted px-3 py-6 text-center">
+                        <div>
                           <KeyRound className="mx-auto size-5 text-faint" />
-                          <p className="mt-2 text-[0.84rem] font-medium text-ink">还没有可用的安装令牌</p>
-                          <p className="mx-auto mt-1 max-w-sm text-[0.72rem] leading-relaxed text-soft">
+                          <p className="mt-2 text-sm font-medium text-foreground">还没有可用的安装令牌</p>
+                          <p className="mx-auto mt-1 max-w-sm text-xs leading-relaxed text-muted-foreground">
                             生成一枚令牌后即可下载安装脚本；脚本下载不会消耗令牌，首次安装时才会绑定设备。
                           </p>
                           <Button
@@ -581,26 +543,20 @@ export function SettingsPage() {
                           return (
                             <li
                               key={token.id}
-                              className="grid min-w-0 gap-2 rounded-xl border border-line bg-sunken p-2.5 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center sm:gap-3"
+                              className="grid min-w-0 gap-2 rounded-md border border-border bg-card p-2.5 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center sm:gap-3"
                             >
-                              <span
-                                className={cn(
-                                  "w-fit rounded-full border px-2 py-0.5 text-[0.66rem] font-semibold",
-                                  state === "可用"
-                                    ? "border-line bg-ok-soft text-ok"
-                                    : state === "已使用"
-                                      ? "border-line bg-sunken text-faint"
-                                      : "border-line bg-warn-soft text-warn",
-                                )}
+                              <Badge
+                                variant={state === "可用" ? "success" : state === "已使用" ? "neutral" : "warning"}
+                                className="w-fit text-xs font-semibold"
                               >
                                 {state}
-                              </span>
+                              </Badge>
                               <div className="min-w-0">
-                                <p className="min-w-0 break-all text-[0.78rem] text-ink">
-                                  <span className="tnum font-mono text-soft">#{token.id}</span>
+                                <p className="min-w-0 break-all text-xs text-foreground">
+                                  <span className="tnum font-mono text-muted-foreground">#{token.id}</span>
                                   <span className="ml-2 text-faint">由 {token.created_by || "console"} 创建</span>
                                 </p>
-                                <p className="mt-0.5 min-w-0 break-all text-[0.7rem] leading-relaxed text-faint">
+                                <p className="mt-0.5 min-w-0 break-all text-xs leading-relaxed text-faint">
                                   有效至 {formatDateTime(token.expires_at_ms)}
                                   {token.used_at_ms ? ` · 使用于 ${formatDateTime(token.used_at_ms)}` : ""}
                                 </p>
@@ -612,7 +568,7 @@ export function SettingsPage() {
                                 disabled={revokeToken.isPending}
                                 onClick={() => setPendingToken(token)}
                               >
-                                <Trash2 className="size-3.5 text-danger" />
+                                <Trash2 className="size-3.5 text-destructive" />
                                 撤销
                               </Button>
                             </li>
@@ -621,15 +577,13 @@ export function SettingsPage() {
                       </ul>
                     )}
                   </div>
-                </div>
-              </GlowCard>
+              </SettingsCard>
             </div>
 
             {/* ------------------------------------------------ account hand-off */}
-            <Section
+            <SettingsCard
               title="账户与安全"
-              hint="密码修改、二次验证与会话登出在独立页面维护"
-              icon={ShieldCheck}
+              description="密码修改、二次验证与会话登出在独立页面维护"
               actions={
                 <Link
                   to="/account"
@@ -639,16 +593,15 @@ export function SettingsPage() {
                 </Link>
               }
             >
-              <p className="text-[0.8rem] leading-relaxed text-soft">
+              <p className="text-sm leading-relaxed text-muted-foreground">
                 登录密码、二次验证（TOTP）与会话登出都在账户页完成，本页不再重复这些表单。
               </p>
-            </Section>
+            </SettingsCard>
 
             {/* ------------------------------------------------ server summary */}
-            <Section
+            <SettingsCard
               title="服务器"
-              hint="只读状态"
-              icon={ServerCog}
+              description="只读状态"
               actions={
                 systemQuery.isError ? (
                   <MetaChip tone="danger">读取失败</MetaChip>
@@ -691,7 +644,7 @@ export function SettingsPage() {
                     />
                   </dl>
                 )}
-            </Section>
+            </SettingsCard>
         </div>
       </div>
 
@@ -731,10 +684,44 @@ function ServerRow({
   className?: string;
 }) {
   return (
-    <div className={cn("grid min-w-0 grid-cols-[minmax(0,7.5rem)_minmax(0,1fr)] items-baseline gap-2", className)}>
-      <dt className="min-w-0 break-all text-[0.7rem] text-faint">{label}</dt>
-      <dd className={cn("min-w-0 break-all text-[0.78rem] text-soft", mono && "tnum")}>{value}</dd>
+    <div className={cn("flex min-w-0 items-baseline justify-between gap-4", className)}>
+      <dt className="shrink-0 text-sm text-foreground">{label}</dt>
+      <dd className={cn("min-w-0 break-all text-right text-sm text-muted-foreground", mono && "tnum")}>{value}</dd>
     </div>
+  );
+}
+
+/**
+ * Settings group: one flat surface with a shadow instead of a border, a 16px
+ * title, a 14px description and a divider before the rows. Cards breathe at
+ * p-6 so content never touches the edge.
+ */
+function SettingsCard({
+  title,
+  description,
+  actions,
+  children,
+  padded = true,
+}: {
+  title: ReactNode;
+  description?: ReactNode;
+  actions?: ReactNode;
+  children: ReactNode;
+  padded?: boolean;
+}) {
+  return (
+    <section className="min-w-0 overflow-hidden rounded-2xl bg-card shadow-sm">
+      <header className="flex min-w-0 items-start justify-between gap-3 px-6 pt-5 pb-4">
+        <div className="min-w-0">
+          <h2 className="text-base font-semibold tracking-[-0.01em] text-foreground">{title}</h2>
+          {description ? (
+            <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{description}</p>
+          ) : null}
+        </div>
+        {actions ? <div className="flex shrink-0 items-center gap-1.5">{actions}</div> : null}
+      </header>
+      <div className={cn("border-t border-border", padded && "px-6 py-5")}>{children}</div>
+    </section>
   );
 }
 
@@ -765,80 +752,83 @@ function SettingField({
   const label = specLabel(name, spec);
   const range =
     spec.kind === "int" && (spec.min !== null || spec.max !== null)
-      ? ` · 范围 ${spec.min ?? "—"}..${spec.max ?? "—"}`
+      ? `范围 ${spec.min ?? "—"}..${spec.max ?? "—"}`
       : "";
+  const height = touch ? "h-11" : "h-9";
 
   return (
-    <div className="grid min-w-0 gap-2 border-b border-line pb-3 last:border-b-0 last:pb-0 sm:grid-cols-[minmax(0,1fr)_minmax(0,15rem)] sm:items-center sm:gap-4">
+    <div className="grid min-w-0 gap-3 px-6 py-4 sm:grid-cols-[minmax(0,1fr)_16rem] sm:items-center sm:gap-6">
       <div className="min-w-0">
-        <div className="flex min-w-0 flex-wrap items-center">
-          <Label htmlFor={id} className="mr-2 min-w-0 text-[0.84rem] font-medium leading-snug text-ink">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <Label htmlFor={id} className="min-w-0 text-sm font-medium leading-relaxed text-foreground">
             {label}
           </Label>
           {dirty ? (
-            <span className="mt-0.5 rounded-full border border-line bg-warn-soft px-1.5 py-px text-[0.62rem] font-semibold text-warn">
+            <Badge variant="warning" className="text-xs font-medium">
               已修改
-            </span>
+            </Badge>
           ) : null}
         </div>
-        <p className="mt-0.5 min-w-0 break-all text-[0.7rem] leading-relaxed text-faint">
-          <span className="font-mono text-soft">{name}</span>
-          {spec.per_device ? " · 可按设备覆盖" : " · 仅全局"}
-          {spec.secret ? " · 已配置值不回显，留空表示不修改" : ""}
-          {range}
-        </p>
+        <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs leading-relaxed text-muted-foreground">
+          <code className="rounded-sm bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
+            {name}
+          </code>
+          <span>{spec.per_device ? "可按设备覆盖" : "仅全局"}</span>
+          {spec.secret ? <span>已配置值不回显，留空表示不修改</span> : null}
+          {range ? <span>{range}</span> : null}
+        </div>
       </div>
 
-      {spec.secret ? (
-        <Input
-          id={id}
-          type="password"
-          autoComplete="new-password"
-          value={secretValue}
-          onChange={(event) => onSecretChange(event.target.value)}
-          placeholder="留空不修改"
-          className={cn("h-9", touch && "tap")}
-        />
-      ) : spec.kind === "bool" ? (
-        <div className="flex min-w-0 items-center sm:justify-end">
+      <div className="flex min-w-0 items-center justify-end">
+        {spec.secret ? (
+          <Input
+            id={id}
+            type="password"
+            autoComplete="new-password"
+            value={secretValue}
+            onChange={(event) => onSecretChange(event.target.value)}
+            placeholder="留空不修改"
+            className={cn("w-full", height)}
+          />
+        ) : spec.kind === "bool" ? (
           <Switch
             id={id}
             checked={Boolean(value)}
             onCheckedChange={(checked) => onChange(checked)}
             aria-label={label}
           />
-        </div>
-      ) : spec.kind === "choice" ? (
-        <Select value={String(value ?? spec.choices[0] ?? "")} onValueChange={(next) => onChange(next)}>
-          <SelectTrigger size="sm" className={cn("w-full", touch && "tap")}>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {spec.choices.map((choice) => (
-              <SelectItem key={choice} value={choice}>
-                {choice}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      ) : spec.kind === "int" ? (
-        <Input
-          id={id}
-          type="number"
-          inputMode="numeric"
-          value={value === undefined || value === null ? "" : String(value)}
-          onChange={(event) => onChange(event.target.value === "" ? "" : Number(event.target.value))}
-          className={cn("h-9", touch && "tap")}
-        />
-      ) : (
-        <Input
-          id={id}
-          value={typeof value === "string" ? value : value === undefined || value === null ? "" : String(value)}
-          onChange={(event) => onChange(event.target.value)}
-          className={cn("h-9", touch && "tap")}
-          placeholder={spec.kind === "optional_str" ? "可留空" : undefined}
-        />
-      )}
+        ) : spec.kind === "choice" ? (
+          <Select value={String(value ?? spec.choices[0] ?? "")} onValueChange={(next) => onChange(next)}>
+            <SelectTrigger id={id} className="w-48">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {spec.choices.map((choice) => (
+                <SelectItem key={choice} value={choice}>
+                  {choice}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : spec.kind === "int" ? (
+          <Input
+            id={id}
+            type="number"
+            inputMode="numeric"
+            value={value === undefined || value === null ? "" : String(value)}
+            onChange={(event) => onChange(event.target.value === "" ? "" : Number(event.target.value))}
+            className={cn("tnum w-32 text-right", height)}
+          />
+        ) : (
+          <Input
+            id={id}
+            value={typeof value === "string" ? value : value === undefined || value === null ? "" : String(value)}
+            onChange={(event) => onChange(event.target.value)}
+            className={cn("w-full", height)}
+            placeholder={spec.kind === "optional_str" ? "可留空" : undefined}
+          />
+        )}
+      </div>
     </div>
   );
 }

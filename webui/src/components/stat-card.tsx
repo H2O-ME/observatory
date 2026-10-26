@@ -1,9 +1,73 @@
 import type { ComponentType, ReactNode } from "react";
 
-import { useViewport } from "@/hooks/use-viewport";
+import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
 type Tone = "brand" | "ok" | "warn" | "danger" | "neutral";
+
+const VALUE_TONE: Record<Tone, string> = {
+  brand: "text-foreground",
+  ok: "text-foreground",
+  warn: "text-warning",
+  danger: "text-destructive",
+  neutral: "text-foreground",
+};
+
+/**
+ * Fleet/server metric strip.
+ *
+ * One framed row with internal rules instead of four free-floating cards. The
+ * label is the quiet element and the number carries the weight; status colour
+ * appears only when the value itself is a warning.
+ */
+export function StatStrip({
+  children,
+  className,
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <Card
+      className={cn(
+        "stat-strip grid min-w-0 gap-0 overflow-hidden rounded-2xl border-0 bg-card py-0 shadow-sm",
+        className,
+      )}
+    >
+      {children}
+    </Card>
+  );
+}
+
+export function StatCell({
+  label,
+  value,
+  hint,
+  tone = "neutral",
+  className,
+}: {
+  label: ReactNode;
+  value: ReactNode;
+  hint?: ReactNode;
+  tone?: Tone;
+  className?: string;
+}) {
+  return (
+    <div className={cn("flex min-w-0 flex-col px-6 py-6", className)}>
+      <p className="mb-1 truncate text-left text-sm leading-5 text-muted-foreground">{label}</p>
+      <p
+        key={String(value)}
+        className={cn(
+          "tnum animate-sm-fade truncate text-left text-2xl leading-8 font-semibold tracking-tight",
+          VALUE_TONE[tone],
+        )}
+      >
+        {value}
+      </p>
+      {hint ? <p className="mt-1 truncate text-left text-xs leading-relaxed text-faint">{hint}</p> : null}
+    </div>
+  );
+}
 
 interface StatCardProps {
   label: ReactNode;
@@ -13,71 +77,58 @@ interface StatCardProps {
   tone?: Tone;
   className?: string;
   onClick?: () => void;
-  /** Small trailing element, e.g. a trend tag. */
-  aside?: ReactNode;
 }
 
-/**
- * Bento-style telemetry tile. Uses `.surface` rather than the generic Card so
- * it stays legible when backdrop-filter is dropped on the watch.
- */
+/** One KPI card (used in the 12-column device grid). */
 export function StatCard({
   label,
   value,
   hint,
   icon: Icon,
+  tone = "neutral",
   className,
   onClick,
-  aside,
 }: StatCardProps) {
-  const viewport = useViewport();
-  const watch = viewport === "watch";
-  const Tag = onClick ? "button" : "div";
-
   return (
-    <Tag
-      type={onClick ? "button" : undefined}
+    <Card
       onClick={onClick}
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={
+        onClick
+          ? (event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onClick();
+              }
+            }
+          : undefined
+      }
       className={cn(
-        "surface surface-hover group relative min-w-0 overflow-hidden text-left",
-        watch ? "p-2.5" : "p-3.5 sm:p-4",
-        onClick && "cursor-pointer",
+        "h-full min-w-0 gap-0 py-0 transition-colors",
+        onClick && "cursor-pointer hover:border-border-strong",
         className,
       )}
     >
-      <div className="relative flex min-w-0 items-start justify-between gap-2">
-        <div className={cn("min-w-0", watch ? "flex-1" : "")}>
-          <p className={cn("eyebrow truncate", watch && "text-[0.6rem]")}>{label}</p>
-          {/* Keyed by content: a server refresh that changes the number
-              remounts the node and replays a short fade — the update is seen,
-              not just silently replaced. */}
-          <p
-            key={String(value)}
-            className={cn(
-              "tnum animate-sm-fade mt-0.5 truncate font-medium tracking-tight text-ink",
-              watch ? "text-base" : "text-xl leading-snug",
-            )}
-          >
-            {value}
-          </p>
-          {hint ? (
-            <p className={cn("mt-0.5 truncate text-faint", watch ? "text-[0.65rem]" : "text-[0.72rem]")}>{hint}</p>
-          ) : null}
-        </div>
-        {Icon ? (
-          <span
-            className={cn(
-              "flex shrink-0 items-center justify-center rounded-md bg-sunken text-soft",
-              watch ? "size-6" : "size-7",
-            )}
-          >
-            <Icon className={watch ? "size-3.5" : "size-3.5"} />
-          </span>
-        ) : aside ? (
-          <span className="shrink-0">{aside}</span>
+      <div className="flex h-full min-w-0 flex-col px-6 py-6">
+        <p className="mb-1 flex items-center gap-1.5 truncate text-left text-sm leading-5 text-muted-foreground">
+          {Icon ? <Icon className="size-3.5 shrink-0" aria-hidden /> : null}
+          {label}
+        </p>
+        <p
+          key={String(value)}
+          className={cn(
+            "tnum animate-sm-fade truncate text-left text-2xl leading-8 font-semibold tracking-tight",
+            VALUE_TONE[tone],
+          )}
+        >
+          {value}
+        </p>
+        {hint ? (
+          <p className="mt-1 truncate text-left text-xs leading-relaxed text-faint">{hint}</p>
         ) : null}
       </div>
-    </Tag>
+    </Card>
   );
 }
 

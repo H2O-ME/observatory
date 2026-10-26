@@ -1,11 +1,18 @@
 import { useEffect } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
-import { Loader2, RadioTower, RefreshCw } from "lucide-react";
+import { RadioTower, RefreshCw } from "lucide-react";
 
 import { AppShell } from "@/components/app-shell";
-import { GridPattern } from "@/components/aceternity/grid-pattern";
 import { LiveBridge } from "@/components/live-bridge";
 import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Spinner } from "@/components/ui/spinner";
 import { AccountPage } from "@/pages/account";
 import { AuditPage } from "@/pages/audit";
 import { BackupPage } from "@/pages/backup";
@@ -30,37 +37,40 @@ export function App() {
 
   if (status === "boot") {
     return (
-      <div className="relative flex app-vh flex-col items-center justify-center overflow-hidden px-4">
-        <GridPattern className="opacity-50" stroke="var(--c-grid-line)" strokeDasharray="4 6" />
-        <div className="surface-strong relative z-10 flex flex-col items-center px-8 py-7">
-          <span className="relative flex size-12 items-center justify-center rounded-2xl border border-line bg-brand-soft text-brand">
-            <RadioTower className="size-5" />
-            <span className="absolute -right-1 -top-1 size-2.5 rounded-full bg-ok animate-sm-pulse" />
-          </span>
-          <p className="mt-4 text-[0.95rem] font-semibold text-ink">正在连接 Observatory</p>
-          <p className="mt-1 flex items-center gap-1.5 text-[0.78rem] text-soft">
-            <Loader2 className="size-3.5 animate-spin text-brand" />
-            读取服务端会话…
-          </p>
-        </div>
+      <div className="flex app-vh flex-col items-center justify-center bg-background px-4">
+        <Card className="w-full max-w-xs">
+          <CardHeader className="items-center text-center">
+            <span className="mx-auto flex size-10 items-center justify-center rounded-md border border-border bg-muted text-primary">
+              <RadioTower className="size-5" />
+            </span>
+            <CardTitle className="mt-2 text-base">正在连接 Observatory</CardTitle>
+            <CardDescription className="flex items-center justify-center gap-1.5">
+              <Spinner className="size-3.5 text-primary" />
+              读取服务端会话…
+            </CardDescription>
+          </CardHeader>
+        </Card>
       </div>
     );
   }
 
   if (status === "error") {
     return (
-      <div className="relative flex app-vh items-center justify-center overflow-hidden px-4">
-        <GridPattern className="opacity-50" stroke="var(--c-grid-line)" strokeDasharray="4 6" />
-        <div className="surface-strong relative z-10 w-full max-w-sm p-6 text-center">
-          <p className="text-[0.95rem] font-semibold text-ink">{error}</p>
-          <p className="mt-2 text-[0.8rem] leading-relaxed text-soft">
-            控制台无法读取服务端会话。网络恢复后可以继续使用，登录状态会保留。
-          </p>
-          <Button className="mt-5 w-full" onClick={() => void refresh()}>
-            <RefreshCw className="size-4" />
-            重试
-          </Button>
-        </div>
+      <div className="flex app-vh items-center justify-center bg-background px-4">
+        <Card className="w-full max-w-sm">
+          <CardHeader>
+            <CardTitle className="text-base">{error}</CardTitle>
+            <CardDescription>
+              控制台无法读取服务端会话。网络恢复后可以继续使用，登录状态会保留。
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button className="w-full" onClick={() => void refresh()}>
+              <RefreshCw className="size-4" />
+              重试
+            </Button>
+          </CardContent>
+        </Card>
       </div>
     );
   }

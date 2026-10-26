@@ -2,29 +2,22 @@ import { useEffect, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import {
-  Activity,
   Camera,
   CheckCircle2,
-  HardDrive,
-  Info,
-  PencilLine,
   Power,
-  RadioTower,
   RotateCcw,
   Trash2,
   TriangleAlert,
   Unplug,
-  Users,
 } from "lucide-react";
 
 import { Meter, RingMeter } from "@/components/meter";
+import { Panel, PanelRow } from "@/components/panel";
 import { Banner } from "@/components/async-state";
 import { ConfirmDialog } from "@/components/confirm-dialog";
-import { Section } from "@/components/section";
 import { Button } from "@/components/ui/button";
+import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Separator } from "@/components/ui/separator";
 import { api, isApiError } from "@/lib/api";
 import type { Device } from "@/lib/types";
 import { formatBytes, formatDateTime, formatDuration, formatAge } from "@/lib/format";
@@ -65,6 +58,34 @@ interface Props {
   onRefresh: () => void;
 }
 
+/** Ring plus the percentage beside it: the chart carries shape, the number carries weight. */
+function UsageGauge({
+  label,
+  value,
+  size,
+}: {
+  label: string;
+  value: number | null;
+  size: number;
+}) {
+  return (
+    <div className="flex min-w-0 flex-col items-center">
+      <RingMeter
+        label={label}
+        value={value}
+        showValue={false}
+        showLabel={false}
+        size={size}
+        stroke={6}
+      />
+      <span className="tnum mt-2 text-2xl leading-8 font-semibold tracking-[-0.02em] text-foreground">
+        {value === null ? "—" : `${Math.round(value)}%`}
+      </span>
+      <span className="mt-1 text-xs text-muted-foreground">{label}</span>
+    </div>
+  );
+}
+
 /**
  * Rename form.
  *
@@ -72,10 +93,7 @@ interface Props {
  * is clean, so a background refetch cannot overwrite what the operator is
  * typing, and switching to another device never inherits the previous name.
  */
-function RenameCard({ device, onSaved }: { device: Device; onSaved: () => void }) {
-  const viewport = useViewport();
-  const watch = viewport === "watch";
-  const desktop = viewport === "desktop";
+function RenamePanel({ device, onSaved }: { device: Device; onSaved: () => void }) {
   const [name, setName] = useState(device.name);
   const [note, setNote] = useState(device.note);
   const [dirty, setDirty] = useState(false);
@@ -94,59 +112,51 @@ function RenameCard({ device, onSaved }: { device: Device; onSaved: () => void }
     },
   });
 
-  const bodyText = watch ? "text-[0.78rem]" : "text-[0.85rem]";
-
   return (
-    <Section
+    <Panel
       title="重命名"
-      icon={PencilLine}
-      actions={dirty ? <span className="eyebrow text-warn">未保存</span> : null}
-      className="min-w-0 xl:col-span-1"
+      hint="显示名称与备注只影响控制台，不会下发到设备。"
+      actions={dirty ? <span className="text-xs text-warning">未保存</span> : null}
+      className="min-w-0"
+      bodyClassName="px-6 pt-1 pb-4"
     >
-      <div className="space-y-2.5">
-        <div className="space-y-1">
-          <Label htmlFor="device-name" className={cn("text-faint", bodyText)}>
-            显示名称
-          </Label>
+      <div className="space-y-4">
+        <Field>
+          <FieldLabel htmlFor="device-name">显示名称</FieldLabel>
           <Input
             id="device-name"
+            className="w-full border-transparent bg-muted focus-visible:ring-1 focus-visible:ring-ring"
             value={name}
             onChange={(event) => {
               setDirty(true);
               setName(event.target.value);
             }}
-            className={desktop ? "h-9" : "h-11"}
           />
-        </div>
-        <div className="space-y-1">
-          <Label htmlFor="device-note" className={cn("text-faint", bodyText)}>
-            备注
-          </Label>
+        </Field>
+        <Field>
+          <FieldLabel htmlFor="device-note">备注</FieldLabel>
           <Input
             id="device-note"
+            className="w-full border-transparent bg-muted focus-visible:ring-1 focus-visible:ring-ring"
             value={note}
             onChange={(event) => {
               setDirty(true);
               setNote(event.target.value);
             }}
-            className={desktop ? "h-9" : "h-11"}
           />
-        </div>
-        <div className="flex flex-wrap items-center">
-          <Button
-            size="sm"
-            className={cn("mr-2", !desktop && "tap")}
-            onClick={() => save.mutate()}
-            disabled={save.isPending}
-          >
-            保存
-          </Button>
-          {save.isError ? (
-            <span className={cn("text-danger", bodyText)}>{errorText(save.error, "保存失败")}</span>
-          ) : null}
-        </div>
+        </Field>
+        <Button
+          className="h-9 w-24 rounded-md"
+          onClick={() => save.mutate()}
+          disabled={save.isPending}
+        >
+          保存
+        </Button>
+        {save.isError ? (
+          <span className="text-xs text-destructive">{errorText(save.error, "保存失败")}</span>
+        ) : null}
       </div>
-    </Section>
+    </Panel>
   );
 }
 
@@ -162,7 +172,6 @@ export function OverviewView({ device, onRefresh }: Props) {
   const navigate = useNavigate();
   const viewport = useViewport();
   const watch = viewport === "watch";
-  const desktop = viewport === "desktop";
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   /** One dialog for all destructive actions; `null` = closed. */
@@ -249,272 +258,330 @@ export function OverviewView({ device, onRefresh }: Props) {
   const sessions = Array.isArray(device.sysinfo.sessions) ? (device.sysinfo.sessions as SessionRow[]) : [];
   const canDeleteRecord = device.presence.state === "offline" || device.presence.state === "uninstalled";
 
-  const bodyText = watch ? "text-[0.78rem]" : "text-[0.85rem]";
-  const metaText = watch ? "text-[0.7rem]" : "text-[0.76rem]";
-  const gridGap = watch ? "gap-2" : "gap-3 sm:gap-4";
-
-  // Telemetry bento: the resource card always exists; disks / sessions join it
-  // when the server reports them, and the spans rebalance so no column is left
-  // as dead space on a wide desktop.
-  const telemetryCount = 1 + (disks.length > 0 ? 1 : 0) + (sessions.length > 0 ? 1 : 0);
-  const resourceSpan = telemetryCount === 1 ? "xl:col-span-4" : "xl:col-span-2";
-  const secondarySpan = telemetryCount === 2 ? "xl:col-span-2" : "xl:col-span-1";
+  const bodyText = watch ? "text-xs" : "text-xs";
+  const metaText = watch ? "text-xs" : "text-xs";
 
   return (
-    <div className={cn("min-w-0", watch ? "space-y-2.5" : "space-y-4 sm:space-y-5")}>
+    <div className={cn("min-w-0 pb-10", watch ? "space-y-3" : "space-y-4")}>
       {message ? (
-        <Banner tone="ok" icon={CheckCircle2} className="py-2">
+        <Banner tone="ok" icon={CheckCircle2}>
           {message}
         </Banner>
       ) : null}
       {error ? (
-        <Banner tone="error" icon={TriangleAlert} className="py-2">
+        <Banner tone="error" icon={TriangleAlert}>
           {error}
         </Banner>
       ) : null}
 
       {captureBlocked ? (
-        <Banner tone="warn" icon={Camera} title="无法采集屏幕" className="py-2.5">
+        <Banner tone="warn" icon={Camera} title="无法采集屏幕">
           {captureReasonIsNew ? <p>{captureReason}</p> : null}
-          <p className={cn("text-faint", metaText, captureReasonIsNew && "mt-1")}>
+          <p className={cn("text-muted-foreground", metaText, captureReasonIsNew && "mt-1")}>
             受控端服务运行在会话 0，需要保持桌面会话登录；登录后画面会自动恢复。
           </p>
         </Banner>
       ) : null}
 
-      <div className={cn("grid min-w-0 md:grid-cols-2 xl:grid-cols-4", gridGap)}>
-        <Section
-          title="资源占用"
-          icon={Activity}
-          className={cn("min-w-0 md:col-span-2", resourceSpan)}
-        >
-          <div className="grid grid-cols-2 gap-2 sm:gap-3">
-            <RingMeter label="CPU" value={cpu} />
-            <RingMeter label="内存" value={memory} />
-          </div>
-          <dl
-            className={cn(
-              "mt-3 grid grid-cols-2 gap-x-3 gap-y-1.5",
-              watch ? "text-[0.72rem]" : "text-[0.78rem]",
-            )}
-          >
-            <div className="min-w-0">
-              <dt className="text-faint">内存总量</dt>
-              <dd className="tnum truncate text-soft" title={formatBytes(memTotal)}>
-                {formatBytes(memTotal)}
-              </dd>
+      <div className="grid min-w-0 grid-cols-1 items-start gap-6 lg:grid-cols-3">
+        <Panel title="资源占用" className="min-w-0 lg:col-span-2">
+          <div className="flex min-w-0 flex-col items-center gap-6 sm:flex-row sm:gap-10">
+            <div className="flex w-full shrink-0 items-center justify-center gap-6 sm:w-[200px]">
+              <UsageGauge label="CPU" value={cpu} size={watch ? 68 : 80} />
+              <UsageGauge label="内存" value={memory} size={watch ? 68 : 80} />
             </div>
-            <div className="min-w-0">
-              <dt className="text-faint">运行时长</dt>
-              <dd className="truncate text-soft" title={formatDuration(num(device.sysinfo, "uptime_s"))}>
-                {formatDuration(num(device.sysinfo, "uptime_s"))}
-              </dd>
-            </div>
-            <div className="min-w-0">
-              <dt className="text-faint">处理器</dt>
-              <dd className="truncate text-soft" title={text(device.sysinfo, "cpu_model") || "—"}>
-                {text(device.sysinfo, "cpu_model") || "—"}
-              </dd>
-            </div>
-            <div className="min-w-0">
-              <dt className="text-faint">当前用户</dt>
-              <dd className="truncate text-soft" title={text(device.sysinfo, "username") || "—"}>
-                {text(device.sysinfo, "username") || "—"}
-              </dd>
-            </div>
-          </dl>
-        </Section>
-
-        {disks.length > 0 ? (
-          <Section title="磁盘" icon={HardDrive} className={cn("min-w-0", secondarySpan)}>
-            <div className="space-y-2.5">
-              {disks.map((disk, index) => {
-                // Bar length = 已用占比, derived from the server's total/free
-                // pair (fall back to the agent's own percent when totals are
-                // missing). High fill therefore reads as "almost full" — the
-                // same danger direction as CPU/内存, not the inverse.
-                const total = disk.total ?? 0;
-                const used = total > 0 ? Math.max(0, total - (disk.free ?? 0)) : 0;
-                const usedPercent =
-                  total > 0
-                    ? (used / total) * 100
-                    : typeof disk.percent === "number"
-                      ? disk.percent
-                      : null;
-                return (
-                  <div key={`${disk.mount ?? index}`} className="min-w-0">
-                    <Meter
-                      label={`${disk.mount ?? "?"} · 已用 ${formatBytes(used)}`}
-                      value={usedPercent}
-                      hint={`共 ${formatBytes(total)} · 剩余 ${formatBytes(disk.free ?? 0)}`}
-                    />
-                  </div>
-                );
-              })}
-            </div>
-          </Section>
-        ) : null}
-
-        {sessions.length > 0 ? (
-          <Section title="登录会话" icon={Users} className={cn("min-w-0", secondarySpan)}>
-            <ul className="space-y-1.5">
-              {sessions.map((session) => (
-                <li
-                  key={session.session_id}
-                  className={cn(
-                    "grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 text-soft",
-                    bodyText,
-                  )}
+            <dl className="grid w-full min-w-0 flex-1 grid-cols-2 gap-x-4 gap-y-6 sm:w-auto">
+              <div className="min-w-0">
+                <dt className="text-sm text-muted-foreground">内存总量</dt>
+                <dd
+                  className="tnum mt-1 truncate text-sm font-medium text-foreground"
+                  title={formatBytes(memTotal)}
                 >
-                  <span className="min-w-0 truncate">
-                    会话 {session.session_id} · {session.username || "（未登录）"}
-                  </span>
-                  <span className={cn("shrink-0 text-faint", metaText)}>{session.state}</span>
-                </li>
-              ))}
-            </ul>
-          </Section>
-        ) : null}
-      </div>
+                  {formatBytes(memTotal)}
+                </dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-sm text-muted-foreground">运行时长</dt>
+                <dd
+                  className="mt-1 truncate text-sm font-medium text-foreground"
+                  title={formatDuration(num(device.sysinfo, "uptime_s"))}
+                >
+                  {formatDuration(num(device.sysinfo, "uptime_s"))}
+                </dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-sm text-muted-foreground">处理器</dt>
+                <dd
+                  className="mt-1 truncate text-sm font-medium text-foreground"
+                  title={text(device.sysinfo, "cpu_model") || "—"}
+                >
+                  {text(device.sysinfo, "cpu_model") || "—"}
+                </dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-sm text-muted-foreground">当前用户</dt>
+                <dd
+                  className="mt-1 truncate text-sm font-medium text-foreground"
+                  title={text(device.sysinfo, "username") || "—"}
+                >
+                  {text(device.sysinfo, "username") || "—"}
+                </dd>
+              </div>
+            </dl>
+          </div>
+        </Panel>
 
-      <div className={cn("grid min-w-0 md:grid-cols-2 xl:grid-cols-3", gridGap)}>
-        <Section title="设备信息" icon={Info} className="min-w-0 xl:col-span-2">
-          <dl
-            className={cn(
-              "grid grid-cols-[4.5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5",
-              bodyText,
-            )}
-          >
-            <dt className="text-faint">设备标识</dt>
-            <dd className="tnum truncate text-soft" title={device.uid}>
-              {device.uid}
-            </dd>
-            <dt className="text-faint">系统</dt>
-            <dd className="truncate text-soft" title={`${device.os_name} ${device.os_version}`}>
-              {device.os_name} {device.os_version}
-            </dd>
-            <dt className="text-faint">架构</dt>
-            <dd className="truncate text-soft">{device.arch}</dd>
-            <dt className="text-faint">受控端</dt>
-            <dd className="tnum truncate text-soft">
-              v{device.agent_version || "?"}
-              {device.protocol ? ` · 协议 ${device.protocol}` : ""}
-            </dd>
-            <dt className="text-faint">注册时间</dt>
-            <dd className="truncate text-soft">{formatDateTime(device.enrolled_at_ms)}</dd>
-            <dt className="text-faint">最近上报</dt>
-            <dd className="truncate text-soft">
-              {formatDateTime(device.last_seen_ms)}（{formatAge(device.presence.age_ms)}）
-            </dd>
-            <dt className="text-faint">通道</dt>
-            <dd className="truncate text-soft">
-              {transport === "ws" ? "WebSocket（实时）" : transport === "poll" ? "HTTP 轮询（无实时控制）" : "无活动通道"}
-            </dd>
-          </dl>
-        </Section>
+        <div className="flex min-w-0 flex-col gap-6 lg:col-span-1">
+          {disks.length > 0 ? (
+            <Panel title="磁盘" className="min-w-0">
+              <div className="space-y-3">
+                {disks.map((disk, index) => {
+                  // Bar length = 已用占比, derived from the server's total/free
+                  // pair (fall back to the agent's own percent when totals are
+                  // missing). High fill therefore reads as "almost full".
+                  const total = disk.total ?? 0;
+                  const used = total > 0 ? Math.max(0, total - (disk.free ?? 0)) : 0;
+                  const usedPercent =
+                    total > 0
+                      ? (used / total) * 100
+                      : typeof disk.percent === "number"
+                        ? disk.percent
+                        : null;
+                  return (
+                    <div key={`${disk.mount ?? index}`} className="min-w-0">
+                      <Meter
+                        label={`${disk.mount ?? "?"} · 已用 ${formatBytes(used)}`}
+                        value={usedPercent}
+                        hint={`共 ${formatBytes(total)} · 剩余 ${formatBytes(disk.free ?? 0)}`}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </Panel>
+          ) : null}
 
-        <RenameCard device={device} onSaved={onRefresh} />
+          {sessions.length > 0 ? (
+            <Panel title="登录会话" className="min-w-0">
+              <ul className="space-y-2">
+                {sessions.map((session) => (
+                  <li
+                    key={session.session_id}
+                    className={cn(
+                      "grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 text-foreground",
+                      bodyText,
+                    )}
+                  >
+                    <span className="min-w-0 truncate">
+                      会话 {session.session_id} · {session.username || "（未登录）"}
+                    </span>
+                    <span className={cn("shrink-0 text-muted-foreground", metaText)}>{session.state}</span>
+                  </li>
+                ))}
+              </ul>
+            </Panel>
+          ) : null}
+        </div>
       </div>
 
       {selfUpdateBlocked ? (
-        <Banner tone="warn" icon={TriangleAlert} title="无法自动升级" className="py-2.5">
+        <Banner tone="warn" icon={TriangleAlert} title="无法自动升级">
           <p>{selfUpdateBlocked}</p>
-          <p className={cn("mt-1 text-faint", metaText)}>
+          <p className={cn("mt-1 text-muted-foreground", metaText)}>
             该版本不在自动更新路径上，服务器不会向它推送新版本。请在目标机器上重新运行最新的安装脚本（覆盖安装，设备标识与历史记录都会保留）。
           </p>
         </Banner>
       ) : null}
 
-      <div className={cn("grid min-w-0 md:grid-cols-2", gridGap)}>
-        <Section title="远程操作" icon={RadioTower} className="min-w-0">
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            <Button
-              size="sm"
-              variant="default"
-              className={cn("w-full justify-center", !desktop && "tap")}
-              disabled={!capabilities.screenshot || act.isPending}
-              title={capabilities.screenshot ? "让受控端立即截一张图" : "受控端当前无法截图"}
-              onClick={() => act.mutate({ type: "screenshot" })}
-            >
-              <Camera className="size-3.5" aria-hidden />
-              立即截图
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              className={cn("w-full justify-center", !desktop && "tap")}
-              disabled={!commandBusAvailable || act.isPending}
-              title={commandBusAvailable ? "重新加载受控端配置" : "没有可用的命令通道"}
-              onClick={() => act.mutate({ type: "reload_config" })}
-            >
-              <RotateCcw className="size-3.5" aria-hidden />
-              重新加载配置
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              className={cn("w-full justify-center", !desktop && "tap")}
-              disabled={!commandBusAvailable || act.isPending}
-              title={commandBusAvailable ? "重启受控端服务（不会重启机器）" : "没有可用的命令通道"}
-              onClick={() => setPending("restart")}
-            >
-              <Power className="size-3.5" aria-hidden />
-              重启受控端
-            </Button>
-            <Button
-              size="sm"
-              variant="destructive"
-              className={cn("w-full justify-center", !desktop && "tap")}
-              disabled={!capabilities.uninstall || uninstall.isPending}
-              title={capabilities.uninstall ? "以 SYSTEM 权限自我清理，不弹 UAC" : "设备当前不可下发卸载指令"}
-              onClick={() => setPending("uninstall")}
-            >
-              <Unplug className="size-3.5" aria-hidden />
-              远程卸载
-            </Button>
-          </div>
-          <p
-            className={cn(
-              "mt-2.5 leading-relaxed",
-              metaText,
-              capabilities.uninstall ? "text-faint" : "text-warn",
-            )}
-          >
-            {capabilities.uninstall
-              ? "远程卸载不弹 UAC：受控端服务本身以 SYSTEM 运行，会自行停止、删除并使记录标记为已卸载。"
-              : `设备当前不可下发卸载指令（${device.presence.reason}）`}
-          </p>
-        </Section>
+      <div className="grid min-w-0 grid-cols-1 items-start gap-6 lg:grid-cols-2">
+        <div className="flex min-w-0 flex-col gap-6">
+          <Panel title="设备信息" className="min-w-0">
+            <dl className="grid min-w-0 grid-cols-1 gap-x-12 gap-y-4 sm:grid-cols-2">
+              <div className="min-w-0 sm:col-span-2">
+                <PanelRow label="设备标识">
+                  <span className="tnum truncate font-mono text-xs" title={device.uid}>
+                    {device.uid}
+                  </span>
+                </PanelRow>
+              </div>
+              <div className="min-w-0">
+                <PanelRow label="系统">
+                  <span className="truncate" title={`${device.os_name} ${device.os_version}`}>
+                    {device.os_name} {device.os_version}
+                  </span>
+                </PanelRow>
+              </div>
+              <div className="min-w-0">
+                <PanelRow label="架构">
+                  <span className="truncate">{device.arch}</span>
+                </PanelRow>
+              </div>
+              <div className="min-w-0">
+                <PanelRow label="受控端">
+                  <span className="tnum truncate">
+                    v{device.agent_version || "?"}
+                    {device.protocol ? ` · 协议 ${device.protocol}` : ""}
+                  </span>
+                </PanelRow>
+              </div>
+              <div className="min-w-0">
+                <PanelRow label="通道">
+                  <span className="truncate">
+                    {transport === "ws"
+                      ? "WebSocket（实时）"
+                      : transport === "poll"
+                        ? "HTTP 轮询（无实时控制）"
+                        : "无活动通道"}
+                  </span>
+                </PanelRow>
+              </div>
+              <div className="min-w-0">
+                <PanelRow label="注册时间">
+                  <span className="truncate">{formatDateTime(device.enrolled_at_ms)}</span>
+                </PanelRow>
+              </div>
+              <div className="min-w-0">
+                <PanelRow label="最近上报">
+                  <span className="truncate">
+                    {formatDateTime(device.last_seen_ms)}（{formatAge(device.presence.age_ms)}）
+                  </span>
+                </PanelRow>
+              </div>
+            </dl>
+          </Panel>
 
-        <Section tone="danger" title="数据清理" icon={Trash2} className="min-w-0">
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            <Button
-              size="sm"
-              variant="outline"
-              className={cn("w-full justify-center", !desktop && "tap")}
-              disabled={purgeFrames.isPending}
-              onClick={() => setPending("purge")}
-            >
-              <Trash2 className="size-3.5" aria-hidden />
-              清空历史画面
-            </Button>
-            <Button
-              size="sm"
-              variant="destructive"
-              className={cn("w-full justify-center", !desktop && "tap")}
-              disabled={remove.isPending || !canDeleteRecord}
-              title={canDeleteRecord ? "删除这台设备的历史记录" : "设备仍有活动通道，请先远程卸载"}
-              onClick={() => setPending("delete")}
-            >
-              <Trash2 className="size-3.5" aria-hidden />
-              删除设备记录
-            </Button>
-          </div>
-          <Separator className="my-2.5" />
-          <p className={cn("leading-relaxed text-faint", bodyText)}>
-            删除记录会同时清除本地画面与该设备在归档仓库中的文件；在线设备必须先远程卸载，避免留下仍会尝试上报的机器。
-          </p>
-        </Section>
+          <Panel
+            title="远程操作"
+            hint="命令通道可用时才能下发；重启只影响受控端服务。"
+            flush
+            className="min-w-0"
+          >
+            <ul className="flex flex-col">
+              <li className="flex items-center justify-between gap-3 border-b border-border-soft px-6 py-4 last:border-0">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-foreground">立即截图</p>
+                  <p className="mt-1 text-xs text-muted-foreground">让受控端立即截一张图</p>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  disabled={!capabilities.screenshot || act.isPending}
+                  title={capabilities.screenshot ? "让受控端立即截一张图" : "受控端当前无法截图"}
+                  onClick={() => act.mutate({ type: "screenshot" })}
+                >
+                  <Camera className="size-3.5" aria-hidden />
+                  截图
+                </Button>
+              </li>
+              <li className="flex items-center justify-between gap-3 border-b border-border-soft px-6 py-4 last:border-0">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-foreground">重新加载配置</p>
+                  <p className="mt-1 text-xs text-muted-foreground">不重启服务，重新读取服务端设置</p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8"
+                  disabled={!commandBusAvailable || act.isPending}
+                  title={commandBusAvailable ? "重新加载受控端配置" : "没有可用的命令通道"}
+                  onClick={() => act.mutate({ type: "reload_config" })}
+                >
+                  <RotateCcw className="size-3.5" aria-hidden />
+                  重载
+                </Button>
+              </li>
+              <li className="flex items-center justify-between gap-3 border-b border-border-soft px-6 py-4 last:border-0">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-foreground">重启受控端</p>
+                  <p className="mt-1 text-xs text-muted-foreground">只重启服务，不会重启机器</p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8"
+                  disabled={!commandBusAvailable || act.isPending}
+                  title={commandBusAvailable ? "重启受控端服务（不会重启机器）" : "没有可用的命令通道"}
+                  onClick={() => setPending("restart")}
+                >
+                  <Power className="size-3.5" aria-hidden />
+                  重启
+                </Button>
+              </li>
+              <li className="flex items-center justify-between gap-3 border-b border-border-soft px-6 py-4 last:border-0">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-foreground">远程卸载</p>
+                  <p className={cn("mt-1 text-xs", capabilities.uninstall ? "text-muted-foreground" : "text-warning")}>
+                    {capabilities.uninstall
+                      ? "以 SYSTEM 权限自我清理，不弹 UAC"
+                      : `当前不可卸载（${device.presence.reason}）`}
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 text-destructive"
+                  disabled={!capabilities.uninstall || uninstall.isPending}
+                  title={capabilities.uninstall ? "以 SYSTEM 权限自我清理，不弹 UAC" : "设备当前不可下发卸载指令"}
+                  onClick={() => setPending("uninstall")}
+                >
+                  <Unplug className="size-3.5" aria-hidden />
+                  卸载
+                </Button>
+              </li>
+            </ul>
+          </Panel>
+        </div>
+
+        <div className="flex min-w-0 flex-col gap-6">
+          <RenamePanel device={device} onSaved={onRefresh} />
+
+          <Panel
+            title="数据清理"
+            tone="danger"
+            hint="删除记录会同时清除本地画面与归档仓库中的文件。"
+            flush
+            className="min-w-0"
+          >
+            <ul className="flex flex-col">
+              <li className="flex items-center justify-between gap-3 border-b border-border-soft px-6 py-4 last:border-0">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-foreground">清空历史画面</p>
+                  <p className="mt-1 text-xs text-muted-foreground">保留设备与归档远端副本</p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8"
+                  disabled={purgeFrames.isPending}
+                  onClick={() => setPending("purge")}
+                >
+                  <Trash2 className="size-3.5" aria-hidden />
+                  清空
+                </Button>
+              </li>
+              <li className="flex items-center justify-between gap-3 border-b border-border-soft px-6 py-4 last:border-0">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-foreground">删除设备记录</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {canDeleteRecord ? "不可撤销；会清除画面与归档文件" : "设备仍有活动通道，需先远程卸载"}
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 text-destructive"
+                  disabled={remove.isPending || !canDeleteRecord}
+                  title={canDeleteRecord ? "删除这台设备的历史记录" : "设备仍有活动通道，请先远程卸载"}
+                  onClick={() => setPending("delete")}
+                >
+                  <Trash2 className="size-3.5" aria-hidden />
+                  删除
+                </Button>
+              </li>
+            </ul>
+          </Panel>
+        </div>
       </div>
 
       <ConfirmDialog

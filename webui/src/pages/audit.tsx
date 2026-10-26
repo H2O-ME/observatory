@@ -2,9 +2,9 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
 
-import { Timeline, TimelineItem } from "@/components/aceternity";
 import { EmptyBlock, ErrorBlock, LoadingBlock, Pager } from "@/components/async-state";
 import { PageHeader } from "@/components/page-header";
+import { Panel } from "@/components/panel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -26,7 +26,12 @@ const ACTION_LABEL: Record<string, string> = {
   "auth.totp_disable": "关闭二次验证",
   "auth.password_change": "修改密码",
   "settings.update": "修改设置",
+  "settings.patch": "修改设置",
   "device.update": "修改设备",
+  "device.patch": "修改设备",
+  "device.create_command": "创建命令",
+  "control.revoke": "结束控制",
+  "updates.upload": "上传安装包",
   "device.delete": "删除设备",
   "device.uninstall": "远程卸载",
   "device.enroll": "设备注册",
@@ -113,7 +118,12 @@ export function AuditPage() {
   const fieldClass = cn("h-9 w-full text-xs", touch && "h-11");
 
   return (
-    <div className={cn("w-full max-w-full min-w-0 space-y-5", watch && "space-y-3", desktop && "mx-auto max-w-[72rem]")}>
+    <div
+      className={cn(
+        "w-full min-w-0 space-y-4",
+        watch && "space-y-3",
+      )}
+    >
       <PageHeader
         title="审计日志"
         description="登录、设置、命令、文件与归档操作；时间均为服务器时间。"
@@ -131,7 +141,10 @@ export function AuditPage() {
         }
       />
 
-      <div className="surface grid min-w-0 gap-2 p-3">
+      <Panel
+        title="筛选"
+        hint="动作与设备由服务端筛选；操作者与时间只作用于当前页。"
+      >
         <div
           className={cn(
             "grid min-w-0 gap-2",
@@ -144,7 +157,7 @@ export function AuditPage() {
             value={action || null}
             onValueChange={(value) => changeFilter(() => setAction(typeof value === "string" ? value : ""))}
           >
-            <SelectTrigger size="sm" className={cn("w-full", touch && "min-h-11")} aria-label="按动作筛选">
+            <SelectTrigger size="sm" className="w-full" aria-label="按动作筛选">
               <SelectValue placeholder="全部动作" />
             </SelectTrigger>
             <SelectContent>
@@ -160,7 +173,7 @@ export function AuditPage() {
             value={deviceUid || null}
             onValueChange={(value) => changeFilter(() => setDeviceUid(typeof value === "string" ? value : ""))}
           >
-            <SelectTrigger size="sm" className={cn("w-full", touch && "min-h-11")} aria-label="按设备筛选">
+            <SelectTrigger size="sm" className="w-full" aria-label="按设备筛选">
               <SelectValue placeholder="全部设备" />
             </SelectTrigger>
             <SelectContent>
@@ -190,7 +203,7 @@ export function AuditPage() {
         </div>
 
         {!desktop ? (
-          <div className="flex min-w-0 flex-wrap items-center">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             <Button
               size="sm"
               variant="outline"
@@ -201,7 +214,7 @@ export function AuditPage() {
               {filtersOpen ? "收起筛选" : "更多筛选"}
             </Button>
             {hasActiveFilter ? (
-              <Button size="sm" variant="ghost" className="ml-2 min-h-11" onClick={clearFilters}>
+              <Button size="sm" variant="ghost" className="min-h-11" onClick={clearFilters}>
                 清除筛选
               </Button>
             ) : null}
@@ -218,7 +231,7 @@ export function AuditPage() {
               aria-label="起始时间（当前页内筛选）"
               title="起始时间（当前页内筛选）"
             />
-            <span className="text-[0.75rem] text-faint">至</span>
+            <span className="text-xs text-faint">至</span>
             <Input
               type="datetime-local"
               value={timeTo}
@@ -255,11 +268,7 @@ export function AuditPage() {
             />
           </div>
         ) : null}
-
-        <p className="min-w-0 text-[0.7rem] leading-relaxed text-faint">
-          动作与设备由服务端筛选；操作者与时间只作用于当前页。
-        </p>
-      </div>
+      </Panel>
 
       {query.isError ? (
         <ErrorBlock
@@ -279,13 +288,18 @@ export function AuditPage() {
           }
         />
       ) : (
-        <div className="grid min-w-0 gap-4 sm:gap-5">
-          {groups.map((group) => (
-            <div key={group.day} className="surface min-w-0 p-3.5 sm:p-4">
-              <h2 className="tnum min-w-0 truncate text-[0.85rem] font-semibold text-ink">{group.day}</h2>
-              <Timeline className="mt-3">
+        <Panel flush className="min-w-0">
+          {groups.map((group, index) => (
+            <div key={group.day} className={cn("min-w-0", index > 0 && "border-t border-border")}>
+              <div className="flex items-center justify-between gap-3 bg-muted px-6 py-2">
+                <h2 className="tnum text-xs font-medium tracking-[0.06em] text-muted-foreground uppercase">
+                  {group.day}
+                </h2>
+                <span className="tnum text-xs text-faint">{group.items.length} 条</span>
+              </div>
+              <ul className="divide-y divide-border">
                 {group.items.map((entry) => (
-                  <AuditTimelineItem
+                  <AuditRow
                     key={entry.id}
                     entry={entry}
                     open={expanded === entry.id}
@@ -293,18 +307,24 @@ export function AuditPage() {
                     onToggle={() => setExpanded(expanded === entry.id ? null : entry.id)}
                   />
                 ))}
-              </Timeline>
+              </ul>
             </div>
           ))}
-        </div>
+        </Panel>
       )}
 
-      <Pager total={query.data?.total ?? 0} limit={PAGE} offset={offset} onChange={setOffset} busy={query.isFetching} />
+      <Pager
+        total={query.data?.total ?? 0}
+        limit={PAGE}
+        offset={offset}
+        onChange={setOffset}
+        busy={query.isFetching}
+      />
     </div>
   );
 }
 
-function AuditTimelineItem({
+function AuditRow({
   entry,
   open,
   touch,
@@ -317,46 +337,45 @@ function AuditTimelineItem({
 }) {
   const hasDetail = Object.keys(entry.detail ?? {}).length > 0;
   const device = entry.device_name || entry.device_uid;
+
   return (
-    <TimelineItem
-      date={formatTime(entry.ts_ms)}
-      title={<span className="min-w-0 break-words">{ACTION_LABEL[entry.action] ?? entry.action}</span>}
-      description={
-        <span className="block min-w-0">
-          <span className="mt-0.5 block min-w-0 break-words">
-            {entry.actor || "console"}
-            {device ? ` · ${device}` : ""}
-            {entry.ip ? ` · ${entry.ip}` : ""}
-          </span>
-          <span className="mt-0.5 block min-w-0 break-all font-mono text-[0.68rem] text-faint">{entry.action}</span>
+    <li className="min-w-0 px-6 py-3">
+      <div className="grid min-w-0 grid-cols-[3.5rem_minmax(0,1fr)_auto] items-start gap-3 sm:grid-cols-[3.5rem_minmax(0,9.5rem)_minmax(0,1fr)_auto]">
+        <span className="tnum pt-0.5 text-xs text-muted-foreground">{formatTime(entry.ts_ms)}</span>
+        <span className="min-w-0 break-words text-sm font-medium text-foreground">
+          {ACTION_LABEL[entry.action] ?? entry.action}
         </span>
-      }
-    >
-      {hasDetail ? (
-        <div className="grid min-w-0 gap-1.5">
+        <span className="col-span-2 min-w-0 break-words text-xs text-muted-foreground sm:col-span-1">
+          {entry.actor || "console"}
+          {device ? ` · ${device}` : ""}
+          {entry.ip ? ` · ${entry.ip}` : ""}
+          <span className="ml-1.5 break-all font-mono text-xs text-faint">{entry.action}</span>
+        </span>
+        {hasDetail ? (
           <button
             type="button"
             onClick={onToggle}
             aria-expanded={open}
             className={cn(
-              "inline-flex w-fit min-w-0 items-center rounded-lg border border-line bg-sunken px-2.5 py-1 text-[0.72rem] font-medium text-soft transition-colors hover:text-ink",
-              touch && "min-h-11",
+              "inline-flex shrink-0 items-center gap-0.5 rounded-sm px-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
+              touch && "min-h-9 px-2",
             )}
           >
             {open ? (
-              <ChevronDown className="mr-1 size-3.5 shrink-0" aria-hidden />
+              <ChevronDown className="size-3 shrink-0" aria-hidden />
             ) : (
-              <ChevronRight className="mr-1 size-3.5 shrink-0" aria-hidden />
+              <ChevronRight className="size-3 shrink-0" aria-hidden />
             )}
-            {open ? "收起 JSON" : "查看 JSON"}
+            JSON
           </button>
-          {open ? (
-            <pre className="hide-scrollbar max-h-56 w-full max-w-full overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words rounded-lg border border-line bg-sunken p-2 font-mono text-[0.7rem] leading-relaxed text-soft">
-              {JSON.stringify(entry.detail, null, 2)}
-            </pre>
-          ) : null}
-        </div>
+        ) : null}
+      </div>
+
+      {open ? (
+        <pre className="hide-scrollbar mt-1.5 max-h-56 w-full max-w-full overflow-x-hidden overflow-y-auto rounded-sm border border-border bg-muted p-2 font-mono text-xs leading-relaxed break-words whitespace-pre-wrap text-muted-foreground">
+          {JSON.stringify(entry.detail, null, 2)}
+        </pre>
       ) : null}
-    </TimelineItem>
+    </li>
   );
 }

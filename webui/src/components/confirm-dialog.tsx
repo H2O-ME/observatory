@@ -41,7 +41,7 @@ export function ConfirmDialog({
         <AlertDialogHeader>
           <div className="flex items-center gap-2.5">
             {destructive ? (
-              <span className="flex size-9 shrink-0 items-center justify-center rounded-xl border border-line bg-danger-soft text-danger">
+              <span className="flex size-9 shrink-0 items-center justify-center rounded-md border border-border bg-destructive-soft text-destructive">
                 <ShieldAlert className="size-4" />
               </span>
             ) : null}

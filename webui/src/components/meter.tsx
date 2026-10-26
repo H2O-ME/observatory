@@ -1,20 +1,20 @@
-import { useViewport } from "@/hooks/use-viewport";
+import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
 
 type Tone = "brand" | "ok" | "warn" | "danger";
 
 const TONE_BAR: Record<Tone, string> = {
-  brand: "bg-brand",
-  ok: "bg-ok",
-  warn: "bg-warn",
-  danger: "bg-danger",
+  brand: "bg-primary",
+  ok: "bg-success",
+  warn: "bg-warning",
+  danger: "bg-destructive",
 };
 
 const TONE_STROKE: Record<Tone, string> = {
-  brand: "var(--c-brand)",
-  ok: "var(--c-ok)",
-  warn: "var(--c-warn)",
-  danger: "var(--c-danger)",
+  brand: "var(--c-primary)",
+  ok: "var(--c-success)",
+  warn: "var(--c-warning)",
+  danger: "var(--c-destructive)",
 };
 
 interface MeterProps {
@@ -32,32 +32,41 @@ function toneFor(value: number): Tone {
   return "brand";
 }
 
-/** A labelled linear gauge. Deliberately not a chart: readable on a watch face. */
+/**
+ * A labelled linear gauge built on the shared Progress primitive. Tone is
+ * chosen from the value by default (>=75 warning, >=90 destructive) so the
+ * operator sees pressure without reading the number.
+ */
 export function Meter({ label, value, suffix = "%", tone = "brand", compact = false, hint }: MeterProps) {
   const numeric = Number(value ?? 0);
   const safe = Number.isFinite(numeric) ? Math.max(0, Math.min(100, numeric)) : 0;
   const resolved: Tone = tone === "brand" ? toneFor(safe) : tone;
 
   return (
-    <div className={cn("min-w-0", compact ? "space-y-1" : "space-y-1.5")}>
-      <div className="flex min-w-0 items-baseline justify-between gap-2">
-        <span className={cn("truncate text-soft", compact ? "text-[0.72rem]" : "text-[0.8rem]")}>{label}</span>
+    <div className="w-full min-w-0">
+      <div className="flex w-full min-w-0 items-baseline justify-between gap-2">
+        <span className={cn("truncate text-muted-foreground", compact ? "text-xs" : "text-sm")}>
+          {label}
+        </span>
         <span
           className={cn(
-            "tnum shrink-0 font-semibold text-ink",
-            compact ? "text-[0.78rem]" : "text-[0.9rem]",
+            "tnum shrink-0 font-semibold text-foreground",
+            compact ? "text-xs" : "text-sm",
           )}
         >
           {value === null || value === undefined ? "—" : `${safe.toFixed(0)}${suffix}`}
         </span>
       </div>
-      <div className={cn("w-full overflow-hidden rounded-full bg-sunken", compact ? "h-1" : "h-1.5")}>
-        <div
-          className={cn("h-full rounded-full transition-all", TONE_BAR[resolved])}
-          style={{ width: `${safe}%` }}
-        />
-      </div>
-      {hint ? <p className="truncate text-[0.68rem] text-faint">{hint}</p> : null}
+      <Progress
+        value={safe}
+        aria-label={label}
+        className={compact ? "mt-1" : "mt-1.5"}
+        trackClassName={compact ? "h-1" : "h-1.5"}
+        indicatorClassName={TONE_BAR[resolved]}
+      />
+      {hint ? (
+        <p className="mt-2 truncate text-xs text-muted-foreground">{hint}</p>
+      ) : null}
     </div>
   );
 }
@@ -70,46 +79,51 @@ export function RingMeter({
   label,
   value,
   suffix = "%",
-  size,
+  size = 92,
+  stroke = 7,
   tone = "brand",
+  caption,
+  showValue = true,
+  showLabel = true,
 }: {
   label: string;
   value: number | null | undefined;
   suffix?: string;
   size?: number;
+  stroke?: number;
   tone?: Tone;
+  caption?: string;
+  showValue?: boolean;
+  showLabel?: boolean;
 }) {
-  const viewport = useViewport();
-  const resolvedSize = size ?? (viewport === "watch" ? 68 : viewport === "mobile" ? 84 : 94);
   const numeric = Number(value ?? 0);
   const safe = Number.isFinite(numeric) ? Math.max(0, Math.min(100, numeric)) : 0;
   const resolved: Tone = tone === "brand" ? toneFor(safe) : tone;
-  const stroke = 7;
-  const radius = (resolvedSize - stroke) / 2;
+  const radius = (size - stroke) / 2;
   const circumference = 2 * Math.PI * radius;
   const offset = circumference * (1 - safe / 100);
 
   return (
     <div className="flex min-w-0 flex-col items-center">
-      <div className="relative" style={{ width: resolvedSize, height: resolvedSize }}>
+      <div className="relative shrink-0" style={{ width: size, height: size }}>
         <svg
-          width={resolvedSize}
-          height={resolvedSize}
-          viewBox={`0 0 ${resolvedSize} ${resolvedSize}`}
+          width={size}
+          height={size}
+          viewBox={`0 0 ${size} ${size}`}
           aria-hidden="true"
           style={{ transform: "rotate(-90deg)" }}
         >
           <circle
-            cx={resolvedSize / 2}
-            cy={resolvedSize / 2}
+            cx={size / 2}
+            cy={size / 2}
             r={radius}
             fill="none"
-            stroke="var(--c-sunken-strong)"
+            stroke="var(--c-muted)"
             strokeWidth={stroke}
           />
           <circle
-            cx={resolvedSize / 2}
-            cy={resolvedSize / 2}
+            cx={size / 2}
+            cy={size / 2}
             r={radius}
             fill="none"
             stroke={TONE_STROKE[resolved]}
@@ -120,13 +134,22 @@ export function RingMeter({
             style={{ transition: "stroke-dashoffset 0.5s ease" }}
           />
         </svg>
-        <span className="inset-full flex items-center justify-center">
-          <span className="tnum text-center text-[0.9rem] font-semibold text-ink">
-            {value === null || value === undefined ? "—" : `${safe.toFixed(0)}${suffix}`}
+        {showValue ? (
+          <span className="absolute-fill flex items-center justify-center">
+            <span className="tnum text-center text-xl font-semibold tracking-[-0.02em] text-foreground">
+              {value === null || value === undefined ? "—" : `${safe.toFixed(0)}${suffix}`}
+            </span>
           </span>
-        </span>
+        ) : null}
       </div>
-      <span className="mt-1.5 truncate text-[0.72rem] text-soft">{label}</span>
+      {showLabel ? (
+        <span className="mt-2 w-full truncate text-center text-xs text-muted-foreground">{label}</span>
+      ) : null}
+      {caption ? (
+        <span className="tnum mt-1 w-full truncate text-center text-xs font-medium text-muted-foreground">
+          {caption}
+        </span>
+      ) : null}
     </div>
   );
 }

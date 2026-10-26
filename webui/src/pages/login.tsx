@@ -5,7 +5,6 @@ import {
   Eye,
   EyeOff,
   KeyRound,
-  Loader2,
   LockKeyhole,
   Moon,
   RadioTower,
@@ -14,8 +13,12 @@ import {
   SunMoon,
 } from "lucide-react";
 
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Spinner } from "@/components/ui/spinner";
 import { useViewport } from "@/hooks/use-viewport";
 import { THEME_LABEL, useTheme, type ThemeMode } from "@/lib/theme";
 import { isApiError } from "@/lib/api";
@@ -27,14 +30,18 @@ interface Props {
 
 const THEME_ICON: Record<ThemeMode, typeof Sun> = { system: SunMoon, light: Sun, dark: Moon };
 
+const CAPABILITIES = [
+  { icon: RadioTower, title: "单链路实时观测", text: "WebSocket 与长轮询同一套事实，断线自动降级" },
+  { icon: ShieldCheck, title: "显式授权控制", text: "每次控制都有 TTL、撤销与全程审计" },
+  { icon: LockKeyhole, title: "服务端时钟", text: "画面、命令与状态时间只来自服务端" },
+] as const;
+
 /**
- * Login (0.4 rewrite).
+ * Login.
  *
  * Same logic as before: TOTP appears when the server session says it is enabled
  * (or after the server asks for it), deep-link return is preserved, and the
- * console never invents error copy. The visual is a flat mission-control hero
- * (beams + engineering grid), collapsing to a single compact card on the
- * watch.
+ * console never invents error copy.
  */
 export function LoginPage({ version }: Props) {
   const login = useAuth((state) => state.login);
@@ -64,9 +71,7 @@ export function LoginPage({ version }: Props) {
     try {
       await login(password, showTotp ? totp : undefined);
       const target =
-        location.pathname !== "/login"
-          ? `${location.pathname}${location.search}`
-          : "/wall";
+        location.pathname !== "/login" ? `${location.pathname}${location.search}` : "/wall";
       navigate(target, { replace: true });
     } catch (failure) {
       const message = isApiError(failure) ? failure.message : "登录失败";
@@ -78,99 +83,101 @@ export function LoginPage({ version }: Props) {
   };
 
   return (
-    <div className="relative flex app-vh-min w-full flex-col overflow-hidden">
-      <div className="relative z-10 flex min-h-0 flex-1 flex-col">
-        <header className="flex h-14 shrink-0 items-center justify-between px-4 sm:px-6">
-          <span className="flex items-center gap-2.5">
-            <span className="relative flex size-8 items-center justify-center rounded-md border border-line bg-brand-soft text-brand">
-              <span className="text-[0.62rem] font-bold">Ob</span>
-            </span>
-            <span className="text-[0.9rem] font-semibold tracking-tight text-ink">
-              Observatory
-              {!watch ? <span className="ml-2 text-[0.72rem] font-normal text-faint">受控端控制台</span> : null}
-            </span>
+    <div className="flex app-vh-min w-full flex-col bg-background">
+      <header className="flex h-14 shrink-0 items-center justify-between border-b border-border px-4 sm:px-6">
+        <span className="flex items-center gap-2.5">
+          <span className="flex size-7 items-center justify-center rounded-md border border-border bg-card text-[0.6rem] font-semibold tracking-tight text-foreground">
+            Ob
           </span>
-          <button
-            type="button"
-            onClick={cycle}
-            aria-label={THEME_LABEL[mode]}
-            title={THEME_LABEL[mode]}
-            className="flex size-8 items-center justify-center rounded-md border border-line bg-sunken text-soft transition-colors hover:text-ink"
-          >
-            <ThemeIcon className="size-4" />
-          </button>
-        </header>
+          <span className="text-sm font-semibold tracking-tight text-foreground">
+            Observatory
+            {watch ? null : (
+              <span className="ml-2 text-xs font-normal text-faint">受控端控制台</span>
+            )}
+          </span>
+        </span>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          onClick={cycle}
+          aria-label={THEME_LABEL[mode]}
+          title={THEME_LABEL[mode]}
+        >
+          <ThemeIcon className="size-4" />
+        </Button>
+      </header>
 
-        <main className="flex flex-1 items-center justify-center px-4 pb-10 pt-2 sm:px-6">
-          <div className={watch ? "w-full max-w-[19rem]" : "grid w-full max-w-5xl grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_26rem] lg:items-center lg:gap-10"}>
-            {/* --------------------------------------------------------- hero */}
-            <section className={watch ? "hidden" : "relative min-w-0"}>
-              <div className="relative">
-                <p className="eyebrow mb-3 flex items-center gap-2">
-                  <span className="inline-block size-1.5 rounded-full bg-brand-3" />
-                  deep-field mission control
-                </p>
-                <h1 className="text-[2.2rem] font-semibold tracking-[-0.03em] text-ink sm:text-[2.6rem]">
-                  Observatory
-                </h1>
-                <p className="mt-4 max-w-lg text-[0.98rem] leading-relaxed text-soft">
-                  授权设备的观测、远程控制与数据归档，都在同一个深空控制台里。
-                </p>
-                <ul className="mt-8 grid max-w-md grid-cols-1 gap-2.5">
-                  {[
-                    { icon: RadioTower, title: "单链路实时观测", text: "WebSocket 与长轮询同一套事实，断线自动降级" },
-                    { icon: ShieldCheck, title: "显式授权控制", text: "每次控制都有 TTL、撤销与全程审计" },
-                    { icon: LockKeyhole, title: "服务端时钟", text: "画面、命令与状态时间只来自服务端" },
-                  ].map((item) => {
-                    const Icon = item.icon;
-                    return (
-                      <li key={item.title} className="flex items-start gap-2.5 rounded-md border border-line bg-sunken px-3 py-2.5">
-                        <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md bg-panel text-soft">
-                          <Icon className="size-3.5" />
+      <main className="flex flex-1 items-center justify-center px-4 py-8 sm:px-6">
+        <div
+          className={
+            watch
+              ? "w-full max-w-[19rem]"
+              : "grid w-full max-w-5xl grid-cols-1 items-center gap-10 lg:grid-cols-[minmax(0,1fr)_22rem] lg:gap-16"
+          }
+        >
+          {/* ------------------------------------------------------------ intro */}
+          {watch ? null : (
+            <section className="min-w-0">
+              <p className="eyebrow mb-3">deep-field mission control</p>
+              <h1 className="text-[2.1rem] leading-[1.05] font-semibold tracking-[-0.03em] text-foreground sm:text-[2.5rem]">
+                Observatory
+              </h1>
+              <p className="mt-4 max-w-lg text-sm leading-relaxed text-muted-foreground">
+                授权设备的观测、远程控制与数据归档，都在同一个控制台里。
+              </p>
+              <ul className="mt-8 max-w-md border-t border-border">
+                {CAPABILITIES.map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <li
+                      key={item.title}
+                      className="flex items-start gap-3 border-b border-border py-3"
+                    >
+                      <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
+                      <span className="min-w-0">
+                        <span className="block text-sm font-medium text-foreground">
+                          {item.title}
                         </span>
-                        <span className="min-w-0">
-                          <span className="block text-[0.82rem] font-semibold text-ink">{item.title}</span>
-                          <span className="block text-[0.72rem] leading-relaxed text-faint">{item.text}</span>
+                        <span className="mt-0.5 block text-xs leading-relaxed text-muted-foreground">
+                          {item.text}
                         </span>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </div>
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
             </section>
+          )}
 
-            {/* --------------------------------------------------------- form */}
-            <form
-              onSubmit={submit}
-              className={
-                watch
-                  ? "surface-strong relative p-3"
-                  : "surface-strong relative p-5 sm:p-6"
-              }
-            >
-              {!watch ? (
-                <div className="mb-5">
-                  <p className="eyebrow mb-2">authorized access</p>
-                  <h2 className="text-[1.25rem] font-semibold tracking-tight text-ink">登录控制台</h2>
-                  <p className="mt-1 text-[0.8rem] leading-relaxed text-soft">
-                    需要控制台密码{showTotp ? "与验证器动态码" : ""}。会话仅保存在当前浏览器。
-                  </p>
-                </div>
-              ) : (
-                <div className="mb-3 flex items-center justify-between">
-                  <span className="text-[0.82rem] font-semibold text-ink">登录</span>
-                  <span className="tnum rounded-md border border-line bg-sunken px-1.5 py-0.5 text-[0.62rem] text-faint">
-                    v{version || "—"}
-                  </span>
-                </div>
-              )}
+          {/* ------------------------------------------------------------- form */}
+          <div className={watch ? "rounded-2xl bg-card p-4 shadow-sm" : "rounded-2xl bg-card p-6 shadow-sm"}>
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                {watch ? (
+                  <h2 className="text-sm font-medium">登录</h2>
+                ) : (
+                  <>
+                    <p className="eyebrow">authorized access</p>
+                    <h2 className="mt-2 text-lg font-semibold tracking-[-0.02em]">登录控制台</h2>
+                    <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                      需要控制台密码{showTotp ? "与验证器动态码" : ""}。会话仅保存在当前浏览器。
+                    </p>
+                  </>
+                )}
+              </div>
+              <Badge variant="neutral" className="tnum mt-0.5 shrink-0">
+                v{version || "—"}
+              </Badge>
+            </div>
 
-              <div className="space-y-3">
-                <div className="space-y-1.5">
-                  <Label htmlFor="password" className="flex items-center gap-1.5">
+            <form onSubmit={submit} className={watch ? "mt-3" : "mt-5"}>
+              <FieldGroup className="gap-3">
+                <Field>
+                  <FieldLabel htmlFor="password" className="text-xs">
                     <KeyRound className="size-3.5 text-faint" />
                     控制台密码
-                  </Label>
+                  </FieldLabel>
                   <div className="relative min-w-0">
                     <Input
                       id="password"
@@ -179,7 +186,7 @@ export function LoginPage({ version }: Props) {
                       value={password}
                       onChange={(event) => setPassword(event.target.value)}
                       placeholder="请输入密码"
-                      className="h-11 pr-11 text-base"
+                      className="pr-10"
                       required
                       autoFocus={!watch}
                     />
@@ -188,19 +195,19 @@ export function LoginPage({ version }: Props) {
                       onClick={() => setShowPassword((current) => !current)}
                       aria-label={showPassword ? "隐藏密码" : "显示密码"}
                       title={showPassword ? "隐藏密码" : "显示密码"}
-                      className="absolute top-0 right-0 flex h-11 w-11 items-center justify-center text-faint"
+                      className="absolute top-0 right-0 flex h-9 w-9 items-center justify-center text-faint hover:text-foreground"
                     >
                       {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
                     </button>
                   </div>
-                </div>
+                </Field>
 
                 {showTotp ? (
-                  <div className="space-y-1.5">
-                    <Label htmlFor="totp" className="flex items-center gap-1.5">
+                  <Field>
+                    <FieldLabel htmlFor="totp" className="text-xs">
                       <ShieldCheck className="size-3.5 text-faint" />
                       二次验证码
-                    </Label>
+                    </FieldLabel>
                     <Input
                       id="totp"
                       inputMode="numeric"
@@ -208,56 +215,44 @@ export function LoginPage({ version }: Props) {
                       value={totp}
                       onChange={(event) => setTotp(event.target.value.replace(/\D/g, "").slice(0, 6))}
                       placeholder="6 位数字"
-                      className="h-11 text-center font-mono text-lg tracking-[0.3em]"
+                      className="h-10 text-center font-mono text-lg tracking-[0.3em]"
                       maxLength={6}
                       autoFocus={totpEnabled && !watch}
                     />
-                  </div>
+                  </Field>
                 ) : null}
 
                 {error ? (
-                  <p
-                    role="alert"
-                    aria-live="polite"
-                    className="surface-danger break-words px-3 py-2 text-[0.8rem] leading-relaxed text-danger"
-                  >
-                    {error}
-                  </p>
+                  <Alert variant="destructive" role="alert" aria-live="polite">
+                    <AlertDescription className="break-words text-destructive">{error}</AlertDescription>
+                  </Alert>
                 ) : null}
 
-                <button
-                  type="submit"
-                  disabled={busy || !password}
-                  className="flex h-10 w-full items-center justify-center gap-2 rounded-md bg-brand text-[0.9rem] font-medium text-brand-ink transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {busy ? <Loader2 className="size-4 animate-spin" /> : <KeyRound className="size-4" />}
+                <Button type="submit" disabled={busy || !password} className="w-full">
+                  {busy ? <Spinner className="size-4" /> : <KeyRound className="size-4" />}
                   {busy ? "正在验证…" : "进入控制台"}
-                  {!busy ? <ArrowRight className="size-4" /> : null}
-                </button>
+                  {busy ? null : <ArrowRight className="size-4" />}
+                </Button>
 
                 {watch ? null : (
-                  <p className="text-[0.7rem] leading-relaxed text-faint">
+                  <p className="text-xs leading-relaxed text-faint">
                     继续即表示你已获得目标设备的书面授权。连续失败会触发服务端限流。
                   </p>
                 )}
-              </div>
-
-              <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3">
-                <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-sunken px-2 py-0.5 text-[0.66rem] text-faint">
-                  v{version || "—"}
-                </span>
-                <span className="min-w-0 truncate text-[0.66rem] text-faint">
-                  {consoleHost || "控制台域名未配置"}
-                </span>
-              </div>
+              </FieldGroup>
             </form>
-          </div>
-        </main>
 
-        <footer className="shrink-0 px-4 pb-5 text-center text-[0.66rem] leading-relaxed text-faint">
-          控制台域名 {consoleHost || "（服务端未配置）"} · 受控端可通过任一备用域名接入
-        </footer>
-      </div>
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3 text-xs text-faint">
+              <span className="min-w-0 truncate">{consoleHost || "控制台域名未配置"}</span>
+              <span className="tnum shrink-0">v{version || "—"}</span>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <footer className="shrink-0 px-4 pb-5 text-center text-xs leading-relaxed text-faint">
+        控制台域名 {consoleHost || "（服务端未配置）"} · 受控端可通过任一备用域名接入
+      </footer>
     </div>
   );
 }

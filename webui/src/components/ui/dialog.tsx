@@ -29,7 +29,7 @@ function DialogOverlay({
     <DialogPrimitive.Backdrop
       data-slot="dialog-overlay"
       className={cn(
-        "fixed top-0 right-0 bottom-0 left-0 isolate z-50 bg-black/40 duration-100 supports-backdrop-filter:backdrop-blur-xs data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
+        "fixed top-0 right-0 bottom-0 left-0 isolate z-50 bg-[rgba(2,6,23,0.55)] duration-100 supports-backdrop-filter:backdrop-blur-xs data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
         className
       )}
       style={{ backgroundColor: "rgba(2, 6, 23, 0.55)" }}
@@ -65,7 +65,7 @@ function DialogContent({
       <DialogPrimitive.Popup
         data-slot="dialog-content"
         className={cn(
-          "ui-dialog z-50 grid gap-4 border border-line bg-raised p-5 text-sm text-ink shadow-pop outline-none",
+          "ui-dialog z-50 grid gap-4 border border-border bg-popover p-5 text-sm text-foreground shadow-pop outline-none",
           className
         )}
         style={{ "--dialog-max": DIALOG_MAX[size], ...style } as unknown as React.CSSProperties}
@@ -114,7 +114,7 @@ function DialogFooter({
     <div
       data-slot="dialog-footer"
       className={cn(
-        "-mx-5 -mb-5 mt-1 flex flex-col-reverse gap-2 rounded-b-[1.35rem] border-t border-line bg-sunken p-4 sm:flex-row sm:justify-end",
+        "-mx-5 -mb-5 mt-1 flex flex-col-reverse gap-2 rounded-b-lg border-t border-border bg-muted p-4 sm:flex-row sm:justify-end",
         className
       )}
       {...props}
@@ -134,7 +134,7 @@ function DialogTitle({ className, ...props }: DialogPrimitive.Title.Props) {
     <DialogPrimitive.Title
       data-slot="dialog-title"
       className={cn(
-        "text-base leading-tight font-semibold tracking-tight text-ink",
+        "text-base leading-tight font-semibold tracking-tight text-foreground",
         className
       )}
       {...props}
@@ -147,7 +147,7 @@ function DialogDescription({ className, ...props }: DialogPrimitive.Description.
     <DialogPrimitive.Description
       data-slot="dialog-description"
       className={cn(
-        "text-[0.82rem] leading-relaxed text-soft *:[a]:underline *:[a]:underline-offset-3 *:[a]:hover:text-ink",
+        "text-sm leading-relaxed text-muted-foreground *:[a]:underline *:[a]:underline-offset-3 *:[a]:hover:text-foreground",
         className
       )}
       {...props}

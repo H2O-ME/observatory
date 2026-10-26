@@ -1,84 +1,62 @@
-import * as React from "react"
-import { Button as RadixButton } from "@radix-ui/themes"
-import { cva, type VariantProps } from "class-variance-authority"
-import { cn } from "@/lib/utils"
+import { Button as ButtonPrimitive } from "@base-ui/react/button";
+import { cva, type VariantProps } from "class-variance-authority";
+
+import { cn } from "@/lib/utils";
 
 /**
- * Radix Themes 迁移（0.3.8）：结构/焦点/禁用语义交给 @radix-ui/themes 的
- * Button，本项目变体映射到它的 variant/size；语义令牌类（bg-brand、
- * border-line 等）继续作为视觉层叠在上面——Tailwind utilities 层声明在
- * radix 主题层之后，同特异性下 utilities 胜出，页面外观保持连贯。
+ * shadcn/ui (base-nova) Button, with the console's density scale.
+ *
+ * Differences from the registry default are deliberate and limited to tokens
+ * and heights: the variant/size names and semantics are the official ones, and
+ * focus/disabled/aria-invalid behaviour comes from Base UI. Alpha modifiers
+ * (`bg-primary-hover`) are replaced by the opaque `*-soft` tokens because
+ * Chromium 81 cannot evaluate `color-mix()`.
  */
 const buttonVariants = cva(
-  "group/button inline-flex shrink-0 items-center justify-center whitespace-nowrap outline-none select-none disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+  "group/button inline-flex shrink-0 items-center justify-center rounded-md border border-transparent bg-clip-padding text-sm font-medium whitespace-nowrap transition-colors outline-none select-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-2 aria-invalid:ring-destructive [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
   {
     variants: {
       variant: {
-        default: "bg-brand text-brand-ink hover:brightness-110",
-        outline: "border-line bg-sunken text-ink hover:border-line-strong hover:bg-panel",
-        secondary: "border-line bg-panel text-ink hover:bg-panel-strong",
-        ghost: "text-soft hover:bg-sunken hover:text-ink",
-        destructive: "border-line bg-danger-soft text-danger hover:brightness-110",
-        link: "text-brand underline-offset-4 hover:underline",
+        default: "bg-primary text-primary-foreground hover:bg-primary-hover",
+        outline:
+          "border-border bg-card text-foreground hover:bg-accent aria-expanded:bg-accent",
+        secondary: "bg-secondary text-secondary-foreground hover:bg-accent",
+        ghost: "text-muted-foreground hover:bg-accent hover:text-foreground aria-expanded:bg-accent",
+        destructive:
+          "bg-destructive text-destructive-foreground hover:bg-destructive-hover focus-visible:border-destructive",
+        link: "text-primary underline-offset-4 hover:underline",
       },
       size: {
-        default: "h-10 gap-1.5 rounded-xl px-4 text-sm font-semibold",
-        xs: "h-8 gap-1 rounded-lg px-2.5 text-xs font-medium [&_svg:not([class*='size-'])]:size-3",
-        sm: "h-9 gap-1.5 rounded-lg px-3 text-[0.82rem] font-medium [&_svg:not([class*='size-'])]:size-4",
-        lg: "h-11 gap-2 rounded-xl px-5 text-[0.92rem] font-semibold",
-        icon: "size-10 rounded-xl",
-        "icon-xs": "size-8 rounded-lg [&_svg:not([class*='size-'])]:size-3.5",
-        "icon-sm": "size-9 rounded-lg",
-        "icon-lg": "size-11 rounded-xl",
+        default: "h-9 gap-1.5 px-3",
+        xs: "h-7 gap-1 rounded-sm px-2 text-xs [&_svg:not([class*='size-'])]:size-3",
+        sm: "h-8 gap-1.5 rounded-md px-2.5 text-xs [&_svg:not([class*='size-'])]:size-3.5",
+        lg: "h-10 gap-2 px-4 text-sm",
+        icon: "size-9",
+        "icon-xs": "size-7 rounded-sm [&_svg:not([class*='size-'])]:size-3",
+        "icon-sm": "size-8 [&_svg:not([class*='size-'])]:size-3.5",
+        "icon-lg": "size-10",
       },
     },
     defaultVariants: {
       variant: "default",
       size: "default",
     },
-  }
-)
+  },
+);
 
-type OurVariant = NonNullable<VariantProps<typeof buttonVariants>["variant"]>
-type OurSize = NonNullable<VariantProps<typeof buttonVariants>["size"]>
-
-/** 本项目变体 → Radix Themes 变体（贡献 radius/焦点环等主题默认值）。 */
-const RADIX_VARIANT: Record<OurVariant, "solid" | "surface" | "soft" | "ghost"> = {
-  default: "solid",
-  outline: "surface",
-  secondary: "surface",
-  ghost: "ghost",
-  destructive: "soft",
-  link: "ghost",
-}
-
-const RADIX_SIZE: Record<OurSize, "1" | "2" | "3"> = {
-  xs: "1",
-  sm: "1",
-  default: "2",
-  icon: "2",
-  "icon-xs": "1",
-  "icon-sm": "1",
-  "icon-lg": "3",
-  lg: "3",
-}
-
-export interface ButtonProps
-  extends Omit<React.ComponentProps<typeof RadixButton>, "variant" | "size">,
-    VariantProps<typeof buttonVariants> {}
-
-function Button({ className, variant: v = "default", size: sz = "default", ...props }: ButtonProps) {
-  const variant = (v ?? "default") as OurVariant
-  const size = (sz ?? "default") as OurSize
+function Button({
+  className,
+  variant = "default",
+  size = "default",
+  ...props
+}: ButtonPrimitive.Props & VariantProps<typeof buttonVariants>) {
   return (
-    <RadixButton
+    <ButtonPrimitive
       data-slot="button"
-      variant={RADIX_VARIANT[variant]}
-      size={RADIX_SIZE[size]}
       className={cn(buttonVariants({ variant, size, className }))}
       {...props}
     />
-  )
+  );
 }
 
-export { Button, buttonVariants }
+export { Button, buttonVariants };

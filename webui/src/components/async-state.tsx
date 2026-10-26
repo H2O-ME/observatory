@@ -1,12 +1,22 @@
 import type { ComponentType, ReactNode } from "react";
-import { AlertTriangle, Inbox, Loader2 } from "lucide-react";
+import { AlertTriangle, Inbox } from "lucide-react";
 
-import { GridPattern } from "@/components/aceternity/grid-pattern";
-import { useViewport } from "@/hooks/use-viewport";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 
 /* Re-export for older call sites; new code should import PageHeader directly. */
 export { PageHeader } from "@/components/page-header";
+
+const BANNER_VARIANT: Record<"info" | "ok" | "warn" | "error", "info" | "success" | "warning" | "destructive"> = {
+  info: "info",
+  ok: "success",
+  warn: "warning",
+  error: "destructive",
+};
 
 export function Banner({
   tone = "info",
@@ -21,24 +31,19 @@ export function Banner({
   title?: ReactNode;
   icon?: ComponentType<{ className?: string }>;
 }) {
-  const tones: Record<string, string> = {
-    info: "surface-quiet text-soft",
-    ok: "surface-ok text-ok",
-    warn: "surface-warn text-warn",
-    error: "surface-danger text-danger",
-  };
   return (
-    <div
+    <Alert
+      variant={BANNER_VARIANT[tone]}
       role={tone === "error" ? "alert" : "status"}
       aria-live="polite"
-      className={cn("flex min-w-0 items-start gap-2 px-3 py-2.5 text-[0.8rem] leading-relaxed", tones[tone], className)}
+      className={cn("flex min-w-0 items-start gap-2", className)}
     >
       {Icon ? <Icon className="mt-0.5 size-4 shrink-0" aria-hidden /> : null}
       <div className="min-w-0 flex-1">
-        {title ? <p className="font-semibold">{title}</p> : null}
-        <div className={cn(title && "mt-0.5 font-normal")}>{children}</div>
+        {title ? <AlertTitle>{title}</AlertTitle> : null}
+        <AlertDescription className={cn(title && "mt-0.5")}>{children}</AlertDescription>
       </div>
-    </div>
+    </Alert>
   );
 }
 
@@ -52,19 +57,15 @@ export function ErrorBlock({
   onRetry?: () => void;
 }) {
   return (
-    <div className="surface-danger animate-sm-in flex min-w-0 flex-wrap items-center gap-2 p-3.5 text-[0.82rem] text-danger">
+    <Alert variant="destructive" className="flex min-w-0 flex-wrap items-center gap-2 text-sm">
       <AlertTriangle className="size-4 shrink-0" aria-hidden />
       <span className="min-w-0 flex-1 break-words">{message}</span>
       {retryable && onRetry ? (
-        <button
-          type="button"
-          onClick={onRetry}
-          className="tap rounded-lg border border-line bg-sunken px-3 py-1 text-[0.78rem] font-medium text-danger"
-        >
+        <Button variant="outline" size="xs" onClick={onRetry}>
           重试
-        </button>
+        </Button>
       ) : null}
-    </div>
+    </Alert>
   );
 }
 
@@ -81,42 +82,17 @@ export function EmptyBlock({
   icon?: ComponentType<{ className?: string }>;
   className?: string;
 }) {
-  const viewport = useViewport();
-  const watch = viewport === "watch";
   return (
-    <div
-      className={cn(
-        "surface relative flex flex-col items-center justify-center overflow-hidden text-center",
-        watch ? "px-3 py-7" : "px-6 py-12",
-        className,
-      )}
-    >
-      <GridPattern
-        className="pointer-events-none absolute inset-full opacity-40"
-        stroke="var(--c-grid-line)"
-        strokeDasharray="4 6"
-      />
-      <span
-        className={cn(
-          "relative flex items-center justify-center rounded-2xl border border-line bg-brand-soft text-brand",
-          watch ? "size-10" : "size-12",
-        )}
-      >
-        <Icon className={watch ? "size-5" : "size-6"} />
-      </span>
-      <p className={cn("relative mt-3 font-semibold text-ink", watch ? "text-[0.85rem]" : "text-[0.95rem]")}>{title}</p>
-      {description ? (
-        <p
-          className={cn(
-            "relative mt-1 max-w-md text-soft",
-            watch ? "text-[0.7rem] leading-relaxed" : "text-[0.8rem] leading-relaxed",
-          )}
-        >
-          {description}
-        </p>
-      ) : null}
-      {action ? <div className="relative mt-4">{action}</div> : null}
-    </div>
+    <Empty className={cn("bg-card", className)}>
+      <EmptyHeader>
+        <EmptyMedia variant="icon">
+          <Icon />
+        </EmptyMedia>
+        <EmptyTitle>{title}</EmptyTitle>
+        {description ? <EmptyDescription>{description}</EmptyDescription> : null}
+      </EmptyHeader>
+      {action ? <EmptyContent>{action}</EmptyContent> : null}
+    </Empty>
   );
 }
 
@@ -124,12 +100,12 @@ export function LoadingBlock({ label = "加载中…", rows = 3 }: { label?: str
   return (
     <div className="space-y-2" aria-busy="true" aria-label={label}>
       {label ? (
-        <p className="flex items-center gap-1.5 text-[0.78rem] text-soft">
-          <Loader2 className="size-3.5 animate-spin text-brand" /> {label}
+        <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <Spinner className="size-3.5 text-primary" /> {label}
         </p>
       ) : null}
       {Array.from({ length: rows }, (_, index) => (
-        <div key={index} className="h-11 w-full animate-pulse rounded-xl border border-line bg-sunken" />
+        <Skeleton key={index} className="h-11 w-full rounded-md" />
       ))}
     </div>
   );
@@ -152,27 +128,27 @@ export function Pager({
   const pages = Math.max(1, Math.ceil(total / limit));
   const page = Math.floor(offset / limit) + 1;
   return (
-    <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 text-[0.78rem] text-soft">
+    <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
       <span className="tnum">
         共 {total} 条 · 第 {page} / {pages} 页
       </span>
       <div className="flex items-center gap-1.5">
-        <button
-          type="button"
+        <Button
+          variant="outline"
+          size="sm"
           disabled={busy || offset <= 0}
           onClick={() => onChange(Math.max(0, offset - limit))}
-          className="tap rounded-lg border border-line bg-sunken px-3 py-1.5 font-medium disabled:opacity-40"
         >
           上一页
-        </button>
-        <button
-          type="button"
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
           disabled={busy || offset + limit >= total}
           onClick={() => onChange(offset + limit)}
-          className="tap rounded-lg border border-line bg-sunken px-3 py-1.5 font-medium disabled:opacity-40"
         >
           下一页
-        </button>
+        </Button>
       </div>
     </div>
   );

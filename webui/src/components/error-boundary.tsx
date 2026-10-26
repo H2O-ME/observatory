@@ -9,6 +9,7 @@ import { Component } from "react";
 import type { ErrorInfo, ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 interface Props {
   children: ReactNode;
@@ -35,14 +36,18 @@ export class ErrorBoundary extends Component<Props, State> {
     const { error } = this.state;
     if (!error) return this.props.children;
     return (
-      <div className="flex app-vh-min items-center justify-center px-4">
-        <div className="surface-strong w-full max-w-md p-5 text-center">
-          <p className="text-sm font-medium text-ink">控制台渲染出错</p>
-          <p className="mt-1.5 break-words text-xs leading-relaxed text-soft">{error.message}</p>
-          <Button className="mt-4 w-full" onClick={() => window.location.reload()}>
-            重新加载
-          </Button>
-        </div>
+      <div className="flex app-vh-min items-center justify-center bg-background px-4">
+        <Card className="w-full max-w-md">
+          <CardHeader className="text-center">
+            <CardTitle className="text-sm">控制台渲染出错</CardTitle>
+            <CardDescription className="break-words">{error.message}</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button className="w-full" onClick={() => window.location.reload()}>
+              重新加载
+            </Button>
+          </CardContent>
+        </Card>
       </div>
     );
   }

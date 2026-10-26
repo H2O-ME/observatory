@@ -1,35 +1,38 @@
-"use client"
+import { Switch as SwitchPrimitive } from "@base-ui/react/switch";
 
-import { Switch as RadixSwitch } from "@radix-ui/themes"
-import { cn } from "@/lib/utils"
+import { cn } from "@/lib/utils";
 
 /**
- * Radix Themes 迁移（0.3.8）：开关本体交给 @radix-ui/themes（自带轨道/滑块/
- * 状态动画），size 保持旧 API。旧 `.ui-switch` 自定义样式停用；44px 命中区
- * 由伪元素补足（Chromium 81 无独立 translate 属性，勿改回 Tailwind translate）。
+ * shadcn/ui (base-nova) Switch.
+ *
+ * The thumb travel is the `.switch-thumb` class from index.css rather than a
+ * translate utility: Tailwind v4 compiles those to the individual `translate`
+ * property, which Chromium 81 does not support, so the knob would never move on
+ * the watch.
  */
 function Switch({
   className,
   size = "default",
   ...props
-}: React.ComponentProps<typeof RadixSwitch> & {
-  size?: "sm" | "default"
+}: SwitchPrimitive.Root.Props & {
+  size?: "sm" | "default";
 }) {
   return (
-    <RadixSwitch
+    <SwitchPrimitive.Root
       data-slot="switch"
-      variant="soft"
-      color="indigo"
-      size={size === "sm" ? "1" : "2"}
+      data-size={size}
       className={cn(
-        "relative shrink-0",
-        // 命中区扩到 44px，视觉轨道保持紧凑
-        "after:absolute after:inset-[-10px] after:content-['']",
-        className
+        "peer group/switch relative inline-flex shrink-0 items-center rounded-full border border-transparent transition-colors outline-none after:absolute after:-top-2 after:-right-3 after:-bottom-2 after:-left-3 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring aria-invalid:border-destructive data-[size=default]:h-[18.4px] data-[size=default]:w-[32px] data-[size=sm]:h-[14px] data-[size=sm]:w-[24px] data-checked:bg-primary data-unchecked:bg-border-strong data-disabled:cursor-not-allowed data-disabled:opacity-50",
+        className,
       )}
       {...props}
-    />
-  )
+    >
+      <SwitchPrimitive.Thumb
+        data-slot="switch-thumb"
+        className="switch-thumb pointer-events-none block rounded-full bg-background ring-0 group-data-[size=default]/switch:size-4 group-data-[size=sm]/switch:size-3 dark:data-checked:bg-primary-foreground"
+      />
+    </SwitchPrimitive.Root>
+  );
 }
 
-export { Switch }
+export { Switch };

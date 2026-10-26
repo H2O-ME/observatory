@@ -19,10 +19,18 @@ import {
   X,
 } from "lucide-react";
 
-import { BentoGrid, BentoGridItem, GlowCard, ShimmerButton } from "@/components/aceternity";
 import { Banner, EmptyBlock, ErrorBlock, LoadingBlock } from "@/components/async-state";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Meter } from "@/components/meter";
+import { Panel } from "@/components/panel";
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -32,9 +40,25 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
+import { Switch } from "@/components/ui/switch";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { useViewport } from "@/hooks/use-viewport";
 import { api, isApiError } from "@/lib/api";
 import { dirname, formatBytes, formatDateTime, joinPath } from "@/lib/format";
@@ -201,7 +225,9 @@ export function FilesView({ device }: { device: Device }) {
       await refresh();
       return result;
     } catch (failure) {
-      setError(isApiError(failure) ? failure.message : failure instanceof Error ? failure.message : `${label}失败`);
+      setError(
+        isApiError(failure) ? failure.message : failure instanceof Error ? failure.message : `${label}失败`,
+      );
       return null;
     } finally {
       setBusy("");
@@ -233,7 +259,9 @@ export function FilesView({ device }: { device: Device }) {
       setSearch(null);
       try {
         const result = await api.fileOp(uid, { op: "search", path, pattern: value, recursive });
-        const raw = Array.isArray(result.data.entries) ? (result.data.entries as Record<string, unknown>[]) : [];
+        const raw = Array.isArray(result.data.entries)
+          ? (result.data.entries as Record<string, unknown>[])
+          : [];
         setSearch({
           entries: raw.map(entryFromAgent).filter((item): item is Entry => item !== null),
           truncated: Boolean(result.data.truncated),
@@ -300,7 +328,9 @@ export function FilesView({ device }: { device: Device }) {
       if (isApiError(failure) && failure.code === "INTERNAL" && failure.message.includes("取消")) {
         setMessage("已取消上传");
       } else {
-        setError(isApiError(failure) ? failure.message : failure instanceof Error ? failure.message : "上传失败");
+        setError(
+          isApiError(failure) ? failure.message : failure instanceof Error ? failure.message : "上传失败",
+        );
       }
     } finally {
       abortRef.current = null;
@@ -354,10 +384,7 @@ export function FilesView({ device }: { device: Device }) {
         <Banner tone="warn">
           文件管理当前不可用：{device.presence.reason || "设备没有活动链路"}
         </Banner>
-        <EmptyBlock
-          title="没有可浏览的文件"
-          description="受控端恢复活动通道后本页会自动可用。"
-        />
+        <EmptyBlock title="没有可浏览的文件" description="受控端恢复活动通道后本页会自动可用。" />
       </div>
     );
   }
@@ -365,147 +392,149 @@ export function FilesView({ device }: { device: Device }) {
   const listing = search ?? null;
   const crumbList = crumbs(path);
   const progressPercent =
-    progress && progress.total > 0 ? Math.min(100, Math.round((progress.loaded / progress.total) * 100)) : 0;
+    progress && progress.total > 0
+      ? Math.min(100, Math.round((progress.loaded / progress.total) * 100))
+      : 0;
+
+  const actions = {
+    onRename: (entry: Entry) => openAction("rename", entry),
+    onCopy: (entry: Entry) => openAction("copy", entry),
+    onMove: (entry: Entry) => openAction("move", entry),
+    onDelete: setPendingDelete,
+    onDownload: (entry: Entry) => void download(entry),
+  };
 
   return (
     <div
       className={cn(
         "w-full max-w-full min-w-0 overflow-x-hidden",
-        watch ? "space-y-3" : "space-y-4 sm:space-y-5",
+        watch ? "space-y-3" : "space-y-4",
       )}
     >
       {/* Toolbar: the only controls, one compact row per breakpoint. */}
-      <div className="surface min-w-0 p-3 sm:p-4">
-        <div className="grid grid-cols-3 gap-2 sm:grid-cols-5">
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
           <Button
-            size="sm"
+            className="gap-2"
             variant="outline"
-            className="tap w-full justify-start"
             onClick={() => void refresh()}
             disabled={listQuery.isFetching || Boolean(busy)}
           >
-            <RefreshCw className={cn("mr-2 size-4", listQuery.isFetching && "animate-spin")} aria-hidden />
+            <RefreshCw
+              className={cn("size-4 stroke-[1.5]", listQuery.isFetching && "animate-spin")}
+              aria-hidden
+            />
             刷新
           </Button>
           <Button
-            size="sm"
+            className="gap-2"
             variant="outline"
-            className="tap w-full justify-start"
             onClick={() => setPath(parent ?? "")}
             disabled={!path}
           >
-            <ArrowUp className="mr-2 size-4" aria-hidden />
+            <ArrowUp className="size-4 stroke-[1.5]" aria-hidden />
             上级
           </Button>
           <Button
-            size="sm"
+            className="gap-2"
             variant="outline"
-            className="tap w-full justify-start"
             onClick={() => openAction("mkdir")}
             disabled={Boolean(busy)}
           >
-            <FolderPlus className="mr-2 size-4" aria-hidden />
+            <FolderPlus className="size-4 stroke-[1.5]" aria-hidden />
             新建
           </Button>
           <Button
-            size="sm"
-            variant="outline"
-            className="tap w-full justify-start"
+            className="gap-2"
+            variant="secondary"
             onClick={() => openAction("search")}
             disabled={Boolean(busy)}
           >
-            <Search className="mr-2 size-4" aria-hidden />
+            <Search className="size-4 stroke-[1.5]" aria-hidden />
             搜索
           </Button>
-          <ShimmerButton
-            block
-            type="button"
-            title="上传文件"
-            className="col-span-2 w-full sm:col-span-1"
+        </div>
+        <div className="flex items-center gap-2">
+          {search ? (
+            <Button variant="ghost" onClick={() => setSearch(null)}>
+              退出搜索
+            </Button>
+          ) : null}
+          <Button
+            className="gap-2"
             disabled={Boolean(busy) || !path}
-            busy={busy === "上传"}
             onClick={() => uploadRef.current?.click()}
           >
-            <Upload className="mr-2 size-4" aria-hidden />
+            <Upload className="size-4 stroke-[1.5]" aria-hidden />
             上传
-          </ShimmerButton>
-          <input
-            ref={uploadRef}
-            type="file"
-            className="hidden"
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (file) void upload(file);
-            }}
-          />
-        </div>
-
-        {search ? (
-          <Button
-            size="sm"
-            variant="ghost"
-            className="tap mt-2 w-full justify-center"
-            onClick={() => setSearch(null)}
-          >
-            退出搜索结果
           </Button>
-        ) : null}
+        </div>
+        <input
+          ref={uploadRef}
+          type="file"
+          className="hidden"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            if (file) void upload(file);
+          }}
+        />
       </div>
 
       {/* In-flight transfer: progress + the only cancel affordance. */}
       {progress ? (
-        <GlowCard contentClassName={watch ? "p-2.5" : "p-3 sm:p-4"}>
+        <div className="min-w-0 rounded-md border border-border bg-card px-3 py-2.5">
           <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
             <div className="min-w-0">
-              <p className={cn("truncate font-medium text-ink", watch ? "text-[0.78rem]" : "text-[0.82rem]")}>
+              <p className={cn("truncate font-medium text-foreground", watch ? "text-xs" : "text-sm")}>
                 {progress.label}
               </p>
-              <p className="tnum mt-0.5 truncate text-[0.7rem] text-soft">
+              <p className="tnum mt-0.5 truncate text-xs text-muted-foreground">
                 {formatBytes(progress.loaded)} / {formatBytes(progress.total)} · {progressPercent}%
               </p>
             </div>
-            <Button size="sm" variant="outline" className="tap" onClick={() => abortRef.current?.abort()}>
-              <X className="mr-1.5 size-4" aria-hidden />
+            <Button size="sm" variant="outline" onClick={() => abortRef.current?.abort()}>
+              <X className="size-3.5" aria-hidden />
               取消
             </Button>
           </div>
           <Progress className="mt-2.5" value={progressPercent} />
-        </GlowCard>
+        </div>
       ) : null}
 
       {message ? <Banner tone="ok">{message}</Banner> : null}
       {error ? <Banner tone="error">{error}</Banner> : null}
 
-      {/* The only horizontally scrolling row on this page: the breadcrumb. */}
-      <nav aria-label="当前路径" className="flex min-w-0 max-w-full items-center px-0.5">
-        <FolderClosed className="mr-1 size-3.5 shrink-0 text-faint" aria-hidden />
-        <div className="hide-scrollbar min-w-0 flex-1 overflow-x-auto">
-          <ol className="flex min-w-max items-center">
-            {crumbList.map((crumb, index) => {
-              const last = index === crumbList.length - 1;
-              return (
-                <li key={`${crumb.path}-${index}`} className="flex shrink-0 items-center">
-                  {index > 0 ? <ChevronRight className="mx-0.5 size-3.5 shrink-0 text-faint" aria-hidden /> : null}
+      {/* The only horizontally scrolling row on this page: the breadcrumb.
+          At the drive root the panel header already names the level. */}
+      {path || search ? (
+      <Breadcrumb className="min-w-0 max-w-full">
+        <BreadcrumbList className="hide-scrollbar flex-nowrap overflow-x-auto">
+          <FolderClosed className="size-3.5 shrink-0 text-faint stroke-[1.5]" aria-hidden />
+          {crumbList.map((crumb, index) => {
+            const last = index === crumbList.length - 1;
+            return (
+              <BreadcrumbItem key={`${crumb.path}-${index}`} className="shrink-0">
+                {index > 0 ? <BreadcrumbSeparator /> : null}
+                {last ? (
+                  <BreadcrumbPage className="max-w-[12rem] truncate px-1.5 py-1">{crumb.label}</BreadcrumbPage>
+                ) : (
                   <button
                     type="button"
-                    aria-current={last ? "location" : undefined}
                     onClick={() => {
                       setSearch(null);
                       setPath(crumb.path);
                     }}
-                    className={cn(
-                      "tap inline-flex items-center rounded-lg px-2 text-[0.78rem] transition-colors hover:bg-sunken",
-                      last ? "font-semibold text-ink" : "text-soft hover:text-ink",
-                    )}
+                    className="max-w-[12rem] truncate rounded-sm px-1.5 py-1 transition-colors hover:bg-accent hover:text-foreground"
                   >
-                    <span className="max-w-[10rem] truncate">{crumb.label}</span>
+                    {crumb.label}
                   </button>
-                </li>
-              );
-            })}
-          </ol>
-        </div>
-      </nav>
+                )}
+              </BreadcrumbItem>
+            );
+          })}
+        </BreadcrumbList>
+      </Breadcrumb>
+      ) : null}
 
       {listQuery.isError ? (
         <ErrorBlock
@@ -531,12 +560,8 @@ export function FilesView({ device }: { device: Device }) {
                   setPath(entry.path);
                 }
               }}
-              onRename={(entry) => openAction("rename", entry)}
-              onCopy={(entry) => openAction("copy", entry)}
-              onMove={(entry) => openAction("move", entry)}
-              onDelete={setPendingDelete}
-              onDownload={(entry) => void download(entry)}
               busy={Boolean(busy)}
+              {...actions}
             />
           )}
         </div>
@@ -544,45 +569,54 @@ export function FilesView({ device }: { device: Device }) {
         drives.length === 0 ? (
           <EmptyBlock title="没有可用的驱动器" description="受控端没有返回任何逻辑驱动器。" />
         ) : (
-          <BentoGrid>
-            {drives.map((drive) => {
-              const percent =
-                drive.free !== null && drive.total !== null && drive.total > 0
-                  ? (drive.free / drive.total) * 100
-                  : null;
-              return (
-                <BentoGridItem
-                  key={drive.path}
-                  icon={<HardDrive aria-hidden />}
-                  title={<span className="block truncate">{drive.name}</span>}
-                  description={`${drive.filesystem || "未知文件系统"} · 逻辑驱动器`}
-                  footer={
-                    <Button
-                      variant="outline"
-                      className="tap w-full justify-between"
-                      onClick={() => setPath(drive.path)}
-                    >
-                      <span className="truncate">浏览此驱动器</span>
-                      <ChevronRight className="ml-2 size-4 shrink-0" aria-hidden />
-                    </Button>
-                  }
-                >
-                  <div className="mt-2 min-w-0">
-                    {percent === null ? (
-                      <p className="text-[0.72rem] text-faint">剩余空间：受控端未上报</p>
-                    ) : (
-                      <Meter
-                        compact
-                        label="剩余空间"
-                        value={percent}
-                        hint={`${formatBytes(drive.free ?? 0)} 可用 / ${formatBytes(drive.total ?? 0)}`}
+          <Panel title="驱动器" hint="选择逻辑驱动器开始浏览" flush>
+            <ul>
+              {drives.map((drive, index) => {
+                const percent =
+                  drive.free !== null && drive.total !== null && drive.total > 0
+                    ? (drive.free / drive.total) * 100
+                    : null;
+                return (
+                  <li key={drive.path} className="min-w-0">
+                    {index > 0 ? <div className="mx-4 border-t border-border" /> : null}
+                    <div className="flex min-w-0 items-center gap-3 px-6 py-4">
+                      <HardDrive
+                        className="size-4 shrink-0 stroke-[1.5] text-muted-foreground"
+                        aria-hidden
                       />
-                    )}
-                  </div>
-                </BentoGridItem>
-              );
-            })}
-          </BentoGrid>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm text-foreground">{drive.name}</p>
+                        <p className="mt-1 truncate text-xs text-muted-foreground">
+                          {drive.filesystem || "未知文件系统"} · {drive.path}
+                        </p>
+                        <div className="mt-2.5 max-w-xs">
+                          {percent === null ? (
+                            <p className="text-xs text-faint">剩余空间：受控端未上报</p>
+                          ) : (
+                            <Meter
+                              compact
+                              tone="ok"
+                              label="剩余空间"
+                              value={percent}
+                              hint={`${formatBytes(drive.free ?? 0)} 可用 / ${formatBytes(drive.total ?? 0)}`}
+                            />
+                          )}
+                        </div>
+                      </div>
+                      <Button
+                        variant="outline"
+                        className="shrink-0 gap-1"
+                        onClick={() => setPath(drive.path)}
+                      >
+                        浏览
+                        <ChevronRight className="size-4 shrink-0 stroke-[1.5]" aria-hidden />
+                      </Button>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </Panel>
         )
       ) : entries.length === 0 ? (
         <EmptyBlock title="这个目录是空的" description={path ? `路径：${path}` : undefined} />
@@ -592,18 +626,14 @@ export function FilesView({ device }: { device: Device }) {
           onOpen={(entry) => {
             if (entry.is_dir) setPath(entry.path);
           }}
-          onRename={(entry) => openAction("rename", entry)}
-          onCopy={(entry) => openAction("copy", entry)}
-          onMove={(entry) => openAction("move", entry)}
-          onDelete={setPendingDelete}
-          onDownload={(entry) => void download(entry)}
           busy={Boolean(busy)}
+          {...actions}
         />
       )}
 
       {listQuery.data?.truncated ? <Banner tone="warn">目录条目过多，受控端已截断返回。</Banner> : null}
 
-      <p className="px-0.5 text-[0.7rem] leading-relaxed text-faint">
+      <p className="px-0 text-xs leading-relaxed text-muted-foreground">
         分片 {CHUNK_BYTES / 1024} KiB · 单文件上传上限由服务端设置（默认 512 MiB）
       </p>
 
@@ -638,43 +668,12 @@ export function FilesView({ device }: { device: Device }) {
   );
 }
 
-/** Small toolbar-sized icon button with a real label for accessibility. */
-function IconAction({
-  label,
-  icon: Icon,
-  disabled,
-  danger = false,
-  onClick,
-}: {
-  label: string;
-  icon: typeof Download;
-  disabled?: boolean;
-  danger?: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      title={label}
-      aria-label={label}
-      disabled={disabled}
-      onClick={onClick}
-      className={cn(
-        "tap inline-flex size-9 items-center justify-center rounded-lg text-soft transition-colors hover:bg-sunken hover:text-ink disabled:pointer-events-none disabled:opacity-40",
-        danger && "text-danger hover:text-danger",
-      )}
-    >
-      <Icon className="size-4" aria-hidden />
-    </button>
-  );
-}
-
 /**
  * One directory listing.
  *
- * Desktop keeps a compact table-like row with direct actions; phone/watch get a
- * full-width tappable card whose actions live in a bottom sheet (`.ui-dialog`
- * turns into one automatically), so no row squeezes five tiny icons.
+ * Desktop keeps a compact table with a row menu; phone/watch get full-width
+ * tappable cards whose actions live in a bottom sheet (`.ui-dialog` turns into
+ * one automatically), so no row squeezes five tiny icons.
  */
 function EntryList({
   entries,
@@ -703,121 +702,166 @@ function EntryList({
   return (
     <>
       {desktop ? (
-        <div className="surface min-w-0 overflow-hidden">
-          <ul className="min-w-0">
+        <Panel flush className="min-w-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>名称</TableHead>
+                <TableHead className="w-28">大小</TableHead>
+                <TableHead className="w-40">设备时间</TableHead>
+                <TableHead className="w-16 pr-6 text-right">操作</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {entries.map((entry) => (
+                <TableRow key={entry.path} className="h-14 hover:bg-muted">
+                  <TableCell className="max-w-0">
+                    <button
+                      type="button"
+                      title={entry.path}
+                      onClick={() => (entry.is_dir ? onOpen(entry) : setSheetEntry(entry))}
+                      className="flex min-w-0 max-w-full items-center gap-2.5 text-left"
+                    >
+                      <span
+                        className={cn(
+                          "flex size-7 shrink-0 items-center justify-center rounded-sm border border-border bg-muted",
+                          entry.is_dir ? "text-warning" : "text-faint",
+                        )}
+                      >
+                        {entry.is_dir ? (
+                          <FolderClosed className="size-3.5 stroke-[1.5]" aria-hidden />
+                        ) : (
+                          <FileIcon className="size-3.5 stroke-[1.5]" aria-hidden />
+                        )}
+                      </span>
+                      <span className={cn("min-w-0 truncate text-sm font-medium", entry.hidden ? "text-faint" : "text-foreground")}>
+                        {entry.name}
+                      </span>
+                      {entry.hidden ? (
+                        <Badge variant="neutral" className="shrink-0 text-xs">
+                          隐藏
+                        </Badge>
+                      ) : null}
+                    </button>
+                  </TableCell>
+                  <TableCell className="tnum text-xs text-muted-foreground">
+                    {entry.is_dir ? "—" : formatBytes(entry.size)}
+                  </TableCell>
+                  <TableCell className="tnum text-xs text-muted-foreground">
+                    {formatDateTime(entry.deviceTimeMs)}
+                  </TableCell>
+                  <TableCell className="pr-6 text-right">
+                    <DropdownMenu>
+                      <DropdownMenuTrigger
+                        render={
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            aria-label={`${entry.name} 的更多操作`}
+                            disabled={busy}
+                          />
+                        }
+                      >
+                        <MoreHorizontal className="size-4" />
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        {entry.is_dir ? (
+                          <DropdownMenuItem onClick={() => onOpen(entry)}>
+                            <FolderClosed className="size-4" />
+                            打开
+                          </DropdownMenuItem>
+                        ) : (
+                          <DropdownMenuItem onClick={() => onDownload(entry)}>
+                            <Download className="size-4" />
+                            下载
+                          </DropdownMenuItem>
+                        )}
+                        <DropdownMenuItem onClick={() => onRename(entry)}>
+                          <Pencil className="size-4" />
+                          重命名
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => onCopy(entry)}>
+                          <Copy className="size-4" />
+                          复制到…
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => onMove(entry)}>
+                          <FolderInput className="size-4" />
+                          移动到…
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem variant="destructive" onClick={() => onDelete(entry)}>
+                          <Trash2 className="size-4" />
+                          删除
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Panel>
+      ) : (
+        <div className="min-w-0 overflow-hidden rounded-md border border-border bg-card">
+          <ul className="divide-y divide-border">
             {entries.map((entry) => (
-              <li
-                key={entry.path}
-                className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b border-line px-3 py-2 last:border-b-0 hover:bg-sunken"
-              >
-                <button
-                  type="button"
-                  title={entry.path}
-                  onClick={() => (entry.is_dir ? onOpen(entry) : setSheetEntry(entry))}
-                  className="tap-row flex min-w-0 items-center rounded-lg px-1 text-left"
-                >
-                  <span
-                    className={cn(
-                      "mr-2.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-line bg-sunken",
-                      entry.is_dir ? "text-warn" : "text-faint",
-                    )}
+              <li key={entry.path} className={cn("min-w-0", watch ? "px-2.5 py-2" : "px-3 py-2.5")}>
+                <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+                  <button
+                    type="button"
+                    title={entry.path}
+                    onClick={() => (entry.is_dir ? onOpen(entry) : setSheetEntry(entry))}
+                    className="flex min-w-0 items-center gap-2.5 rounded-sm px-1 text-left"
                   >
-                    {entry.is_dir ? (
-                      <FolderClosed className="size-4" aria-hidden />
-                    ) : (
-                      <FileIcon className="size-4" aria-hidden />
-                    )}
-                  </span>
-                  <span className="min-w-0">
                     <span
                       className={cn(
-                        "block truncate text-[0.84rem] font-medium",
-                        entry.hidden ? "text-faint" : "text-ink",
+                        "flex shrink-0 items-center justify-center rounded-sm",
+                        watch ? "size-8" : "size-9",
+                        entry.is_dir ? "text-warning" : "text-muted-foreground",
                       )}
                     >
-                      {entry.name}
+                      {entry.is_dir ? (
+                        <FolderClosed className="size-4 stroke-[1.5]" aria-hidden />
+                      ) : (
+                        <FileIcon className="size-4 stroke-[1.5]" aria-hidden />
+                      )}
                     </span>
-                    <span className="mt-0.5 block truncate text-[0.72rem] text-faint">
-                      {entry.is_dir ? "文件夹" : formatBytes(entry.size)} · 设备时间{" "}
-                      {formatDateTime(entry.deviceTimeMs)}
-                      {entry.hidden ? " · 隐藏" : ""}
+                    <span className="min-w-0 flex-1">
+                      <span
+                        className={cn(
+                          "block truncate font-medium",
+                          watch ? "text-sm" : "text-sm",
+                          entry.hidden ? "text-faint" : "text-foreground",
+                        )}
+                      >
+                        {entry.name}
+                      </span>
+                      <span
+                        className={cn(
+                          "mt-0.5 block truncate text-faint",
+                          watch ? "text-xs" : "text-xs",
+                        )}
+                      >
+                        {entry.is_dir ? "文件夹" : formatBytes(entry.size)}
+                        {entry.hidden ? " · 隐藏" : ""} · {formatDateTime(entry.deviceTimeMs)}
+                      </span>
                     </span>
-                  </span>
-                </button>
-                <div className="flex shrink-0 items-center space-x-0.5">
-                  {entry.is_dir ? (
-                    <IconAction label="打开" icon={FolderClosed} disabled={busy} onClick={() => onOpen(entry)} />
-                  ) : (
-                    <IconAction label="下载" icon={Download} disabled={busy} onClick={() => onDownload(entry)} />
-                  )}
-                  <IconAction label="重命名" icon={Pencil} disabled={busy} onClick={() => onRename(entry)} />
-                  <IconAction label="复制" icon={Copy} disabled={busy} onClick={() => onCopy(entry)} />
-                  <IconAction label="移动" icon={FolderInput} disabled={busy} onClick={() => onMove(entry)} />
-                  <IconAction label="删除" icon={Trash2} danger disabled={busy} onClick={() => onDelete(entry)} />
+                  </button>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label={`${entry.name} 的更多操作`}
+                    title="更多操作"
+                    onClick={() => setSheetEntry(entry)}
+                    disabled={busy}
+                  >
+                    <MoreHorizontal className="size-4" aria-hidden />
+                  </Button>
                 </div>
               </li>
             ))}
           </ul>
         </div>
-      ) : (
-        <ul className="min-w-0 space-y-2.5 sm:space-y-3">
-          {entries.map((entry) => (
-            <li key={entry.path} className={cn("surface min-w-0 overflow-hidden", watch ? "p-2.5" : "p-3")}>
-              <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
-                <button
-                  type="button"
-                  title={entry.path}
-                  onClick={() => (entry.is_dir ? onOpen(entry) : setSheetEntry(entry))}
-                  className="tap-row flex min-w-0 items-center rounded-xl px-1 text-left"
-                >
-                  <span
-                    className={cn(
-                      "mr-2.5 flex shrink-0 items-center justify-center rounded-xl border border-line bg-sunken",
-                      watch ? "size-9" : "size-10",
-                      entry.is_dir ? "text-warn" : "text-faint",
-                    )}
-                  >
-                    {entry.is_dir ? (
-                      <FolderClosed className={watch ? "size-4" : "size-[1.1rem]"} aria-hidden />
-                    ) : (
-                      <FileIcon className={watch ? "size-4" : "size-[1.1rem]"} aria-hidden />
-                    )}
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span
-                      className={cn(
-                        "block truncate font-medium",
-                        watch ? "text-[0.8rem]" : "text-[0.86rem]",
-                        entry.hidden ? "text-faint" : "text-ink",
-                      )}
-                    >
-                      {entry.name}
-                    </span>
-                    <span
-                      className={cn(
-                        "mt-0.5 block truncate text-faint",
-                        watch ? "text-[0.72rem]" : "text-[0.74rem]",
-                      )}
-                    >
-                      {entry.is_dir ? "文件夹" : formatBytes(entry.size)}
-                      {entry.hidden ? " · 隐藏" : ""} · {formatDateTime(entry.deviceTimeMs)}
-                    </span>
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  aria-label={`${entry.name} 的更多操作`}
-                  title="更多操作"
-                  onClick={() => setSheetEntry(entry)}
-                  disabled={busy}
-                  className="tap flex size-11 shrink-0 items-center justify-center rounded-xl border border-line bg-sunken text-soft disabled:pointer-events-none disabled:opacity-40"
-                >
-                  <MoreHorizontal className="size-4" aria-hidden />
-                </button>
-              </div>
-            </li>
-          ))}
-        </ul>
       )}
 
       <EntryActionsSheet
@@ -854,14 +898,14 @@ function SheetAction({
       disabled={disabled}
       onClick={onClick}
       className={cn(
-        "tap-row flex w-full min-w-0 items-center rounded-xl border px-3 text-left transition-colors disabled:pointer-events-none disabled:opacity-40",
+        "tap-row flex w-full min-w-0 items-center gap-2.5 rounded-md border px-3 text-left transition-colors disabled:pointer-events-none disabled:opacity-40",
         danger
-          ? "border-line bg-danger-soft text-danger"
-          : "border-line bg-sunken text-ink hover:border-line-strong",
+          ? "border-border bg-destructive-soft text-destructive hover:border-destructive"
+          : "border-border bg-card text-foreground hover:bg-accent",
       )}
     >
-      <Icon className="mr-2.5 size-4 shrink-0" aria-hidden />
-      <span className="min-w-0 flex-1 truncate text-[0.82rem] font-medium">{label}</span>
+      <Icon className="size-4 shrink-0" aria-hidden />
+      <span className="min-w-0 flex-1 truncate text-sm font-medium">{label}</span>
     </button>
   );
 }
@@ -912,23 +956,25 @@ function EntryActionsSheet({
         </DialogHeader>
         {entry ? (
           <>
-            <dl className="grid min-w-0 grid-cols-2 gap-2 rounded-xl border border-line bg-sunken p-2.5 text-[0.72rem]">
+            <dl className="grid min-w-0 grid-cols-2 gap-2 rounded-md border border-border bg-muted p-2.5 text-xs">
               <div className="min-w-0">
                 <dt className="text-faint">类型</dt>
-                <dd className="mt-0.5 truncate text-ink">
+                <dd className="mt-0.5 truncate text-foreground">
                   {entry.is_dir ? "文件夹" : "文件"}
                   {entry.hidden ? " · 隐藏" : ""}
                 </dd>
               </div>
               <div className="min-w-0">
                 <dt className="text-faint">大小</dt>
-                <dd className="tnum mt-0.5 truncate text-ink">
+                <dd className="tnum mt-0.5 truncate text-foreground">
                   {entry.is_dir ? "—" : formatBytes(entry.size)}
                 </dd>
               </div>
               <div className="col-span-2 min-w-0">
                 <dt className="text-faint">设备时间</dt>
-                <dd className="tnum mt-0.5 truncate text-ink">{formatDateTime(entry.deviceTimeMs)}</dd>
+                <dd className="tnum mt-0.5 truncate text-foreground">
+                  {formatDateTime(entry.deviceTimeMs)}
+                </dd>
               </div>
             </dl>
             <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
@@ -1001,10 +1047,10 @@ function ActionDialog({
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>{hint}</DialogDescription>
         </DialogHeader>
-        <div className="space-y-2">
-          <Label htmlFor="file-action-input" className="text-xs text-soft">
+        <Field>
+          <FieldLabel htmlFor="file-action-input">
             {kind === "search" ? "匹配片段" : kind === "copy" || kind === "move" ? "目标路径" : "名称"}
-          </Label>
+          </FieldLabel>
           <Input
             id="file-action-input"
             value={value}
@@ -1013,25 +1059,20 @@ function ActionDialog({
               if (event.key === "Enter") onSubmit();
             }}
             autoFocus
-            className="h-11"
+            className="h-10"
           />
-          {kind === "search" ? (
-            <label className="tap flex items-center rounded-lg border border-line bg-sunken px-3 text-xs text-soft">
-              <input
-                type="checkbox"
-                className="mr-2 size-4"
-                checked={recursive}
-                onChange={(event) => onRecursiveChange(event.target.checked)}
-              />
-              递归搜索子目录
-            </label>
-          ) : null}
-        </div>
+        </Field>
+        {kind === "search" ? (
+          <div className="flex items-center justify-between gap-3 rounded-md border border-border bg-muted px-3 py-2">
+            <span className="text-xs text-muted-foreground">递归搜索子目录</span>
+            <Switch checked={recursive} onCheckedChange={onRecursiveChange} aria-label="递归搜索子目录" />
+          </div>
+        ) : null}
         <DialogFooter>
-          <Button variant="outline" className="tap" onClick={onCancel} disabled={busy}>
+          <Button variant="outline" onClick={onCancel} disabled={busy}>
             取消
           </Button>
-          <Button className="tap" onClick={onSubmit} disabled={busy || !value.trim()}>
+          <Button onClick={onSubmit} disabled={busy || !value.trim()}>
             {busy ? "处理中…" : kind === "search" ? "搜索" : "确定"}
           </Button>
         </DialogFooter>

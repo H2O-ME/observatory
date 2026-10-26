@@ -5,6 +5,7 @@
  * the server's own `reason` / `age_ms`. It never invents a freshness heuristic.
  */
 
+import { Badge } from "@/components/ui/badge";
 import { formatAge } from "@/lib/format";
 import { presenceAgeMs, transportOf } from "@/lib/presence";
 import type { Presence, TransportKind } from "@/lib/types";
@@ -18,20 +19,23 @@ const LABELS: Record<Presence["state"], string> = {
   uninstalled: "已卸载",
 };
 
-const TONES: Record<Presence["state"], string> = {
-  online: "border-line bg-ok-soft text-ok",
-  degraded: "border-line bg-warn-soft text-warn",
-  offline: "border-line bg-sunken text-soft",
-  uninstalling: "border-line bg-warn-soft text-warn",
-  uninstalled: "border-line bg-danger-soft text-danger",
+const VARIANT: Record<
+  Presence["state"],
+  "success" | "warning" | "neutral" | "destructive"
+> = {
+  online: "success",
+  degraded: "warning",
+  offline: "neutral",
+  uninstalling: "warning",
+  uninstalled: "destructive",
 };
 
 const DOTS: Record<Presence["state"], string> = {
-  online: "bg-ok shadow-[0_0_0_3px_var(--c-ok-soft)]",
-  degraded: "bg-warn shadow-[0_0_0_3px_var(--c-warn-soft)]",
+  online: "bg-success",
+  degraded: "bg-warning",
   offline: "bg-faint",
-  uninstalling: "bg-warn animate-sm-pulse",
-  uninstalled: "bg-danger",
+  uninstalling: "bg-warning animate-sm-pulse",
+  uninstalled: "bg-destructive",
 };
 
 const TRANSPORT_LABELS: Record<TransportKind, string> = {
@@ -60,30 +64,26 @@ export function StatusBadge({ presence, compact = false, className, large = fals
         : presence.reason;
 
   return (
-    <span
+    <Badge
+      variant={VARIANT[presence.state]}
       className={cn(
-        "inline-flex max-w-full items-center gap-1.5 rounded-full border font-medium",
-        compact ? "px-2 py-0.5 text-[0.72rem]" : "px-2.5 py-1 text-[0.78rem]",
-        large && "px-3 py-1.5 text-[0.84rem]",
-        TONES[presence.state],
+        "max-w-full gap-1.5 font-medium",
+        large ? "h-7 px-3 text-sm" : compact ? "h-5 px-2 text-xs" : null,
         className,
       )}
       title={presence.reason || label}
     >
       <span
-        className={cn(
-          "shrink-0 rounded-full",
-          large ? "size-2" : "size-1.5",
-          DOTS[presence.state],
-        )}
+        className={cn("shrink-0 rounded-full", large ? "size-2" : "size-1.5", DOTS[presence.state])}
+        aria-hidden
       />
       <span className="truncate">{label}</span>
       {!compact && detail ? (
-        <span className="truncate text-[0.72rem] font-normal opacity-80">· {detail}</span>
+        <span className="truncate text-xs font-normal">· {detail}</span>
       ) : null}
       {!compact && age !== null && presence.state !== "online" ? (
-        <span className="shrink-0 text-[0.7rem] font-normal opacity-65">{formatAge(age)}</span>
+        <span className="shrink-0 text-xs font-normal">· {formatAge(age)}</span>
       ) : null}
-    </span>
+    </Badge>
   );
 }

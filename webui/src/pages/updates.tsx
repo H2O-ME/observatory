@@ -3,12 +3,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { ChevronRight, Download, PackagePlus, RefreshCw, Trash2, Upload, X } from "lucide-react";
 
-import { GlowCard, GridPattern, ShimmerButton } from "@/components/aceternity";
 import { Banner, EmptyBlock, ErrorBlock, LoadingBlock } from "@/components/async-state";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { MetaChip, PageHeader } from "@/components/page-header";
-import { Section } from "@/components/section";
+import { Panel } from "@/components/panel";
 import { Button, buttonVariants } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import { Progress } from "@/components/ui/progress";
 import { useViewport } from "@/hooks/use-viewport";
 import { api, isApiError } from "@/lib/api";
@@ -130,7 +130,7 @@ export function UpdatesPage() {
         />
       ) : null}
 
-      {/* The hero keeps the upload target (drop or button) without a second card. */}
+      {/* The upload target lives in one panel, without a second card. */}
       <div
         onDragOver={(event) => event.preventDefault()}
         onDrop={(event) => {
@@ -140,38 +140,32 @@ export function UpdatesPage() {
           if (file) void upload(file);
         }}
       >
-        <GlowCard className="min-w-0" contentClassName="relative p-4 sm:p-5">
-          <GridPattern
-            className="pointer-events-none absolute inset-full opacity-20"
-            fade="radial"
-            stroke="var(--c-grid-line)"
-            strokeDasharray="4 8"
-          />
-          <div className="relative grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-[minmax(0,auto)_auto] sm:items-end sm:gap-8">
+        <Panel title="版本分发" hint="拖入 .zip 安装包，或使用右侧按钮选择文件。">
+          <div className="grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
             <div className="min-w-0">
-              <p className="tnum text-gradient break-all text-[1.65rem] font-semibold leading-tight tracking-tight sm:text-[1.85rem]">
+              <p className="text-xs font-medium tracking-[0.08em] text-muted-foreground uppercase">
+                当前最新版本
+              </p>
+              <p className="tnum mt-1.5 break-all text-3xl leading-none font-bold tracking-[-0.03em] text-foreground">
                 {latest ? `v${latest}` : "—"}
               </p>
-              <p className="mt-2 max-w-md text-[0.8rem] leading-relaxed text-soft">
+              <p className="mt-2 max-w-md text-xs leading-relaxed text-muted-foreground">
                 “最新”取已上传安装包里
-                <b className="mx-0.5 font-semibold text-ink">语义版本最高</b>
+                <b className="mx-0.5 font-medium text-foreground">语义版本最高</b>
                 的一个；上传旧版本不会降低推送目标。
               </p>
             </div>
 
-            <div className="flex min-w-0 flex-wrap items-center sm:pb-1">
-              <ShimmerButton
+            <div className="flex min-w-0 flex-wrap items-center sm:pb-0.5">
+              <Button
                 className="w-full sm:w-auto"
-                busy={uploading}
                 disabled={uploading}
                 onClick={() => inputRef.current?.click()}
                 title="选择 .zip 安装包"
               >
-                <span className="inline-flex items-center">
-                  <Upload className="mr-1.5 size-4" aria-hidden />
-                  选择安装包
-                </span>
-              </ShimmerButton>
+                {uploading ? <Spinner className="size-4" /> : <Upload className="size-4" aria-hidden />}
+                选择安装包
+              </Button>
               {uploading ? (
                 <Button
                   size="sm"
@@ -187,64 +181,72 @@ export function UpdatesPage() {
           </div>
 
           {progress ? (
-            <div className="relative mt-3 min-w-0 rounded-xl border border-line bg-sunken p-3">
-              <div className="flex min-w-0 flex-wrap items-center justify-between">
-                <span className="min-w-0 truncate font-mono text-[0.75rem] text-soft">
+            <div className="mt-3 min-w-0 border-t border-border pt-3">
+              <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+                <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
                   {progress.name} · {formatBytes(progress.loaded)} / {formatBytes(progress.total)}
                 </span>
-                <span className="tnum shrink-0 text-[0.78rem] font-semibold text-brand">{uploadPercent}%</span>
+                <span className="tnum shrink-0 text-xs font-medium text-foreground">{uploadPercent}%</span>
               </div>
               <Progress className="mt-2" value={uploadPercent} />
             </div>
           ) : null}
-        </GlowCard>
+        </Panel>
       </div>
 
-      <Section title="安装包">
+      <Panel
+        title="安装包"
+        hint="最新版本会自动推送给低于它的受控端"
+        flush
+        actions={<span className="tnum text-xs text-faint">{packages.length} 个</span>}
+      >
         {query.isLoading ? (
-          <LoadingBlock label="正在读取更新状态…" rows={4} />
+          <div className="px-6 py-4">
+            <LoadingBlock label="正在读取更新状态…" rows={4} />
+          </div>
         ) : packages.length === 0 ? (
-          <EmptyBlock
-            title="还没有上传安装包"
-            description="上传 observatory-agent-<版本>.zip 后，版本更高的受控端会自动收到升级指令。"
-            action={
-              <Button onClick={() => inputRef.current?.click()}>
-                <PackagePlus className="size-3.5" aria-hidden />
-                上传第一个安装包
-              </Button>
-            }
-          />
+          <div className="px-6 py-4">
+            <EmptyBlock
+              title="还没有上传安装包"
+              description="上传 observatory-agent-<版本>.zip 后，版本更高的受控端会自动收到升级指令。"
+              action={
+                <Button size="sm" onClick={() => inputRef.current?.click()}>
+                  <PackagePlus className="size-3.5" aria-hidden />
+                  上传第一个安装包
+                </Button>
+              }
+            />
+          </div>
         ) : (
-          <ul className="grid min-w-0 gap-3">
+          <ul className="min-w-0 divide-y divide-border">
             {packages.map((pkg) => {
               const isLatest = pkg.version === latest;
               return (
                 <li
                   key={pkg.version}
-                  className={cn(
-                    "grid min-w-0 grid-cols-1 gap-2.5 rounded-xl border px-3.5 py-3.5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-3",
-                    isLatest ? "border-line bg-brand-soft" : "border-line bg-sunken",
-                  )}
+                  className="grid min-w-0 grid-cols-1 gap-2.5 px-6 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-3"
                 >
                   <div className="grid min-w-0 gap-1.5">
                     <div className="flex min-w-0 flex-wrap items-center">
-                      <span className="tnum mr-2 text-[0.95rem] font-semibold text-ink">v{pkg.version}</span>
+                      <span className="tnum mr-2 text-sm font-semibold text-foreground">v{pkg.version}</span>
                       {isLatest ? (
                         <MetaChip tone="ok" className="shrink-0">
                           当前最新
                         </MetaChip>
-                      ) : null}
+                      ) : (
+                        <MetaChip className="shrink-0">历史版本</MetaChip>
+                      )}
                     </div>
                     {pkg.notes ? (
-                      <p className="min-w-0 break-words text-[0.78rem] leading-relaxed text-soft">{pkg.notes}</p>
+                      <p className="min-w-0 break-words text-xs leading-relaxed text-muted-foreground">{pkg.notes}</p>
                     ) : null}
                     <p
-                      className="min-w-0 truncate font-mono text-[0.72rem] text-faint"
+                      className="min-w-0 truncate font-mono text-xs text-faint"
                       title={`${pkg.filename}\n大小 ${formatBytes(pkg.size_bytes)}\nsha256 ${pkg.sha256}`}
                     >
                       {pkg.filename} · {formatBytes(pkg.size_bytes)} · sha256 {pkg.sha256.slice(0, 16)}…
                     </p>
-                    <p className="min-w-0 truncate text-[0.72rem] text-faint">
+                    <p className="min-w-0 truncate text-xs text-faint">
                       上传于 {formatDateTime(pkg.created_at_ms)}
                     </p>
                   </div>
@@ -262,7 +264,7 @@ export function UpdatesPage() {
                     <Button
                       size="sm"
                       variant="ghost"
-                      className={cn("text-soft hover:text-danger", tapClass)}
+                      className={cn("hover:text-destructive", tapClass)}
                       disabled={remove.isPending}
                       onClick={() => setPendingDelete(pkg)}
                       title={isLatest ? "删除当前最新版本会回退到次高版本" : "删除该安装包"}
@@ -277,37 +279,40 @@ export function UpdatesPage() {
             })}
           </ul>
         )}
-      </Section>
+      </Panel>
 
       {data && latest ? (
-        <Section
+        <Panel
           title={`仍低于最新版本的设备（${outdatedCount}）`}
           hint="低于 0.3.0 的受控端不在自动升级路径上，需要重新运行安装脚本覆盖安装。"
+          flush
         >
           {outdatedCount === 0 ? (
-            <p className="text-[0.8rem] text-soft">所有受控端的版本都不低于当前最新版本 v{latest}。</p>
+            <p className="px-6 py-4 text-xs text-muted-foreground">
+              所有受控端的版本都不低于当前最新版本 v{latest}。
+            </p>
           ) : (
-            <ul className="grid min-w-0 gap-2">
+            <ul className="min-w-0 divide-y divide-border">
               {outdated.map((device) => (
                 <li
                   key={device.uid}
-                  className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-xl border border-line bg-sunken px-3 py-2"
+                  className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-6 py-3"
                 >
                   <Link
                     to={`/device/${device.uid}/overview`}
-                    className="tap-row flex min-w-0 items-center text-[0.82rem] font-medium text-brand no-underline"
+                    className="tap-row flex min-w-0 items-center text-sm font-medium text-foreground no-underline hover:underline"
                   >
                     <span className="min-w-0 truncate">{device.name || device.uid}</span>
-                    <ChevronRight className="ml-1 size-3.5 shrink-0 opacity-70" aria-hidden />
+                    <ChevronRight className="ml-1 size-3.5 shrink-0 text-faint" aria-hidden />
                   </Link>
-                  <span className="tnum shrink-0 font-mono text-[0.72rem] text-faint">
+                  <span className="tnum shrink-0 font-mono text-xs text-faint">
                     v{device.version} → v{latest}
                   </span>
                 </li>
               ))}
             </ul>
           )}
-        </Section>
+        </Panel>
       ) : null}
 
       <ConfirmDialog

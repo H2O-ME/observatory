@@ -1,195 +1,199 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* Documentation is not a source of utilities: keep its prose out of the
+   generated stylesheet (Tailwind's automatic source detection otherwise treats
+   any class-looking token in a .md file as a used utility). */
+@source not "../DESIGN_SYSTEM.md";
+@source not "../scripts";
+
 /* ============================================================================
-   Observatory · Flat mission control
+   Observatory · shadcn/ui design system
    ----------------------------------------------------------------------------
-   Token-driven. Every component names a semantic colour, never a raw hex.
-   Two vocabularies are mapped to the same primitives:
-     · `bg/panel/ink/soft/brand/…`   the console's own names
-     · `background/card/muted/…`     shadcn's names (Base UI wrappers)
+   One vocabulary: the shadcn/ui semantic tokens (`background`, `card`,
+   `primary`, `muted`, `border`, `ring`, …) plus three console-only extensions
+   that shadcn does not ship but this product needs:
 
-   0.4 design direction — FLAT:
-   * opaque, solid panels + 1px hairline borders; no glassmorphism, no
-     backdrop-filter, no layered depth shadows. Elevation is expressed by
-     border strength and surface colour steps, not blur or drop shadows.
-   * the only shadow kept is `--sh-pop`, for things that genuinely float
-     (dialogs, popovers, toasts) so they separate from the page.
-   * no ambient background glow — the shell uses a flat GridPattern overlay.
+     · `faint`             tertiary / disabled text (shadcn only has two levels)
+     · `success`/`warning` first-class status colours (shadcn only ships
+                           `destructive`; device presence needs all four states)
+     · `*-soft`            opaque tinted surfaces, because Chromium 81 (the
+                           watch WebView) cannot evaluate `color-mix()`, so
+                           Tailwind's `bg-destructive/10` alpha utilities are not
+                           dependable. Never write `bg-x/10` in this codebase.
 
-   Chromium 81 (watch WebView) rules that shaped this file:
-   * utilities that Tailwind v4 emits through color-mix() are not dependable;
-     alpha surfaces therefore live in `--c-*-soft` tokens / custom classes;
-   * `inset`, individual `translate/rotate/scale`, `aspect-ratio`, `100dvh`
-     and flex `gap` are missing — fallbacks are at the bottom of this file;
-   * surfaces never depended on backdrop-filter for contrast, and now they
-     don't use it at all.
+   Every primitive below is a plain hex or rgba value — no `oklch()`, no
+   `color-mix()`, no `@property`. The compat stylesheet is still produced by
+   `vite-plugin-legacy-css.ts` (flattened `@layer` + logical-property + flex-gap
+   fallbacks) and loaded only by engines without cascade layers.
+
+   Direction: industrial, precise, restrained. Opaque panels, 1px hairlines,
+   no glass, no decorative glow, status colour only where it means something.
    ========================================================================== */
 
 @custom-variant dark (&:where(.dark, .dark *));
 
 @theme inline {
-  /* ---------------------------------------------------- console vocabulary */
-  --color-bg: var(--c-bg);
-  --color-bg-2: var(--c-bg-2);
-  --color-panel: var(--c-panel);
-  --color-panel-strong: var(--c-panel-strong);
-  --color-raised: var(--c-raised);
-  --color-sunken: var(--c-sunken);
-  --color-sunken-strong: var(--c-sunken-strong);
-  --color-line: var(--c-line);
-  --color-line-strong: var(--c-line-strong);
-  --color-ink: var(--c-ink);
-  --color-soft: var(--c-soft);
-  --color-faint: var(--c-faint);
-  --color-brand: var(--c-brand);
-  --color-brand-2: var(--c-brand-2);
-  --color-brand-3: var(--c-brand-3);
-  --color-brand-ink: var(--c-brand-ink);
-  --color-brand-soft: var(--c-brand-soft);
-  --color-ok: var(--c-ok);
-  --color-warn: var(--c-warn);
-  --color-danger: var(--c-danger);
-  --color-ok-soft: var(--c-ok-soft);
-  --color-warn-soft: var(--c-warn-soft);
-  --color-danger-soft: var(--c-danger-soft);
-  --color-on-danger: var(--c-on-danger);
-
-  /* ----------------------------------------------------- shadcn vocabulary */
+  /* ------------------------------------------------------------ surfaces -- */
   --color-background: var(--c-bg);
-  --color-foreground: var(--c-ink);
-  --color-card: var(--c-panel);
-  --color-card-foreground: var(--c-ink);
-  --color-popover: var(--c-raised);
-  --color-popover-foreground: var(--c-ink);
-  --color-primary: var(--c-brand);
-  --color-primary-foreground: var(--c-brand-ink);
-  --color-secondary: var(--c-sunken);
-  --color-secondary-foreground: var(--c-ink);
-  --color-muted: var(--c-sunken);
-  --color-muted-foreground: var(--c-soft);
-  --color-accent: var(--c-sunken);
-  --color-accent-foreground: var(--c-ink);
-  --color-destructive: var(--c-danger);
-  --color-destructive-foreground: var(--c-on-danger);
-  --color-border: var(--c-line);
-  --color-input: var(--c-line);
-  --color-ring: var(--c-brand);
+  --color-foreground: var(--c-fg);
+  --color-card: var(--c-card);
+  --color-card-foreground: var(--c-fg);
+  --color-popover: var(--c-popover);
+  --color-popover-foreground: var(--c-fg);
+  --color-secondary: var(--c-secondary);
+  --color-secondary-foreground: var(--c-fg);
+  --color-muted: var(--c-muted);
+  --color-muted-foreground: var(--c-muted-fg);
+  --color-accent: var(--c-accent);
+  --color-accent-foreground: var(--c-fg);
+  --color-selected: var(--c-selected);
+  --color-faint: var(--c-faint);
 
+  /* --------------------------------------------------------------- brand -- */
+  --color-primary: var(--c-primary);
+  --color-primary-foreground: var(--c-primary-fg);
+  --color-primary-soft: var(--c-primary-soft);
+  --color-primary-hover: var(--c-primary-hover);
+
+  /* ------------------------------------------------------------- status -- */
+  --color-destructive: var(--c-destructive);
+  --color-destructive-foreground: var(--c-destructive-fg);
+  --color-destructive-soft: var(--c-destructive-soft);
+  --color-destructive-hover: var(--c-destructive-hover);
+  --color-success: var(--c-success);
+  --color-success-foreground: var(--c-success-fg);
+  --color-success-soft: var(--c-success-soft);
+  --color-warning: var(--c-warning);
+  --color-warning-foreground: var(--c-warning-fg);
+  --color-warning-soft: var(--c-warning-soft);
+
+  /* -------------------------------------------------------------- lines -- */
+  --color-border: var(--c-border);
+  --color-border-soft: var(--c-border-soft);
+  --color-border-strong: var(--c-border-strong);
+  --color-input: var(--c-border);
+  --color-ring: var(--c-primary);
+
+  /* ------------------------------------------------------------- charts -- */
   --color-chart-1: var(--c-chart-1);
   --color-chart-2: var(--c-chart-2);
   --color-chart-3: var(--c-chart-3);
   --color-chart-4: var(--c-chart-4);
   --color-chart-5: var(--c-chart-5);
 
-  /* --------------------------------------------------------------- rest -- */
-  --shadow-card: var(--sh-card);
-  --shadow-raised: var(--sh-raised);
-  --shadow-pop: var(--sh-pop);
-
+  /* ------------------------------------------------------------- layout -- */
   --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text",
     "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei",
     "Hiragino Sans GB", system-ui, sans-serif;
   --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "Consolas",
     "Liberation Mono", monospace;
 
-  --radius-sm: 0.25rem;
-  --radius-md: 0.375rem;
-  --radius-lg: 0.5rem;
-  --radius-xl: 0.625rem;
-  --radius-panel: 0.5rem;
-  --radius-window: 0.625rem;
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 2px);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --shadow-pop: var(--sh-pop);
 }
 
-/* ---------------------------------------------------------------- light -- */
+/* ------------------------------------------------------------------ light -- */
 :root {
-  --c-bg: #f5f6f9;
-  --c-bg-2: #eceef3;
-  --c-panel: #ffffff;
-  --c-panel-strong: #ffffff;
-  --c-raised: #ffffff;
-  --c-glass: #ffffff;
-  --c-sunken: rgba(15, 23, 42, 0.04);
-  --c-sunken-strong: rgba(15, 23, 42, 0.075);
-  --c-line: rgba(15, 23, 42, 0.09);
-  --c-line-strong: rgba(15, 23, 42, 0.18);
-  --c-ink: #151a26;
-  --c-soft: #545d73;
-  --c-faint: #8a92a5;
-  --c-brand: #2563eb;
-  --c-brand-2: #7c3aed;
-  --c-brand-3: #0891b2;
-  --c-brand-ink: #ffffff;
-  --c-brand-soft: rgba(37, 99, 235, 0.08);
-  --c-on-danger: #ffffff;
-  --c-ok: #0e8a4b;
-  --c-warn: #b45309;
-  --c-danger: #d92d20;
-  --c-ok-soft: rgba(14, 138, 75, 0.09);
-  --c-warn-soft: rgba(180, 83, 9, 0.09);
-  --c-danger-soft: rgba(217, 45, 32, 0.07);
+  --radius: 0.5rem;
 
-  --c-chart-1: #2563eb;
-  --c-chart-2: #7c3aed;
-  --c-chart-3: #0e8a4b;
+  /* Zinc neutrals: the canvas and the panels are separated by one value step,
+     never by a coloured tint. */
+  --c-bg: #f7f7f8;
+  --c-card: #ffffff;
+  --c-popover: #ffffff;
+  --c-secondary: #f4f4f5;
+  --c-muted: #f4f4f5;
+  --c-accent: #f4f4f5;
+  --c-selected: #ececef;
+  --c-fg: #09090b;
+  --c-muted-fg: #71717a;
+  --c-faint: #a1a1aa;
+
+  /* Primary is ink, not brand blue: one confident action colour, no decoration. */
+  --c-primary: #18181b;
+  --c-primary-fg: #fafafa;
+  --c-primary-soft: #f4f4f5;
+  --c-primary-hover: #2b2b30;
+
+  --c-destructive: #dc2626;
+  --c-destructive-fg: #ffffff;
+  --c-destructive-soft: #fef2f2;
+  --c-destructive-hover: #b91c1c;
+  --c-success: #047857;
+  --c-success-fg: #ffffff;
+  --c-success-soft: #d1fae5;
+  --c-warning: #c2410c;
+  --c-warning-fg: #ffffff;
+  --c-warning-soft: #ffedd5;
+
+  --c-border: #e4e4e7;
+  --c-border-soft: #ededf0;
+  --c-border-strong: #d4d4d8;
+
+  --c-chart-1: #18181b;
+  --c-chart-2: #52525b;
+  --c-chart-3: #15803d;
   --c-chart-4: #b45309;
-  --c-chart-5: #d92d20;
+  --c-chart-5: #dc2626;
 
-  --c-grid-line: rgba(15, 23, 42, 0.055);
-
-  /* Flat: cards carry no shadow. Only floating layers do. */
-  --sh-card: none;
-  --sh-raised: none;
-  --sh-pop: 0 24px 64px -28px rgba(16, 24, 40, 0.28),
-    0 4px 16px -8px rgba(16, 24, 40, 0.12);
+  --c-stage: #f4f4f5;
+  --sh-pop: 0 16px 40px -24px rgba(9, 9, 11, 0.26),
+    0 1px 3px rgba(9, 9, 11, 0.06);
 }
 
-/* ----------------------------------------------------------------- dark -- */
+/* ------------------------------------------------------------------- dark -- */
 .dark {
-  --c-bg: #0a0c11;
-  --c-bg-2: #0d1017;
-  --c-panel: #10131b;
-  --c-panel-strong: #141824;
-  --c-raised: #191e2b;
-  --c-glass: #10131b;
-  --c-sunken: rgba(255, 255, 255, 0.05);
-  --c-sunken-strong: rgba(255, 255, 255, 0.09);
-  --c-line: rgba(255, 255, 255, 0.08);
-  --c-line-strong: rgba(255, 255, 255, 0.17);
-  --c-ink: #eef1f8;
-  --c-soft: #9aa3b8;
-  --c-faint: #67718c;
-  --c-brand: #6392ff;
-  --c-brand-2: #a78bfa;
-  --c-brand-3: #22d3ee;
-  --c-brand-ink: #ffffff;
-  --c-brand-soft: rgba(99, 146, 255, 0.13);
-  --c-on-danger: #ffffff;
-  --c-ok: #3fb950;
-  --c-warn: #d29922;
-  --c-danger: #f85149;
-  --c-ok-soft: rgba(63, 185, 80, 0.12);
-  --c-warn-soft: rgba(210, 153, 34, 0.12);
-  --c-danger-soft: rgba(248, 81, 73, 0.12);
+  --c-bg: #09090b;
+  --c-card: #0d0d10;
+  --c-popover: #141418;
+  --c-secondary: #1c1c20;
+  --c-muted: #1c1c20;
+  --c-accent: #27272a;
+  --c-selected: #232327;
+  --c-fg: #fafafa;
+  --c-muted-fg: #a1a1aa;
+  --c-faint: #71717a;
 
-  --c-chart-1: #6392ff;
-  --c-chart-2: #a78bfa;
-  --c-chart-3: #3fb950;
-  --c-chart-4: #d29922;
-  --c-chart-5: #f85149;
+  --c-primary: #fafafa;
+  --c-primary-fg: #18181b;
+  --c-primary-soft: #27272a;
+  --c-primary-hover: #e4e4e7;
 
-  --c-grid-line: rgba(255, 255, 255, 0.045);
+  --c-destructive: #f87171;
+  --c-destructive-fg: #1a0c0b;
+  --c-destructive-soft: #2a1516;
+  --c-destructive-hover: #fca5a5;
+  --c-success: #34d399;
+  --c-success-fg: #07160d;
+  --c-success-soft: #0b2e26;
+  --c-warning: #fdba74;
+  --c-warning-fg: #1a1305;
+  --c-warning-soft: #2a1a10;
 
-  --sh-card: none;
-  --sh-raised: none;
-  --sh-pop: 0 32px 80px -28px rgba(0, 0, 0, 0.65),
-    0 4px 16px -8px rgba(0, 0, 0, 0.4);
+  --c-border: #26262b;
+  --c-border-soft: #202024;
+  --c-border-strong: #3f3f46;
+
+  --c-chart-1: #fafafa;
+  --c-chart-2: #a1a1aa;
+  --c-chart-3: #4ade80;
+  --c-chart-4: #fbbf24;
+  --c-chart-5: #f87171;
+
+  --c-stage: #0c0c0e;
+  --sh-pop: 0 20px 48px -24px rgba(0, 0, 0, 0.8),
+    0 1px 4px rgba(0, 0, 0, 0.5);
 }
 
-/* ------------------------------------------------------------------ base -- */
+/* ------------------------------------------------------------------- base -- */
 @layer base {
   * {
-    border-color: var(--color-line);
+    border-color: var(--color-border);
   }
 
   html,
@@ -199,6 +203,7 @@
   }
 
   html {
+    font-size: 16px;
     -webkit-text-size-adjust: 100%;
     text-size-adjust: 100%;
   }
@@ -206,29 +211,29 @@
   body {
     margin: 0;
     background-color: var(--c-bg);
-    color: var(--c-ink);
+    color: var(--c-fg);
     font-family: var(--font-sans);
-    font-size: 14px;
-    line-height: 1.55;
-    letter-spacing: -0.008em;
+    font-size: 0.875rem;
+    line-height: 1.6;
+    letter-spacing: -0.011em;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
     overflow-x: hidden;
   }
 
   ::selection {
-    background: var(--c-brand);
-    color: var(--c-brand-ink);
+    background: var(--c-primary);
+    color: var(--c-primary-fg);
   }
 
-  /* :focus-visible is Chromium 86; keep the fallback outline for the watch. */
+  /* Chromium 81 has no :focus-visible; the :focus fallback keeps keyboard
+     outlines on the watch without painting a ring on every tap. */
   :focus {
     outline: none;
   }
   :focus-visible {
-    outline: 2px solid var(--c-brand);
+    outline: 2px solid var(--c-primary);
     outline-offset: 2px;
-    border-radius: 6px;
   }
 
   ::-webkit-scrollbar {
@@ -239,7 +244,7 @@
     background: transparent;
   }
   ::-webkit-scrollbar-thumb {
-    background: var(--c-line-strong);
+    background: var(--c-border-strong);
     border: 3px solid transparent;
     background-clip: content-box;
     border-radius: 999px;
@@ -255,12 +260,36 @@
   h4 {
     margin: 0;
     font-weight: 600;
-    letter-spacing: -0.022em;
-    color: var(--c-ink);
+    letter-spacing: -0.02em;
+    color: var(--c-fg);
+  }
+
+  h1 {
+    font-size: 1.375rem;
+    line-height: 1.25;
+  }
+  h2 {
+    font-size: 0.9375rem;
+    line-height: 1.35;
+  }
+  h3 {
+    font-size: 0.875rem;
+    line-height: 1.4;
+  }
+  h4 {
+    font-size: 0.8125rem;
+    line-height: 1.4;
   }
 
   p {
     margin: 0;
+  }
+
+  /* Tailwind's preflight tints placeholders with color-mix(), which Chromium 81
+     drops; an opaque token keeps the same visual weight on every engine. */
+  ::placeholder {
+    color: var(--c-faint);
+    opacity: 1;
   }
 
   /* Native date/time widgets are close to invisible in dark mode. */
@@ -272,113 +301,62 @@
 
 /* ------------------------------------------------------------- utilities -- */
 @layer utilities {
-  /* ---------------------------------------------------------------- colour */
+  /* Metadata kicker used above titles and stat labels. */
   .eyebrow {
-    font-size: 0.6875rem;
+    font-size: 0.75rem;
     line-height: 1.2;
-    font-weight: 600;
-    letter-spacing: 0.18em;
+    font-weight: 500;
+    letter-spacing: 0.1em;
     text-transform: uppercase;
-    color: var(--c-faint);
+    color: var(--c-muted-fg);
   }
 
-  .display-title {
-    font-size: clamp(1.5rem, 1.1rem + 1.4vw, 2.1rem);
-    line-height: 1.1;
-    font-weight: 650;
-    letter-spacing: -0.035em;
-    color: var(--c-ink);
-  }
-
-  .text-gradient {
-    background-image: linear-gradient(
-      100deg,
-      var(--c-brand-3),
-      var(--c-brand),
-      var(--c-brand-2)
-    );
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-  }
-
-  /* Fading hairline divider under page headers. Tailwind's bg-gradient-*
-     utilities compile to `in oklab` interpolation, which Chromium 81 drops
-     wholesale — this class is the explicit literal-gradient replacement. */
-  .hairline {
-    height: 1px;
-    width: 100%;
-    background-image: linear-gradient(
-      to right,
-      transparent,
-      var(--c-line-strong),
-      transparent
-    );
-  }
-
+  /* Tabular figures for every metric, clock and identifier. */
   .tnum {
-    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
     letter-spacing: -0.01em;
   }
 
-  /* --------------------------------------------------------------- surface */
-  /* Flat panels: solid colour + hairline border. Elevation comes from the
-     colour step (panel < panel-strong < raised), never from blur or shadow. */
-  .surface {
-    position: relative;
-    background-color: var(--c-panel);
-    border: 1px solid var(--c-line);
-    border-radius: var(--radius-panel);
+  /* Dashboards label sections with a rule + small caps, not a third card. */
+  .section-rule {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    font-size: 0.6875rem;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--c-faint);
+  }
+  .section-rule::after {
+    content: "";
+    flex: 1 1 auto;
+    height: 1px;
+    background-color: var(--c-border);
   }
 
-  .surface-strong {
-    position: relative;
-    background-color: var(--c-panel-strong);
-    border: 1px solid var(--c-line-strong);
-    border-radius: var(--radius-panel);
+  /* Metric strip: 2×2 on phones, one row on desktop; rules are physical so
+     Chromium 81 keeps them. */
+  .stat-strip {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .stat-strip > * + * {
+    border-left: 1px solid var(--c-border-soft);
+  }
+  .stat-strip > *:nth-child(n + 3) {
+    border-top: 1px solid var(--c-border-soft);
+  }
+  @media (min-width: 640px) {
+    .stat-strip {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+    .stat-strip > *:nth-child(n + 3) {
+      border-top: 0;
+    }
   }
 
-  .surface-quiet {
-    position: relative;
-    background-color: var(--c-sunken);
-    border: 1px solid transparent;
-    border-radius: var(--radius-panel);
-  }
-
-  .surface-danger {
-    position: relative;
-    background-color: var(--c-danger-soft);
-    border: 1px solid var(--c-danger);
-    border-color: rgba(217, 45, 32, 0.32);
-    border-radius: var(--radius-panel);
-  }
-
-  .surface-warn {
-    position: relative;
-    background-color: var(--c-warn-soft);
-    border: 1px solid rgba(180, 83, 9, 0.32);
-    border-radius: var(--radius-panel);
-  }
-
-  .surface-ok {
-    position: relative;
-    background-color: var(--c-ok-soft);
-    border: 1px solid rgba(14, 138, 75, 0.3);
-    border-radius: var(--radius-panel);
-  }
-
-  .surface-hover {
-    transition: border-color 0.16s ease, background-color 0.16s ease;
-  }
-
-  /* Nav chrome is a solid bar with a hairline, like every other surface. */
-  .glass-chrome {
-    background-color: var(--c-bg);
-    border-color: var(--c-line);
-  }
-
-  /* --------------------------------------------------------------- layout */
+  /* ------------------------------------------------------------- layout -- */
   .app-vh {
     height: 100vh;
   }
@@ -386,7 +364,7 @@
     min-height: 100vh;
   }
 
-  .inset-full {
+  .absolute-fill {
     position: absolute;
     top: 0;
     right: 0;
@@ -408,6 +386,7 @@
     -webkit-overflow-scrolling: touch;
   }
 
+  /* Minimum touch target without changing visual density. */
   .tap {
     min-height: 44px;
   }
@@ -417,7 +396,7 @@
     transition: background-color 0.12s ease;
   }
   .tap-row:active {
-    background-color: var(--c-sunken);
+    background-color: var(--c-accent);
   }
 
   .safe-bottom {
@@ -427,19 +406,7 @@
     padding-top: env(safe-area-inset-top);
   }
 
-  /* --------------------------------------------------------------- motion */
-  .animate-sm-pulse {
-    animation: sm-pulse 2s ease-in-out infinite;
-  }
-  .animate-sm-in {
-    animation: sm-in 0.22s ease-out both;
-  }
-  .animate-sm-fade {
-    animation: sm-fade 0.24s ease-out both;
-  }
-
-  /* Aspect boxes with a Chromium 81 padding fallback. Children that should
-     fill the box use .inset-full. */
+  /* ------------------------------------------------------------- frames -- */
   .ratio-16-9,
   .ratio-16-10,
   .ratio-4-3,
@@ -448,35 +415,40 @@
   }
 
   .frame-stage {
-    background-image: linear-gradient(
-        45deg,
-        var(--c-sunken) 25%,
-        transparent 25%
-      ),
-      linear-gradient(-45deg, var(--c-sunken) 25%, transparent 25%),
-      linear-gradient(45deg, transparent 75%, var(--c-sunken) 75%),
-      linear-gradient(-45deg, transparent 75%, var(--c-sunken) 75%);
+    background-color: var(--c-stage);
+    background-image: linear-gradient(45deg, var(--c-muted) 25%, transparent 25%),
+      linear-gradient(-45deg, var(--c-muted) 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, var(--c-muted) 75%),
+      linear-gradient(-45deg, transparent 75%, var(--c-muted) 75%);
     background-size: 18px 18px;
     background-position: 0 0, 0 9px, 9px -9px, -9px 0;
   }
 
-  @keyframes sm-pulse {
-    0%,
-    100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0.35;
-    }
+  /* ------------------------------------------------------------- motion -- */
+  .page-enter {
+    animation: page-in 0.24s cubic-bezier(0.22, 0.68, 0.36, 1) both;
   }
-  @keyframes sm-in {
+
+  .thumb-zoom {
+    transition: transform 0.4s cubic-bezier(0.22, 0.68, 0.36, 1);
+  }
+
+  .animate-sm-fade {
+    animation: sm-fade 0.2s ease-out both;
+  }
+
+  .animate-sm-pulse {
+    animation: sm-pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes page-in {
     from {
       opacity: 0;
-      transform: translateY(6px);
+      transform: translateY(8px);
     }
     to {
       opacity: 1;
-      transform: translateY(0);
+      transform: none;
     }
   }
   @keyframes sm-fade {
@@ -487,18 +459,28 @@
       opacity: 1;
     }
   }
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .surface-hover:hover {
-    border-color: var(--c-line-strong);
-    background-color: var(--c-panel-strong);
+  @keyframes sm-pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.35;
+    }
   }
 }
 
 /* ==========================================================================
-   Chromium 81 compatibility fallbacks
+   Chromium 81 compatibility layer (unlayered: must win over utilities)
    ========================================================================== */
+
+/* 100dvh is Chromium 108. */
+.app-vh {
+  height: 100vh;
+}
+.app-vh-min {
+  min-height: 100vh;
+}
 @supports (height: 100dvh) {
   .app-vh {
     height: 100dvh;
@@ -508,6 +490,7 @@
   }
 }
 
+/* aspect-ratio is Chromium 88; the padding-top box is the fallback. */
 @supports (aspect-ratio: 16 / 9) {
   .ratio-16-9 {
     aspect-ratio: 16 / 9;
@@ -556,12 +539,9 @@
   }
 }
 
-/* ---------------------------------------------------------------------------
-   Dialog geometry (unlayered on purpose: it must win over Tailwind utilities,
-   and it cannot use `translate` utilities — Chromium 81 lacks the individual
-   transform properties Tailwind v4 emits). `--dialog-max` is set inline by
-   DialogContent per size.
-   ------------------------------------------------------------------------- */
+/* Dialog geometry. Tailwind's `-translate-x-1/2` compiles to the individual
+   `translate` property (Chromium 104), so the centring transform is expressed
+   here instead. `--dialog-max` is set inline by DialogContent per size. */
 .ui-dialog {
   position: fixed;
   top: 50%;
@@ -572,11 +552,23 @@
   max-height: 88vh;
   overflow-y: auto;
   overscroll-behavior: contain;
-  border-radius: var(--radius-window);
+  border-radius: var(--radius-lg);
   box-shadow: var(--sh-pop);
+  animation: dialog-in 0.22s cubic-bezier(0.22, 0.68, 0.36, 1) both;
 }
 
-/* Watch / small screens: bottom sheet, full width, safe-area aware. */
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -47%) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+/* Bottom sheet on phones and the watch (full width, safe-area aware). */
 @media (max-width: 640px) {
   .ui-dialog {
     top: auto;
@@ -587,162 +579,61 @@
     width: 100%;
     max-width: 100%;
     max-height: 90vh;
-    border-radius: 1rem 1rem 0 0;
+    border-radius: var(--radius-xl) var(--radius-xl) 0 0;
     padding-bottom: calc(1.25rem + env(safe-area-inset-bottom));
+    animation-name: sheet-in;
   }
 }
 
-/* Switch: explicit transform (Chromium 81) + a 44px pseudo hit area. */
-.ui-switch {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  flex-shrink: 0;
-  width: 48px;
-  height: 28px;
-  min-height: 28px;
-  padding: 2px;
-  border-radius: 999px;
-  border: 1px solid var(--c-line);
-  background-color: var(--c-sunken-strong);
-  transition: background-color 0.18s ease, border-color 0.18s ease;
-  outline: none;
-  cursor: pointer;
+@keyframes sheet-in {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
-.ui-switch::after {
-  content: "";
-  position: absolute;
-  top: -8px;
-  right: -8px;
-  bottom: -8px;
-  left: -8px;
-  border-radius: 999px;
-}
-
-.ui-switch[data-checked] {
-  background-color: var(--c-brand);
-  border-color: var(--c-brand);
-}
-
-.ui-switch[data-disabled] {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.ui-switch:focus-visible {
-  outline: 2px solid var(--c-brand);
-  outline-offset: 2px;
-}
-
-.ui-switch-thumb {
-  display: block;
-  width: 22px;
-  height: 22px;
-  border-radius: 999px;
-  background-color: #fff;
-  box-shadow: 0 1px 2px rgba(2, 6, 23, 0.3);
+/* Switch thumb travel. Base UI toggles the `data-checked` state; the travel is
+   a plain transform because Tailwind's translate-x utilities compile to the
+   individual `translate` property, which Chromium 81 ignores. */
+.switch-thumb {
   transform: translateX(0);
-  transition: transform 0.18s ease;
+  transition: transform 0.16s ease;
+}
+[data-slot="switch"][data-size="default"][data-checked] .switch-thumb {
+  transform: translateX(14px);
+}
+[data-slot="switch"][data-size="sm"][data-checked] .switch-thumb {
+  transform: translateX(10px);
 }
 
-.ui-switch[data-checked] .ui-switch-thumb {
-  transform: translateX(20px);
+/* Sheet side panels use a transform too. */
+.sheet-panel-right {
+  transform: translateX(0);
+  transition: transform 0.24s cubic-bezier(0.22, 0.68, 0.36, 1);
 }
-
-@media (prefers-reduced-motion: reduce) {
-  .ui-switch,
-  .ui-switch-thumb {
-    transition: none;
-  }
-  .animate-sm-pulse,
-  .animate-sm-in,
-  .animate-sm-fade {
-    animation: none;
-  }
+.sheet-panel-left {
+  transform: translateX(0);
+  transition: transform 0.24s cubic-bezier(0.22, 0.68, 0.36, 1);
 }
-
-/* ---------------------------------------------------------------------------
-   Brand mark: a flat rounded tile with an orbit ring — no glow, no gloss.
-   ------------------------------------------------------------------------- */
-.ace-brand-orb {
-  background-image: none;
-  background-color: var(--c-brand-soft);
-  box-shadow: none;
+.sheet-panel-bottom {
+  transform: translateY(0);
+  transition: transform 0.24s cubic-bezier(0.22, 0.68, 0.36, 1);
 }
-
-.ace-brand-orb__ring {
-  position: absolute;
-  top: 3px;
-  right: 3px;
-  bottom: 3px;
-  left: 3px;
-  border-radius: 0.55rem;
-  border: 1px solid var(--c-line);
-  pointer-events: none;
+.sheet-panel-right[data-starting-style],
+.sheet-panel-right[data-ending-style] {
+  transform: translateX(100%);
 }
-
-.ace-brand-orb__ring::after {
-  content: "";
-  position: absolute;
-  top: -2px;
-  left: 50%;
-  width: 4px;
-  height: 4px;
-  margin-left: -2px;
-  border-radius: 999px;
-  background: var(--c-brand-3);
+.sheet-panel-left[data-starting-style],
+.sheet-panel-left[data-ending-style] {
+  transform: translateX(-100%);
 }
-
-/* ---------------------------------------------------------------------------
-   Floating dock override. The kit ships a full-width bottom bar; the redesign
-   uses a detached capsule so it reads as a floating control rather than page
-   chrome, and so the round watch corners never clip it.
-   ------------------------------------------------------------------------- */
-.ace-dock.ace-dock--floating {
-  right: 0.75rem;
-  bottom: calc(0.625rem + env(safe-area-inset-bottom));
-  left: 0.75rem;
-  top: auto;
-  width: auto;
-  max-width: 34rem;
-  margin-left: auto;
-  margin-right: auto;
-  padding: 0.375rem;
-  border: 1px solid var(--c-line-strong);
-  border-radius: 1.1rem;
-  background-color: var(--c-panel-strong);
-  box-shadow: var(--sh-pop);
-}
-
-.ace-dock.ace-dock--floating .ace-dock__list {
-  gap: 0.25rem;
-}
-
-.ace-dock.ace-dock--floating .ace-dock__link {
-  border-radius: 0.75rem;
-}
-
-.ace-dock.ace-dock--floating .ace-dock__link.is-active {
-  background-color: var(--c-brand);
-  color: var(--c-brand-ink);
-}
-
-.ace-dock.ace-dock--floating .ace-dock__link.is-active .ace-dock__icon {
-  color: var(--c-brand-ink);
-}
-
-@media (max-width: 480px) and (max-height: 560px), (max-width: 340px) {
-  .ace-dock.ace-dock--floating {
-    right: 0.375rem;
-    bottom: calc(0.375rem + env(safe-area-inset-bottom));
-    left: 0.375rem;
-    border-radius: 0.9rem;
-    padding: 0.25rem;
-  }
-  .ace-dock.ace-dock--floating .ace-dock__link {
-    min-height: 44px;
-  }
+.sheet-panel-bottom[data-starting-style],
+.sheet-panel-bottom[data-ending-style] {
+  transform: translateY(100%);
 }
 
 /* Coarse pointers: nothing may be smaller than a fingertip. */
@@ -754,158 +645,36 @@
   }
 }
 
-/* ==========================================================================
-   Motion system (0.5)
-   ----------------------------------------------------------------------------
-   Entrance-first: page transitions, staggered lists, value flashes. All pure
-   CSS keyframes on transform/opacity — Chromium 81 safe, no @property.
-   `prefers-reduced-motion` and the watch viewport tone everything down.
-   ========================================================================== */
-
-/* Route change: the shell keys the outlet wrapper by pathname, so a mount
-   replays this. One animation for every page, no per-page wiring. */
-.page-enter {
-  animation: page-in 0.3s cubic-bezier(0.22, 0.68, 0.36, 1) both;
-}
-
-@keyframes page-in {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-/* Staggered lists: add `.stagger` to a grid/list container. Children rise in
-   with 40ms steps (capped — long lists all share the last delay so the tail
-   never waits). */
-.stagger > * {
-  animation: item-in 0.44s cubic-bezier(0.22, 0.68, 0.36, 1) both;
-}
-.stagger > *:nth-child(2) {
-  animation-delay: 40ms;
-}
-.stagger > *:nth-child(3) {
-  animation-delay: 80ms;
-}
-.stagger > *:nth-child(4) {
-  animation-delay: 120ms;
-}
-.stagger > *:nth-child(5) {
-  animation-delay: 160ms;
-}
-.stagger > *:nth-child(6) {
-  animation-delay: 200ms;
-}
-.stagger > *:nth-child(7) {
-  animation-delay: 240ms;
-}
-.stagger > *:nth-child(n + 8) {
-  animation-delay: 280ms;
-}
-
-@keyframes item-in {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-/* Device tile: the 16:10 thumbnail breathes up on hover (desktop only). The
-   wrapper is absolutely positioned inside the frame, so scaling it never
-   affects layout. */
-.thumb-zoom {
-  transition: transform 0.5s cubic-bezier(0.22, 0.68, 0.36, 1);
-}
-
+/* Thumbnail hover is desktop-only and uses a transform, not a scale utility. */
 @media (hover: hover) and (pointer: fine) {
   .device-tile:hover .thumb-zoom {
-    transform: scale(1.04);
-  }
-
-  /* Sidebar idle items nudge right on hover — a quiet affordance that stays
-     flat (no lift, no shadow). */
-  .nav-idle {
-    transition: transform 0.16s ease, background-color 0.16s ease,
-      color 0.16s ease;
-  }
-  .nav-idle:hover {
-    transform: translateX(2px);
-  }
-}
-
-/* Dialogs: mount animation matching the geometry — desktop scales/fades in
-   place, the mobile bottom sheet slides up. The final keyframe equals the
-   resting transform of each variant. */
-.ui-dialog {
-  animation: dialog-in 0.26s cubic-bezier(0.22, 0.68, 0.36, 1) both;
-}
-
-@keyframes dialog-in {
-  from {
-    opacity: 0;
-    transform: translate(-50%, -47%) scale(0.97);
-  }
-  to {
-    opacity: 1;
-    transform: translate(-50%, -50%) scale(1);
-  }
-}
-
-@media (max-width: 640px) {
-  .ui-dialog {
-    animation-name: sheet-in;
-  }
-}
-
-@keyframes sheet-in {
-  from {
-    opacity: 0;
-    transform: translateY(28px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-/* Watch: keep entrances (they aid orientation) but drop the stagger delays
-   and shorten everything — the watch repaints on a tight budget. */
-@media (max-width: 480px) and (max-height: 560px), (max-width: 340px) {
-  .page-enter {
-    animation-duration: 0.2s;
-  }
-  .stagger > *,
-  .stagger > *:nth-child(n + 2) {
-    animation-delay: 0s !important;
-    animation-duration: 0.3s;
-  }
-  .ui-dialog {
-    animation-duration: 0.2s;
+    transform: scale(1.03);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .page-enter,
-  .stagger > *,
+  .animate-sm-fade,
   .ui-dialog {
     animation: none;
   }
-  .thumb-zoom,
-  .nav-idle {
+  .switch-thumb,
+  .sheet-panel-right,
+  .sheet-panel-left,
+  .sheet-panel-bottom {
     transition: none;
   }
-  .device-tile:hover .thumb-zoom {
-    transform: none;
+  .animate-sm-pulse {
+    animation: none;
   }
-  .nav-idle:hover {
-    transform: none;
+}
+
+/* Watch: keep entrances (they aid orientation) but shorten them. */
+@media (max-width: 480px) and (max-height: 560px), (max-width: 340px) {
+  .page-enter {
+    animation-duration: 0.16s;
+  }
+  .ui-dialog {
+    animation-duration: 0.16s;
   }
 }

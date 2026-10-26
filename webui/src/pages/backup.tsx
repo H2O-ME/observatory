@@ -3,12 +3,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { ArrowDownToLine, Download, RefreshCw, Trash2 } from "lucide-react";
 
-import { GridPattern } from "@/components/aceternity";
 import { Banner, EmptyBlock, ErrorBlock, LoadingBlock, Pager } from "@/components/async-state";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { MetaChip, PageHeader } from "@/components/page-header";
+import { Panel } from "@/components/panel";
 import { Section } from "@/components/section";
-import { StatCard, StatGrid } from "@/components/stat-card";
+import { StatCell, StatStrip } from "@/components/stat-card";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -111,7 +111,7 @@ export function BackupPage() {
   const tapClass = touch ? "min-h-11 min-w-11" : undefined;
 
   return (
-    <div className={cn("w-full max-w-full min-w-0 space-y-5", watch && "space-y-3", viewport === "desktop" && "mx-auto max-w-[72rem]")}>
+    <div className={cn("w-full min-w-0 space-y-5", watch && "space-y-3")}>
       <PageHeader
         title="归档备份"
         description={
@@ -177,34 +177,36 @@ export function BackupPage() {
 
       {summary && configured ? (
         <div className="grid min-w-0 gap-2">
-          <StatGrid columns={4}>
-            <StatCard
+          <StatStrip>
+            <StatCell
               label="待上传"
               value={summary.statuses["待上传"] ?? summary.pending ?? 0}
+              hint="等待进入归档队列"
               tone="warn"
             />
-            <StatCard
+            <StatCell
               label="已上传"
               value={summary.statuses["已上传"] ?? summary.uploaded ?? 0}
-              tone="ok"
+              hint="远端副本可用"
             />
-            <StatCard
+            <StatCell
               label="失败"
               value={summary.statuses["失败"] ?? summary.failed ?? 0}
-              tone="danger"
+              hint="服务端会自动重试"
+              tone={summary.statuses["失败"] || summary.failed ? "danger" : "neutral"}
             />
-            <StatCard
+            <StatCell
               label="已删除"
               value={summary.statuses["已删除"] ?? summary.deleted ?? 0}
-              tone="neutral"
+              hint="远端副本已清除"
             />
-          </StatGrid>
-          <p className="min-w-0 break-words px-1 text-[0.72rem] leading-relaxed text-faint">
+          </StatStrip>
+          <p className="min-w-0 break-words px-1 text-xs leading-relaxed text-faint">
             队列 {summary.queue_size ?? 0} · worker {summary.worker_running ? "运行中" : "未运行"} · 本次入队{" "}
             {summary.enqueued ?? 0} · 已上传 {summary.uploaded ?? 0} · 失败 {summary.failed ?? 0}
             {summary.verify_failed > 0 ? ` · 校验失败 ${summary.verify_failed}` : ""}
             {summary.last_error ? (
-              <span className="text-danger"> · 最近错误：{summary.last_error}</span>
+              <span className="text-destructive"> · 最近错误：{summary.last_error}</span>
             ) : null}
           </p>
         </div>
@@ -215,15 +217,16 @@ export function BackupPage() {
           tone="warn"
           title={`最近未成功的归档（${failures.length}）`}
           hint="服务端会自动重试；超过上限后需排查仓库权限或网络。"
+          flush
         >
-          <ul className="grid min-w-0 gap-1.5">
+          <ul className="divide-y divide-border">
             {failures.map((failure) => (
               <li
                 key={failure.id}
-                className="grid min-w-0 grid-cols-1 gap-1 rounded-xl border border-line bg-panel px-2.5 py-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,18rem)] sm:items-center sm:gap-2"
+                className="grid min-w-0 grid-cols-1 gap-1 px-6 py-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,18rem)] sm:items-center sm:gap-3"
               >
-                <span className="min-w-0 truncate font-mono text-[0.72rem] text-ink">{failure.remote_path}</span>
-                <span className="min-w-0 break-words text-[0.72rem] text-warn">
+                <span className="min-w-0 truncate font-mono text-xs text-foreground">{failure.remote_path}</span>
+                <span className="min-w-0 break-words text-xs text-warning">
                   {failure.status} · 尝试 {failure.attempts} 次
                   {failure.error ? ` · ${failure.error}` : ""}
                 </span>
@@ -233,12 +236,12 @@ export function BackupPage() {
         </Section>
       ) : null}
 
-      <div className="surface grid min-w-0 grid-cols-1 gap-2 p-3 sm:grid-cols-[minmax(0,11rem)_minmax(0,13rem)_auto] sm:items-center">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
         <Select
           value={status || null}
           onValueChange={(value) => changeFilter(() => setStatus(typeof value === "string" ? value : ""))}
         >
-          <SelectTrigger size="sm" className={cn("w-full", touch && "min-h-11")} aria-label="按归档状态筛选">
+          <SelectTrigger size="sm" className={cn("w-full sm:w-44", touch && "min-h-11")} aria-label="按归档状态筛选">
             <SelectValue placeholder="全部状态" />
           </SelectTrigger>
           <SelectContent>
@@ -254,7 +257,7 @@ export function BackupPage() {
           value={deviceUid || null}
           onValueChange={(value) => changeFilter(() => setDeviceUid(typeof value === "string" ? value : ""))}
         >
-          <SelectTrigger size="sm" className={cn("w-full", touch && "min-h-11")} aria-label="按设备筛选归档">
+          <SelectTrigger size="sm" className={cn("w-full sm:w-52", touch && "min-h-11")} aria-label="按设备筛选归档">
             <SelectValue placeholder="全部设备" />
           </SelectTrigger>
           <SelectContent>
@@ -266,23 +269,25 @@ export function BackupPage() {
           </SelectContent>
         </Select>
 
-        <div className="flex min-w-0 items-center">
-          {status || deviceUid ? (
-            <Button
-              size="sm"
-              variant="ghost"
-              className={cn("w-full sm:w-auto", tapClass)}
-              onClick={() =>
-                changeFilter(() => {
-                  setStatus("");
-                  setDeviceUid("");
-                })
-              }
-            >
-              清除筛选
-            </Button>
-          ) : null}
-        </div>
+        {status || deviceUid ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            className={cn(tapClass)}
+            onClick={() =>
+              changeFilter(() => {
+                setStatus("");
+                setDeviceUid("");
+              })
+            }
+          >
+            清除筛选
+          </Button>
+        ) : null}
+
+        <span className="ml-auto tnum hidden text-xs text-faint sm:inline">
+          {data ? `${data.total} 条归档` : ""}
+        </span>
       </div>
 
       {entries.isError ? (
@@ -306,34 +311,34 @@ export function BackupPage() {
           />
         ) : null
       ) : (
-        <div className="surface relative min-w-0 overflow-hidden">
-          <GridPattern
-            className="pointer-events-none absolute inset-full opacity-15"
-            fade="top"
-            stroke="var(--c-grid-line)"
-            strokeDasharray="4 8"
-          />
-          <ul className="relative min-w-0 divide-y divide-line">
+        <Panel
+          flush
+          className="min-w-0"
+          title="归档记录"
+          hint="点击一条记录查看远端路径与校验值"
+          actions={<span className="tnum text-xs text-faint">共 {data.total} 条</span>}
+        >
+          <ul className="relative min-w-0 divide-y divide-border">
             {data.entries.map((entry) => (
               <li
                 key={entry.id}
-                className="grid min-w-0 grid-cols-1 gap-2 px-3 py-2.5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-3"
+                className="grid min-w-0 grid-cols-1 gap-2 px-6 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-3"
               >
                 <button
                   type="button"
                   onClick={() => setDetailId(entry.id)}
-                  className="grid min-w-0 grid-cols-1 gap-1 rounded-lg text-left transition-colors hover:bg-sunken"
+                  className="grid min-w-0 grid-cols-1 gap-1 rounded-sm text-left transition-colors hover:bg-muted"
                   title="查看归档详情"
                 >
                   <span className="flex min-w-0 flex-wrap items-center">
                     <MetaChip tone={STATUS_TONE[entry.status] ?? "default"} className="mr-2 shrink-0">
                       {entry.status}
                     </MetaChip>
-                    <span className="min-w-0 truncate font-mono text-[0.8rem] font-medium text-ink">
+                    <span className="min-w-0 truncate font-mono text-sm font-medium text-foreground">
                       {entry.device_name || entry.device_uid || `设备 ${entry.device_id}`}
                     </span>
                   </span>
-                  <span className="grid min-w-0 gap-x-3 gap-y-0.5 text-[0.72rem] text-faint sm:grid-cols-2">
+                  <span className="grid min-w-0 gap-x-3 gap-y-0.5 text-xs text-faint sm:grid-cols-2">
                     <span className="min-w-0 truncate">
                       {entry.day} · {formatBytes(entry.size_bytes)}
                     </span>
@@ -344,7 +349,7 @@ export function BackupPage() {
                       </span>
                     ) : null}
                     {entry.error ? (
-                      <span className="min-w-0 truncate text-danger sm:col-span-2">{entry.error}</span>
+                      <span className="min-w-0 truncate text-destructive sm:col-span-2">{entry.error}</span>
                     ) : null}
                   </span>
                 </button>
@@ -377,7 +382,7 @@ export function BackupPage() {
                   <Button
                     size="sm"
                     variant="ghost"
-                    className={cn("text-soft hover:text-danger", tapClass)}
+                    className={cn("text-muted-foreground hover:text-destructive", tapClass)}
                     title="删除远端归档（先删远端，成功后才标记已删除）"
                     aria-label="删除远端归档"
                     disabled={remove.isPending || entry.status === "已删除"}
@@ -390,7 +395,7 @@ export function BackupPage() {
               </li>
             ))}
           </ul>
-        </div>
+        </Panel>
       )}
 
       {data ? <Pager total={data.total} limit={PAGE} offset={offset} onChange={setOffset} busy={entries.isFetching} /> : null}
@@ -417,38 +422,38 @@ export function BackupPage() {
           ) : detail.data ? (
             <div className="grid min-w-0 gap-3">
               {detail.data.entry.local_available && detail.data.entry.frame ? (
-                <div className="ratio-16-10 w-full overflow-hidden rounded-xl border border-line bg-black">
+                <div className="ratio-16-10 w-full overflow-hidden rounded-xl border border-border bg-black">
                   <img
                     src={api.frameUrl(detail.data.entry.device_uid, detail.data.entry.frame.id, "full")}
                     alt="归档画面"
-                    className="inset-full h-full w-full object-contain"
+                    className="absolute-fill h-full w-full object-contain"
                   />
                 </div>
               ) : null}
 
-              <dl className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[0.78rem]">
+              <dl className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-xs">
                 <dt className="text-faint">设备</dt>
-                <dd className="min-w-0 break-words text-soft">
+                <dd className="min-w-0 break-words text-muted-foreground">
                   {detail.data.entry.device_name || detail.data.entry.device_uid || detail.data.entry.device_id}
                 </dd>
                 <dt className="text-faint">日期</dt>
-                <dd className="min-w-0 break-words text-soft">{detail.data.entry.day}</dd>
+                <dd className="min-w-0 break-words text-muted-foreground">{detail.data.entry.day}</dd>
                 <dt className="text-faint">远端路径</dt>
-                <dd className="min-w-0 break-all font-mono text-[0.72rem] text-soft">{detail.data.entry.remote_path}</dd>
+                <dd className="min-w-0 break-all font-mono text-xs text-muted-foreground">{detail.data.entry.remote_path}</dd>
                 <dt className="text-faint">sha256</dt>
-                <dd className="min-w-0 break-all font-mono text-[0.72rem] text-soft">{detail.data.entry.sha256 || "—"}</dd>
+                <dd className="min-w-0 break-all font-mono text-xs text-muted-foreground">{detail.data.entry.sha256 || "—"}</dd>
                 <dt className="text-faint">大小</dt>
-                <dd className="min-w-0 break-words text-soft">{formatBytes(detail.data.entry.size_bytes)}</dd>
+                <dd className="min-w-0 break-words text-muted-foreground">{formatBytes(detail.data.entry.size_bytes)}</dd>
                 <dt className="text-faint">状态</dt>
-                <dd className="min-w-0 break-words text-soft">
+                <dd className="min-w-0 break-words text-muted-foreground">
                   {detail.data.entry.status} · 尝试 {detail.data.entry.attempts} 次
                 </dd>
                 <dt className="text-faint">创建</dt>
-                <dd className="min-w-0 break-words text-soft">{formatDateTime(detail.data.entry.created_at_ms)}</dd>
+                <dd className="min-w-0 break-words text-muted-foreground">{formatDateTime(detail.data.entry.created_at_ms)}</dd>
                 <dt className="text-faint">上传</dt>
-                <dd className="min-w-0 break-words text-soft">{formatDateTime(detail.data.entry.uploaded_at_ms ?? 0)}</dd>
+                <dd className="min-w-0 break-words text-muted-foreground">{formatDateTime(detail.data.entry.uploaded_at_ms ?? 0)}</dd>
                 <dt className="text-faint">本地副本</dt>
-                <dd className="min-w-0 break-words text-soft">{detail.data.entry.local_available ? "在" : "仅远端"}</dd>
+                <dd className="min-w-0 break-words text-muted-foreground">{detail.data.entry.local_available ? "在" : "仅远端"}</dd>
               </dl>
               {detail.data.entry.error ? <Banner tone="error">{detail.data.entry.error}</Banner> : null}
             </div>

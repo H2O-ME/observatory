@@ -14,11 +14,118 @@ import type { Plugin } from "vite";
  * loads it only when the engine cannot do layers. Modern browsers get byte-for-
  * byte the same HTML and CSS as before, plus one `typeof` check.
  *
- * `@property` and `color-mix()` need no help here: Tailwind already emits its
- * own `@supports` fallbacks for both, and the guards are true on Chromium 81.
+ * The compat sheet also rewrites `padding-inline`/`padding-block`/`margin-*`/
+ * `inset-*` shorthands into physical longhands. Tailwind v4 emits those for
+ * `px-*`, `py-*`, `mx-*` and `my-*`, and Chromium 81 only has the `-start`/
+ * `-end` longhands (not the shorthands, added in 87) — without this the watch
+ * would render every padding/margin rule as a no-op.
+ *
+ * Alpha colours are not synthesised here: the stylesheet simply does not use
+ * `color-mix()` for layout-critical values (tokens are opaque, status tints are
+ * `*-soft` tokens). The only remaining `color-mix()` is Tailwind's placeholder
+ * preflight, which `index.css` overrides with an opaque colour.
  */
 
 const LAYER_STATEMENT = /@layer\s+[^{;]+;/g;
+
+/** Splits a CSS value on top-level whitespace (parens keep their spaces). */
+function splitValue(value: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let start = 0;
+
+  for (let i = 0; i < value.length; i++) {
+    const char = value[i];
+    if (char === "(") depth++;
+    else if (char === ")") depth--;
+    else if (depth === 0 && (char === " " || char === "\t" || char === "\n")) {
+      if (i > start) out.push(value.slice(start, i));
+      start = i + 1;
+      while (start < value.length && /\s/.test(value[start])) start++;
+      i = start - 1;
+    }
+  }
+  if (start < value.length) out.push(value.slice(start));
+  return out;
+}
+
+/** Two-axis logical shorthands → the physical pair (LTR, which is all we ship). */
+const LOGICAL_AXES: Record<string, [string, string]> = {
+  "padding-inline": ["padding-left", "padding-right"],
+  "padding-block": ["padding-top", "padding-bottom"],
+  "margin-inline": ["margin-left", "margin-right"],
+  "margin-block": ["margin-top", "margin-bottom"],
+  "inset-inline": ["left", "right"],
+  "inset-block": ["top", "bottom"],
+  "scroll-margin-inline": ["scroll-margin-left", "scroll-margin-right"],
+  "scroll-margin-block": ["scroll-margin-top", "scroll-margin-bottom"],
+  "scroll-padding-inline": ["scroll-padding-left", "scroll-padding-right"],
+  "scroll-padding-block": ["scroll-padding-top", "scroll-padding-bottom"],
+};
+
+/** Single logical longhands → physical. */
+const LOGICAL_SINGLE: Record<string, string> = {
+  "padding-inline-start": "padding-left",
+  "padding-inline-end": "padding-right",
+  "padding-block-start": "padding-top",
+  "padding-block-end": "padding-bottom",
+  "margin-inline-start": "margin-left",
+  "margin-inline-end": "margin-right",
+  "margin-block-start": "margin-top",
+  "margin-block-end": "margin-bottom",
+  "inset-inline-start": "left",
+  "inset-inline-end": "right",
+  "inset-block-start": "top",
+  "inset-block-end": "bottom",
+  "border-inline-start-width": "border-left-width",
+  "border-inline-end-width": "border-right-width",
+  "border-block-start-width": "border-top-width",
+  "border-block-end-width": "border-bottom-width",
+  "inline-size": "width",
+  "block-size": "height",
+  "min-inline-size": "min-width",
+  "max-inline-size": "max-width",
+  "min-block-size": "min-height",
+  "max-block-size": "max-height",
+};
+
+function logicalToPhysical(css: string): string {
+  let out = css;
+
+  out = out.replace(
+    /(^|[;{])\s*((?:padding|margin|inset|scroll-margin|scroll-padding)-(?:inline|block))\s*:\s*([^;}]+)/g,
+    (_match, prefix: string, property: string, raw: string) => {
+      const pair = LOGICAL_AXES[property];
+      if (!pair) return `${prefix}${property}:${raw}`;
+      const values = splitValue(raw.trim());
+      const first = values[0] ?? "0";
+      const second = values[1] ?? first;
+      return `${prefix}${pair[0]}:${first};${pair[1]}:${second}`;
+    },
+  );
+
+  out = out.replace(
+    /(^|[;{])\s*((?:padding|margin|inset|border)-(?:inline|block)-(?:start|end)(?:-width)?|(?:min-|max-)?(?:inline|block)-size)\s*:\s*([^;}]+)/g,
+    (_match, prefix: string, property: string, raw: string) => {
+      const physical = LOGICAL_SINGLE[property];
+      return physical ? `${prefix}${physical}:${raw}` : `${prefix}${property}:${raw}`;
+    },
+  );
+
+  // `inset` shorthand is Chromium 87. The CSS minifier rewrites our physical
+  // four-property fallbacks back into it, so expand it again here.
+  out = out.replace(
+    /(^|[;{])\s*inset\s*:\s*([^;}]+)/g,
+    (_match, prefix: string, raw: string) => {
+      const values = splitValue(raw.trim());
+      const [top, right = top, bottom = top, left = right] = values;
+      return `${prefix}top:${top};right:${right};bottom:${bottom};left:${left}`;
+    },
+  );
+
+  return out;
+}
+
 
 /** Replaces every `@layer name { ... }` with just its body, preserving order. */
 function flattenLayers(css: string): string {
@@ -149,7 +256,7 @@ export function legacyCss(): Plugin {
       const flattened = flattenLayers(source);
       if (flattened === source) return;
 
-      const compat = flattened + flexGapFallback(source);
+      const compat = logicalToPhysical(flattened + flexGapFallback(source));
 
       const hash = createHash("sha256").update(compat).digest("hex").slice(0, 8);
       const fileName = `assets/compat-${hash}.css`;

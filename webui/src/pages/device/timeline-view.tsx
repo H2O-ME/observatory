@@ -2,7 +2,6 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronLeft, ExternalLink, RefreshCw } from "lucide-react";
 
-import { TracingBeam } from "@/components/aceternity";
 import {
   Banner,
   EmptyBlock,
@@ -144,17 +143,14 @@ export function TimelineView({ device }: { device: DeviceLike }) {
   const firstFrameId = buckets.find((bucket) => bucket.frame_id)?.frame_id ?? null;
   const hourGroups = useMemo(() => groupByHour(visibleBuckets), [buckets, bucketOffset]);
 
-  const bucketGridClass = watch
-    ? "grid-cols-1"
-    : "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5";
   const frameGridClass = watch ? "grid-cols-1" : "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4";
 
   return (
     <div className={cn("min-w-0", watch ? "space-y-3" : viewport === "mobile" ? "space-y-4" : "space-y-5")}>
-      {/* Compact filter bar: day chips + actions on one row, exact window on the next. */}
-      <div className="surface min-w-0 p-3">
-        <div className="grid min-w-0 gap-2 sm:flex sm:flex-wrap sm:items-center sm:gap-2">
-          <div className="grid grid-cols-3 gap-1.5 sm:flex sm:flex-wrap sm:items-center sm:gap-2">
+      {/* Filter bar: segmented day picker + explicit window + quiet actions. */}
+      <div className="flex min-w-0 flex-col justify-between gap-4 rounded-xl bg-card p-4 shadow-sm md:flex-row md:flex-wrap md:items-center">
+        <div className="flex min-w-0 flex-col gap-3 md:flex-row md:items-center md:gap-4">
+          <div className="flex min-w-0 items-center gap-1 rounded-md bg-muted p-1">
             {DAY_OPTIONS.map((item) => {
               const active = !custom && daysAgo === item.days;
               return (
@@ -164,10 +160,10 @@ export function TimelineView({ device }: { device: DeviceLike }) {
                   onClick={() => pickDay(item.days)}
                   aria-pressed={active}
                   className={cn(
-                    "tap inline-flex min-h-11 items-center justify-center rounded-full border px-3.5 text-[0.82rem] font-medium transition-colors",
+                    "inline-flex h-7 min-w-0 items-center justify-center rounded-sm px-3 text-xs font-medium transition-colors",
                     active
-                      ? "border-transparent bg-brand text-brand-ink shadow-card"
-                      : "border-line bg-sunken text-soft hover:text-ink",
+                      ? "bg-card text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground",
                   )}
                 >
                   {item.label}
@@ -176,77 +172,71 @@ export function TimelineView({ device }: { device: DeviceLike }) {
             })}
           </div>
 
-          <div className="grid grid-cols-2 gap-2 sm:ml-auto sm:flex sm:items-center sm:gap-2">
-            <Button
-              size="sm"
-              variant="ghost"
-              className="min-h-11"
-              onClick={() => void timelineQuery.refetch()}
-              disabled={timelineQuery.isFetching || !window}
-            >
-              <RefreshCw className={cn("size-4", timelineQuery.isFetching && "animate-spin")} aria-hidden />
-              刷新
-            </Button>
-            {firstFrameId ? (
-              <a
-                href={api.frameUrl(uid, firstFrameId, "full")}
-                className={cn(buttonVariants({ variant: "ghost", size: "sm" }), "min-h-11 no-underline")}
-                title="在新标签页打开该范围第一张原图"
-                target="_blank"
-                rel="noreferrer"
+          <div className="flex min-w-0 flex-wrap items-center gap-3">
+            <Input
+              type="datetime-local"
+              className="h-9 w-full min-w-0 text-sm sm:w-[10.5rem]"
+              value={fromText}
+              onChange={(event) => setFromText(event.target.value)}
+              aria-label="开始时间"
+            />
+            <Input
+              type="datetime-local"
+              className="h-9 w-full min-w-0 text-sm sm:w-[10.5rem]"
+              value={toText}
+              onChange={(event) => setToText(event.target.value)}
+              aria-label="结束时间"
+            />
+            {anchor !== null && window && !fromText && !toText ? (
+              <button
+                type="button"
+                className="inline-flex h-9 items-center whitespace-nowrap text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                onClick={() => {
+                  setFromText(toDateTimeLocal(window.fromMs));
+                  setToText(toDateTimeLocal(window.toMs));
+                }}
               >
-                <ExternalLink className="size-4" aria-hidden />
-                打开原图
-              </a>
+                用当前范围填充
+              </button>
             ) : null}
           </div>
         </div>
 
-        <div
-          className={cn(
-            "mt-2 grid min-w-0 gap-2",
-            watch ? "grid-cols-1" : "grid-cols-2 sm:flex sm:flex-wrap sm:items-center sm:gap-2",
-          )}
-        >
-          <Input
-            type="datetime-local"
-            className="h-11 w-full min-w-0 text-[0.8rem] sm:w-[10.5rem]"
-            value={fromText}
-            onChange={(event) => setFromText(event.target.value)}
-            aria-label="开始时间"
-          />
-          <Input
-            type="datetime-local"
-            className="h-11 w-full min-w-0 text-[0.8rem] sm:w-[10.5rem]"
-            value={toText}
-            onChange={(event) => setToText(event.target.value)}
-            aria-label="结束时间"
-          />
+        <div className="flex flex-wrap items-center gap-2 md:ml-auto md:justify-end">
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => void timelineQuery.refetch()}
+            disabled={timelineQuery.isFetching || !window}
+          >
+            <RefreshCw className={cn("size-4", timelineQuery.isFetching && "animate-spin")} aria-hidden />
+            刷新
+          </Button>
+          {firstFrameId ? (
+            <a
+              href={api.frameUrl(uid, firstFrameId, "full")}
+              className={cn(buttonVariants({ variant: "ghost", size: "sm" }), "tap-target no-underline")}
+              title="在新标签页打开该范围第一张原图"
+              target="_blank"
+              rel="noreferrer"
+            >
+              <ExternalLink className="size-4" aria-hidden />
+              打开原图
+            </a>
+          ) : null}
           <Button
             variant="outline"
-            className="min-h-11"
+            size="sm"
             onClick={applyCustom}
             disabled={!fromText || !toText}
           >
             应用范围
           </Button>
-          {anchor !== null && window && !fromText && !toText ? (
-            <button
-              type="button"
-              className="tap inline-flex min-h-11 items-center text-left text-[0.78rem] text-faint underline-offset-2 hover:text-soft hover:underline"
-              onClick={() => {
-                setFromText(toDateTimeLocal(window.fromMs));
-                setToText(toDateTimeLocal(window.toMs));
-              }}
-            >
-              用当前范围填充
-            </button>
-          ) : null}
         </div>
       </div>
 
       {window ? (
-        <p className="min-w-0 break-words text-[0.8rem] text-soft">
+        <p className="min-w-0 break-words text-sm text-muted-foreground">
           <span className="tnum">{formatWindow(window)}</span>
           <span className="text-faint"> · </span>
           <span className="tnum">
@@ -278,64 +268,60 @@ export function TimelineView({ device }: { device: DeviceLike }) {
         />
       ) : (
         <>
-          <TracingBeam nodeOffset={watch ? 56 : 112} className="min-w-0">
-            <div className="min-w-0 space-y-4 sm:space-y-5">
-              {hourGroups.map((group) => (
-                <section key={group.key} className="min-w-0">
-                  <div className="flex min-w-0 items-baseline">
-                    <h2 className="tnum min-w-0 truncate text-[0.95rem] font-semibold tracking-tight text-ink">
-                      {group.hourLabel}:00
-                    </h2>
-                    <span className="tnum ml-2 shrink-0 text-[0.75rem] text-faint">{group.dateLabel}</span>
-                  </div>
+          <div className="min-w-0 space-y-4 sm:space-y-5">
+            {hourGroups.map((group) => (
+              <section key={group.key} className="min-w-0">
+                <h2 className="tnum mb-3 block min-w-0 truncate text-sm font-semibold text-foreground">
+                  {group.hourLabel}:00 {group.dateLabel}
+                </h2>
 
-                  <div className={cn("mt-2 grid min-w-0 gap-2 sm:gap-3 lg:gap-4", bucketGridClass)}>
-                    {group.buckets.map((bucket) => (
-                      <button
-                        key={bucket.ts_ms}
-                        type="button"
-                        onClick={() => {
-                          setOpenFrame(null);
-                          setOpenBucket(bucket);
-                        }}
-                        className="surface-hover relative block w-full min-w-0 overflow-hidden rounded-xl border border-line bg-panel text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
-                        title={`${formatDateTime(bucket.ts_ms)} · ${bucket.frame_count} 帧`}
-                      >
-                        <span className="relative block w-full overflow-hidden">
-                          <span className="ratio-16-9 relative block w-full bg-sunken">
-                            <span className="inset-full block overflow-hidden">
-                              <FrameView
-                                uid={uid}
-                                frameId={bucket.frame_id}
-                                variant="thumb"
-                                alt={`${formatDateTime(bucket.ts_ms)} 的画面`}
-                              />
+                <div className="mt-6 grid min-w-0 grid-cols-1 gap-6 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+                  {group.buckets.map((bucket) => (
+                    <button
+                      key={bucket.ts_ms}
+                      type="button"
+                      onClick={() => {
+                        setOpenFrame(null);
+                        setOpenBucket(bucket);
+                      }}
+                      className="relative block w-full min-w-0 overflow-hidden rounded-xl border border-border-soft bg-card text-left shadow-sm transition-shadow hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                      title={`${formatDateTime(bucket.ts_ms)} · ${bucket.frame_count} 帧`}
+                    >
+                      <span className="relative block w-full overflow-hidden">
+                        <span className="ratio-16-9 aspect-video relative block w-full bg-muted">
+                          <span className="absolute-fill block overflow-hidden">
+                            <FrameView
+                              uid={uid}
+                              frameId={bucket.frame_id}
+                              variant="thumb"
+                              alt={`${formatDateTime(bucket.ts_ms)} 的画面`}
+                              className="object-cover"
+                            />
+                          </span>
+                          {bucket.frame_count > 1 ? (
+                            <span
+                              className="tnum absolute right-2 top-2 rounded-full px-2 py-0.5 text-xs font-medium text-white backdrop-blur-sm"
+                              style={{ backgroundColor: "rgba(2, 6, 23, 0.6)" }}
+                            >
+                              {bucket.frame_count} 帧
                             </span>
-                            {bucket.frame_count > 1 ? (
-                              <span
-                                className="tnum absolute right-1.5 top-1.5 rounded-md px-1.5 py-0.5 text-[0.68rem] font-semibold text-white shadow-card"
-                                style={{ backgroundColor: "rgba(2, 6, 23, 0.72)" }}
-                              >
-                                {bucket.frame_count} 帧
-                              </span>
-                            ) : null}
-                          </span>
+                          ) : null}
                         </span>
-                        <span className="flex min-w-0 items-center justify-between border-t border-line bg-panel px-2.5 py-2">
-                          <span className="tnum min-w-0 truncate text-[0.82rem] font-semibold text-ink">
-                            {formatDateTime(bucket.ts_ms).slice(11)}
-                          </span>
-                          <span className="tnum ml-2 shrink-0 text-[0.75rem] text-soft">
-                            {formatDateTime(bucket.ts_ms).slice(5, 10)}
-                          </span>
+                      </span>
+                      <span className="flex min-w-0 items-center justify-between p-3">
+                        <span className="tnum min-w-0 truncate text-sm font-medium text-foreground">
+                          {formatDateTime(bucket.ts_ms).slice(11)}
                         </span>
-                      </button>
-                    ))}
-                  </div>
-                </section>
-              ))}
-            </div>
-          </TracingBeam>
+                        <span className="tnum ml-2 shrink-0 text-xs text-muted-foreground">
+                          {formatDateTime(bucket.ts_ms).slice(5, 10)}
+                        </span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            ))}
+          </div>
 
           <Pager total={buckets.length} limit={BUCKETS_PER_PAGE} offset={bucketOffset} onChange={setBucketOffset} />
         </>
@@ -365,13 +351,13 @@ export function TimelineView({ device }: { device: DeviceLike }) {
           {openFrame ? (
             <div className="grid min-w-0 gap-2.5">
               <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center sm:gap-2">
-                <Button variant="outline" className="min-h-11" onClick={() => setOpenFrame(null)}>
+                <Button variant="outline" className="min-h-9" onClick={() => setOpenFrame(null)}>
                   <ChevronLeft className="size-4" aria-hidden />
                   返回该时段
                 </Button>
                 <a
                   href={api.frameUrl(uid, openFrame.id, "full")}
-                  className={cn(buttonVariants({ variant: "ghost", size: "sm" }), "min-h-11 no-underline")}
+                  className={cn(buttonVariants({ variant: "ghost", size: "sm" }), "tap-target no-underline")}
                   title="在新标签页打开这张原图"
                   target="_blank"
                   rel="noreferrer"
@@ -380,7 +366,7 @@ export function TimelineView({ device }: { device: DeviceLike }) {
                   打开原图
                 </a>
               </div>
-              <div className="relative overflow-hidden rounded-xl border border-line bg-black">
+              <div className="relative overflow-hidden rounded-md border border-border bg-black">
                 <FrameView
                   uid={uid}
                   frameId={openFrame.id}
@@ -390,7 +376,7 @@ export function TimelineView({ device }: { device: DeviceLike }) {
                   eager
                 />
               </div>
-              <p className="text-[0.78rem] leading-relaxed text-soft">
+              <p className="text-xs leading-relaxed text-muted-foreground">
                 设备时间 <span className="tnum">{formatDateTime(openFrame.device_time_ms)}</span> · 服务端时间{" "}
                 <span className="tnum">{formatDateTime(openFrame.ts_ms)}</span> ·{" "}
                 <span className="tnum">
@@ -419,11 +405,11 @@ export function TimelineView({ device }: { device: DeviceLike }) {
                   key={frame.id}
                   type="button"
                   onClick={() => setOpenFrame(frame)}
-                  className="surface-hover relative block w-full min-w-0 overflow-hidden rounded-lg border border-line bg-sunken focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
+                  className="relative block w-full min-w-0 overflow-hidden rounded-md border border-border bg-muted transition-colors hover:border-border-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
                   title={formatDateTime(frameTimeMs(frame))}
                 >
                   <span className="ratio-16-9 relative block w-full">
-                    <span className="inset-full block overflow-hidden">
+                    <span className="absolute-fill block overflow-hidden">
                       <FrameView
                         uid={uid}
                         frameId={frame.id}

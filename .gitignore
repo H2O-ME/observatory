@@ -47,6 +47,7 @@ desktop.ini
 
 # ---- Local tooling ----
 .zcode/
+skills-lock.json
 # ---- 重构期临时产物（不入库） ----
 tmp_w0/
 .pytest-tmp/

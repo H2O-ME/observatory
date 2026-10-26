@@ -1,9 +1,8 @@
 /* ----------------------------------------------------------------------------
    Touch / small-screen refinements. Loaded after index.css.
 
-   The watch is not "a small desktop": it gets one column, larger touch targets,
-   no continuous ambient animation and no backdrop blur. Phones keep the glass
-   but lose the pointer-only affordances.
+   The watch is not "a small desktop": one column, larger touch targets, no
+   continuous ambient animation. Phones keep the full density.
    -------------------------------------------------------------------------- */
 
 @layer base {
@@ -31,28 +30,6 @@
       font-size: 16px !important;
     }
   }
-
-  /* The watch WebView repaints poorly: strip the expensive layers. */
-  @media (max-width: 480px) and (max-height: 560px),
-    (max-width: 340px),
-    (prefers-reduced-motion: reduce) {
-    body::before {
-      display: none;
-    }
-    .surface,
-    .surface-strong,
-    .surface-danger,
-    .surface-warn,
-    .surface-ok,
-    .glass-chrome {
-      -webkit-backdrop-filter: none;
-      backdrop-filter: none;
-    }
-    .surface,
-    .surface-strong {
-      background-color: var(--c-panel-strong);
-    }
-  }
 }
 
 @layer utilities {
@@ -67,17 +44,9 @@
     padding-right: env(safe-area-inset-right);
   }
 
-  /* Content clears the floating dock. */
+  /* Content clears the mobile dock. */
   .pb-dock {
-    padding-bottom: 6.5rem;
-  }
-
-  .tap-row {
-    min-height: 48px;
-    transition: background-color 0.12s ease;
-  }
-  .tap-row:active {
-    background-color: var(--c-sunken);
+    padding-bottom: 6rem;
   }
 
   /* Watch: slightly larger body copy than the old 11px era, but still fits
