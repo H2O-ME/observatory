@@ -147,15 +147,13 @@ sudo REPO_URL=git@github.com:<you>/observatory.git \
 日常更新（0.3.6 起为自动链路）：
 
 ```bash
-# 本地：推送 main 即可，服务器每 2 分钟自动拉取并部署
-git push origin main
-# 本地：推送 tag 触发 CI 构建受控端；服务器自动取回 agent-dist 并登记
-git push origin v<VERSION>
+# 发布：一条命令（bump → tag → push → CI → 生产部署）
+tools/release.sh
 ```
 
-自动部署走 `deploy/auto-update.sh` + `observatory-auto-update.timer`（只读 deploy key 拉取 GitHub），
-健康检查或版本校验失败会**自动回退旧 commit + 旧镜像**；只有文档/CI/部署脚本变更时快进代码、不重建镜像。
-受控端包只在 tag 构建，服务器拉取 `agent-dist` 后校验 sha256 自动上线。
+0.3.7 起部署是 **CI 直推**：`tools/release.sh` 打 tag → Actions 全门禁（含 Windows
+受控端构建）→ `deploy` job SSH 点火服务器 `deploy/deploy.sh`（快备份、幂等 no-op、
+多点健康验证、失败自动回滚、熔断）。`main` 普通推送只跑测试不部署。
 详见 [docs/发布与更新链路.md](docs/发布与更新链路.md)（手工兜底与排障见 [docs/部署.md](docs/部署.md)）。
 
 ## 容器与安全默认值
