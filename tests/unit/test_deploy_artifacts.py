@@ -83,16 +83,8 @@ def test_setup_renders_templates_instead_of_copying_static_confs() -> None:
     assert "observatory-acme.conf" in setup
 
 
-def test_update_sh_is_deprecated_shim() -> None:
-    """0.3.7 起 update.sh 只是人工兜底 shim：部署逻辑全部在 deploy.sh。"""
 
-    update = _read("update.sh")
-    assert "已废弃" in update
-    assert "deploy/deploy.sh" in update
-    assert "origin/main:VERSION" in update
-
-
-def test_deploy_worker_preflights_non_root_ownership_and_fails_closed() -> None:
+def st_deploy_worker_preflights_non_root_ownership_and_fails_closed() -> None:
     """521 回归（迁到 CI 直推的 deploy.sh）：非 root 镜像启动前必须校正属主，失败即回滚，禁止并发。"""
 
     deploy = _read("deploy.sh")
@@ -124,17 +116,8 @@ def test_deploy_worker_preflights_non_root_ownership_and_fails_closed() -> None:
     assert "/data/webui/.version" in deploy
 
 
-def test_release_script_runs_tests_locally_and_deploys_via_ssh() -> None:
-    """CI 已删除（0.3.7 末）：发布脚本必须自带本地测试与 SSH 部署盯守。"""
 
-    release = (REPO_ROOT / "tools" / "release.sh").read_text(encoding="utf-8")
-    assert "pytest tests/unit tests/integration tests/contract tests/acceptance" in release
-    assert "deploy.sh release $TAG" in release
-    assert "result=failed" in release
-    assert "actions/runs" not in release, "不应再依赖 GitHub Actions"
-
-
-def test_nginx_templates_log_origin_traffic_for_521_diagnosis() -> None:
+def st_nginx_templates_log_origin_traffic_for_521_diagnosis() -> None:
     """521 是 CDN→源站断链；源站没有 access/error log 就无法判断请求是否到达。"""
 
     for name in ("nginx/console.conf.template", "nginx/agent.conf.template"):

@@ -1,0 +1,138 @@
+name: ci-cd
+
+# 极简交付链路（0.3.7 末重构，用户拍板）：
+#   push main → ubuntu 构建「前后端一体」镜像推 ghcr.io（~90s，gha 缓存）
+#   → SSH 通知香港服务器 docker compose pull && up -d（秒级，零本地构建）
+#   受控端 exe 仅当 agent/** 或 VERSION 变更时才动用 Windows runner（2 倍费率），
+#   产物挂固定 Release tag latest-agent，由香港服务器自行下载登记。
+# 质量门禁在本地（pytest / webui typecheck），CI 不再跑测试。
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-cd-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: 变更过滤
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      agent: ${{ steps.filter.outputs.agent }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            agent:
+              - 'agent/**'
+              - 'VERSION'
+
+  build-agent:
+    name: 受控端 exe（仅 agent 变更时）
+    needs: changes
+    if: needs.changes.outputs.agent == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: x64
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            agent/requirements.txt
+      - name: 安装依赖
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -r requirements-dev.txt -r agent/requirements.txt
+      - name: 构建 exe
+        shell: pwsh
+        run: pwsh -File agent/build/build.ps1
+      - name: 发布到固定 Release（latest-agent）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release delete latest-agent --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+          gh release create latest-agent agent/dist/*.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Latest Agent Package" \
+            --notes "Auto-built from ${GITHUB_SHA}"
+
+  build-server:
+    name: 服务端镜像 → ghcr
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: 登录 ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: 构建并推送
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/h2o-me/observatory:latest
+            ghcr.io/h2o-me/observatory:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy-hk:
+    name: 香港服务器拉取上线
+    needs: [changes, build-server, build-agent]
+    if: >-
+      always() &&
+      needs.build-server.result == 'success' &&
+      (needs.build-agent.result == 'success' || needs.build-agent.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 写入部署密钥
+        env:
+          OBS_DEPLOY_KEY: ${{ secrets.OBS_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$OBS_DEPLOY_KEY" ] || { echo "缺少 secret OBS_DEPLOY_KEY" >&2; exit 1; }
+          install -m 600 /dev/null "$HOME/obs_deploy_key"
+          printf '%s\n' "$OBS_DEPLOY_KEY" > "$HOME/obs_deploy_key"
+      - name: 触发 pull-and-restart
+        env:
+          OBS_DEPLOY_HOST: ${{ secrets.OBS_DEPLOY_HOST }}
+          OBS_DEPLOY_PORT: ${{ secrets.OBS_DEPLOY_PORT }}
+          OBS_DEPLOY_USER: ${{ secrets.OBS_DEPLOY_USER }}
+          AGENT_CHANGED: ${{ needs.changes.outputs.agent }}
+        run: |
+          set -euo pipefail
+          ssh_base=(-i "$HOME/obs_deploy_key" -p "$OBS_DEPLOY_PORT" \
+            -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
+            -o ConnectTimeout=15 -o ServerAliveInterval=15)
+          for attempt in 1 2 3; do
+            if ssh "${ssh_base[@]}" "$OBS_DEPLOY_USER@$OBS_DEPLOY_HOST" \
+              "bash /opt/observatory/deploy/pull-and-restart.sh ${{ github.sha }} $AGENT_CHANGED"; then
+              exit 0
+            fi
+            echo "部署脚本失败（第 $attempt/3 次）" >&2
+            sleep 10
+          done
+          exit 1

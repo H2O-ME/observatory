@@ -14,13 +14,9 @@ name: observatory
 
 services:
   api:
-    build:
-      context: ..
-      dockerfile: server/Dockerfile
-      args:
-        BUILD_VERSION: ${OBS_IMAGE_TAG:-dev}
-        OBS_UID: ${OBS_UID:-10001}
-    image: observatory/api:${OBS_IMAGE_TAG:-latest}
+    # 0.3.7 末重构：镜像由 GitHub Actions 构建并推 ghcr.io，服务器只 pull+up。
+    # OBS_IMAGE_TAG 传完整镜像引用（ghcr.io/h2o-me/observatory:<sha>），回滚即指回旧值。
+    image: ${OBS_IMAGE_TAG:-ghcr.io/h2o-me/observatory:latest}
     container_name: observatory-api
     restart: unless-stopped
     env_file:
@@ -48,8 +44,9 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    mem_limit: ${OBS_MEM_LIMIT:-1g}
-    cpus: ${OBS_CPUS:-2.0}
+    # 16G 机器与 mysql/new-api 等共居，给 2G/4 核裕量（构建不受此限制）
+    mem_limit: ${OBS_MEM_LIMIT:-2g}
+    cpus: ${OBS_CPUS:-4.0}
     pids_limit: ${OBS_PIDS_LIMIT:-256}
     # F45: 20s 长轮询 hold + 优雅关闭窗口顶死会 SIGKILL 在途连接；30s + 进程内
     # --timeout-graceful-shutdown 15 让受控端先收到正常断连。

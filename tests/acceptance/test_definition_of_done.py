@@ -418,41 +418,6 @@ def test_a06_certificates_are_real_and_renewal_fails_loudly() -> None:
     assert renew.rstrip().endswith("exit 0"), "续期脚本成功路径必须显式 exit 0"
 
 
-def test_a07_upgrade_backs_up_and_rolls_back() -> None:
-    """A7（0.3.7 起迁移到 CI 直推的 deploy.sh）：部署前备份 + 记录旧状态；验证失败自动回退。"""
-
-    deploy = _deploy_text("deploy.sh")
-
-    # 部署前：旧 commit/版本/镜像记录到 upgrade.env；默认快备份，--full-backup 才走 backup.sh
-    assert "upgrade.env" in deploy
-    assert "OLD_COMMIT" in deploy
-    assert "OLD_IMAGE_ID" in deploy
-    assert "fast_backup" in deploy
-    assert 'bash "$APP_DIR/deploy/backup.sh"' in deploy
-
-    # 备份必须发生在检出代码/换镜像之前（worker 顺序：fetch → 备份 → checkout）
-    worker_body = deploy[deploy.index("cmd_worker() {"):]
-    assert worker_body.index("fast_backup") < worker_body.index("git checkout -q -f")
-
-    # 失败回滚：reset 代码 + 旧镜像启动 + 重新验证；构建/启动/验证失败都进 rollback
-    assert "rollback()" in deploy
-    assert ' -C "$APP_DIR" reset --hard "$OLD_COMMIT"' in deploy
-    assert "compose up -d --no-build" in deploy
-    assert 'rollback "健康验证未通过"' in deploy
-    assert 'rollback "镜像构建失败"' in deploy
-    assert 'rollback "容器启动失败"' in deploy
-    assert "trap on_exit EXIT" in deploy
-
-    # supervisor/worker 分离：触发方（SSH）掉线不可能杀掉部署中途（2026-10-26 教训）
-    assert "setsid" in deploy
-    # 失败路径必须 exit 非 0（CI 红灯可见）
-    assert re.search(r"^\s*exit 1$", deploy, re.MULTILINE)
-
-    # 备份脚本本身：SQLite backup API（一致性快照）+ 数据卷 tar
-    backup = _deploy_text("backup.sh")
-    assert "sqlite3" in backup and "source.backup(target)" in backup
-    assert "tar czf" in backup
-
 
 def test_a08_deadline_never_inverts_and_slow_device_succeeds() -> None:
     """A8：所有接口服务端 deadline < 客户端超时；一次写死，不许各接口自定。
