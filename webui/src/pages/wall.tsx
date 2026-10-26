@@ -14,8 +14,6 @@ import { DeviceCard } from "@/components/device-card";
 import { PageHeader } from "@/components/page-header";
 import { StatCard, StatGrid } from "@/components/stat-card";
 import { ErrorBlock } from "@/components/async-state";
-import { GridPattern } from "@/components/aceternity/grid-pattern";
-import { Sparkles } from "@/components/aceternity/sparkles";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, isApiError } from "@/lib/api";
@@ -135,16 +133,14 @@ export function WallPage() {
         </div>
       ) : devices.length === 0 ? (
         <div className="surface relative flex min-w-0 flex-col items-center justify-center overflow-hidden px-4 py-10 text-center sm:py-14">
-          <GridPattern fade="radial" className="opacity-60" stroke="var(--c-grid-line)" strokeDasharray="4 6" />
-          <Sparkles count={watch ? 8 : 18} className="opacity-80" />
           <div className="relative z-10 flex min-w-0 flex-col items-center">
             <span
               className={cn(
-                "flex items-center justify-center rounded-2xl border border-line bg-brand-soft text-brand",
-                watch ? "size-11" : "size-12",
+                "flex items-center justify-center rounded-md border border-line bg-sunken text-soft",
+                watch ? "size-10" : "size-11",
               )}
             >
-              <MonitorSmartphone className={watch ? "size-5" : "size-6"} aria-hidden />
+              <MonitorSmartphone className="size-5" aria-hidden />
             </span>
             <p className={cn("mt-3 font-semibold text-ink", watch ? "text-[0.9rem]" : "text-[0.95rem]")}>
               还没有受控端

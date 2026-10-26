@@ -5,22 +5,6 @@ import { cn } from "@/lib/utils";
 
 type Tone = "brand" | "ok" | "warn" | "danger" | "neutral";
 
-const TONE_TEXT: Record<Tone, string> = {
-  brand: "text-brand",
-  ok: "text-ok",
-  warn: "text-warn",
-  danger: "text-danger",
-  neutral: "text-ink",
-};
-
-const TONE_SOFT: Record<Tone, string> = {
-  brand: "bg-brand-soft",
-  ok: "bg-ok-soft",
-  warn: "bg-warn-soft",
-  danger: "bg-danger-soft",
-  neutral: "bg-sunken",
-};
-
 interface StatCardProps {
   label: ReactNode;
   value: ReactNode;
@@ -42,7 +26,6 @@ export function StatCard({
   value,
   hint,
   icon: Icon,
-  tone = "neutral",
   className,
   onClick,
   aside,
@@ -62,13 +45,6 @@ export function StatCard({
         className,
       )}
     >
-      <span
-        aria-hidden="true"
-        className={cn(
-          "pointer-events-none absolute -right-6 -top-8 size-24 rounded-full opacity-40 blur-2xl",
-          TONE_SOFT[tone],
-        )}
-      />
       <div className="relative flex min-w-0 items-start justify-between gap-2">
         <div className={cn("min-w-0", watch ? "flex-1" : "")}>
           <p className={cn("eyebrow truncate", watch && "text-[0.6rem]")}>{label}</p>
@@ -78,27 +54,24 @@ export function StatCard({
           <p
             key={String(value)}
             className={cn(
-              "tnum animate-sm-fade mt-1 truncate font-semibold tracking-tight",
-              TONE_TEXT[tone],
-              watch ? "text-lg" : "text-[1.55rem] leading-tight",
+              "tnum animate-sm-fade mt-0.5 truncate font-medium tracking-tight text-ink",
+              watch ? "text-base" : "text-xl leading-snug",
             )}
           >
             {value}
           </p>
           {hint ? (
-            <p className={cn("mt-1 truncate text-faint", watch ? "text-[0.65rem]" : "text-[0.72rem]")}>{hint}</p>
+            <p className={cn("mt-0.5 truncate text-faint", watch ? "text-[0.65rem]" : "text-[0.72rem]")}>{hint}</p>
           ) : null}
         </div>
         {Icon ? (
           <span
             className={cn(
-              "flex shrink-0 items-center justify-center rounded-xl border border-line",
-              TONE_SOFT[tone],
-              TONE_TEXT[tone],
-              watch ? "size-7" : "size-9",
+              "flex shrink-0 items-center justify-center rounded-md bg-sunken text-soft",
+              watch ? "size-6" : "size-7",
             )}
           >
-            <Icon className={watch ? "size-3.5" : "size-4"} />
+            <Icon className={watch ? "size-3.5" : "size-3.5"} />
           </span>
         ) : aside ? (
           <span className="shrink-0">{aside}</span>

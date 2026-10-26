@@ -32,12 +32,7 @@ import {
   WifiOff,
 } from "lucide-react";
 
-import {
-  AnimatedTooltip,
-  FloatingDock,
-  GridPattern,
-  MovingBorder,
-} from "@/components/aceternity";
+import { FloatingDock } from "@/components/aceternity";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -117,16 +112,15 @@ function LiveDot({ verbose = false }: { verbose?: boolean }) {
 function BrandMark({ compact = false }: { compact?: boolean }) {
   return (
     <span className="flex min-w-0 items-center gap-2.5">
-      <span className="ace-brand-orb relative flex size-9 shrink-0 items-center justify-center rounded-2xl border border-line bg-brand-soft text-brand">
-        <span className="ace-brand-orb__ring" aria-hidden="true" />
-        <span className="text-[0.66rem] font-bold tracking-tight">Ob</span>
+      <span className="relative flex size-8 shrink-0 items-center justify-center rounded-md border border-line bg-brand-soft text-brand">
+        <span className="text-[0.62rem] font-bold tracking-tight">Ob</span>
       </span>
       {!compact ? (
         <span className="min-w-0">
-          <span className="block truncate text-[0.95rem] font-semibold tracking-tight text-ink">
+          <span className="block truncate text-[0.9rem] font-semibold tracking-tight text-ink">
             Observatory
           </span>
-          <span className="eyebrow block text-[0.55rem] leading-tight">mission control</span>
+          <span className="eyebrow block text-[0.52rem] leading-tight">mission control</span>
         </span>
       ) : null}
     </span>
@@ -143,7 +137,7 @@ function ThemeButton({ className }: { className?: string }) {
       aria-label={THEME_LABEL[mode]}
       title={THEME_LABEL[mode]}
       className={cn(
-        "flex size-9 shrink-0 items-center justify-center rounded-xl border border-line bg-sunken text-soft transition-colors hover:text-ink",
+        "flex size-8 shrink-0 items-center justify-center rounded-md border border-line bg-sunken text-soft transition-colors hover:text-ink",
         className,
       )}
     >
@@ -159,7 +153,7 @@ function AccountLink({ className }: { className?: string }) {
       aria-label="账户与安全"
       title="账户与安全"
       className={cn(
-        "flex size-9 shrink-0 items-center justify-center rounded-xl border border-line bg-sunken text-soft no-underline transition-colors hover:text-ink",
+        "flex size-8 shrink-0 items-center justify-center rounded-md border border-line bg-sunken text-soft no-underline transition-colors hover:text-ink",
         className,
       )}
     >
@@ -177,7 +171,7 @@ function LogoutButton({ className }: { className?: string }) {
       aria-label="退出登录"
       title="退出登录"
       className={cn(
-        "flex size-9 shrink-0 items-center justify-center rounded-xl border border-line bg-sunken text-soft transition-colors hover:text-danger",
+        "flex size-8 shrink-0 items-center justify-center rounded-md border border-line bg-sunken text-soft transition-colors hover:text-danger",
         className,
       )}
     >
@@ -192,11 +186,11 @@ function DesktopSidebar({ active }: { active: (to: string) => boolean }) {
   const connected = useLive((state) => state.connected);
 
   return (
-    <aside className="hidden w-[252px] shrink-0 py-5 pl-5 pr-0 lg:block">
-      <div className="surface-strong flex h-full w-full flex-col overflow-hidden p-3">
-        <div className="px-2 pb-6 pt-2">
+    <aside className="glass-chrome hidden w-[220px] shrink-0 border-r border-line lg:block">
+      <div className="flex h-full w-full flex-col px-3 py-4">
+        <div className="px-2 pb-5 pt-1">
           <BrandMark />
-          <p className="mt-3 flex items-center gap-2 text-[0.7rem] text-faint">
+          <p className="mt-2.5 flex items-center gap-2 text-[0.68rem] text-faint">
             <span className={cn("size-1.5 shrink-0 rounded-full", connected ? "bg-ok" : "bg-warn")} />
             <span className={connected ? "text-ok" : "text-warn"}>{connected ? "实时连接" : "轮询连接"}</span>
             <span className="ml-auto tnum">v{liveVersion || version || "—"}</span>
@@ -204,26 +198,24 @@ function DesktopSidebar({ active }: { active: (to: string) => boolean }) {
         </div>
 
         <nav aria-label="主导航" className="min-h-0 flex-1 overflow-y-auto hide-scrollbar">
-          <ul className="space-y-1.5">
+          <ul className="space-y-0.5">
             {NAV.map((entry) => {
               const Icon = entry.icon;
               const isActive = active(entry.to);
               return (
                 <li key={entry.to}>
                   <NavLink to={entry.to} className="block no-underline" aria-current={isActive ? "page" : undefined}>
-                    {isActive ? (
-                      <MovingBorder duration={9000} containerClassName="rounded-xl" colors={["#22d3ee", "#6392ff", "#a78bfa", "#22d3ee"]}>
-                        <span className="flex items-center gap-3 rounded-xl bg-brand px-3.5 py-3 text-[0.88rem] font-semibold text-brand-ink shadow-card">
-                          <Icon className="size-[1.05rem]" />
-                          {entry.label}
-                        </span>
-                      </MovingBorder>
-                    ) : (
-                      <span className="nav-idle flex items-center gap-3 rounded-xl px-3.5 py-3 text-[0.88rem] text-soft hover:bg-sunken hover:text-ink">
-                        <Icon className="size-[1.05rem]" />
-                        {entry.label}
-                      </span>
-                    )}
+                    <span
+                      className={cn(
+                        "flex items-center gap-2.5 rounded-md px-2.5 py-2 text-[0.85rem]",
+                        isActive
+                          ? "bg-brand-soft font-medium text-brand"
+                          : "text-soft hover:bg-sunken hover:text-ink",
+                      )}
+                    >
+                      <Icon className="size-4" />
+                      {entry.label}
+                    </span>
                   </NavLink>
                 </li>
               );
@@ -231,18 +223,12 @@ function DesktopSidebar({ active }: { active: (to: string) => boolean }) {
           </ul>
         </nav>
 
-        <div className="mt-4 flex items-center justify-between border-t border-line pt-4">
+        <div className="mt-4 flex items-center justify-between border-t border-line pt-3">
           <div className="flex items-center gap-1">
-            <AnimatedTooltip content="账户与安全">
-              <AccountLink />
-            </AnimatedTooltip>
-            <AnimatedTooltip content="切换主题">
-              <ThemeButton />
-            </AnimatedTooltip>
+            <AccountLink />
+            <ThemeButton />
           </div>
-          <AnimatedTooltip content="退出登录">
-            <LogoutButton />
-          </AnimatedTooltip>
+          <LogoutButton />
         </div>
       </div>
     </aside>
@@ -437,11 +423,6 @@ export function AppShell() {
 
   return (
     <div className="relative flex app-vh w-full flex-col overflow-hidden">
-      {/* Flat ambient layer: a quiet engineering grid, no glow, no blur. */}
-      <div className="pointer-events-none fixed top-0 right-0 bottom-0 left-0 z-0" aria-hidden="true">
-        <GridPattern width={34} height={34} stroke="var(--c-grid-line)" />
-      </div>
-
       <div className="relative z-10 flex min-h-0 w-full flex-1">
         {desktop ? <DesktopSidebar active={active} /> : null}
 

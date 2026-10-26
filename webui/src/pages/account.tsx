@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { Check, Copy, KeyRound, LogOut, MonitorSmartphone, ShieldCheck, ShieldOff, UserRound } from "lucide-react";
 
-import { GlowCard, GridPattern, ShimmerButton, Sparkles } from "@/components/aceternity";
+import { ShimmerButton } from "@/components/aceternity";
 import { Banner } from "@/components/async-state";
 import { MetaChip, PageHeader } from "@/components/page-header";
 import { Section, SectionHeader } from "@/components/section";
@@ -218,7 +218,7 @@ export function AccountPage() {
           </Section>
 
           {/* --------------------------------------------------------- TOTP card */}
-          <GlowCard isStatic={!desktop} className="min-w-0" contentClassName="p-3 sm:p-4">
+          <div className="surface min-w-0 p-3 sm:p-4">
             <SectionHeader
               title="二次验证（TOTP）"
               icon={totpEnabled ? ShieldCheck : ShieldOff}
@@ -247,12 +247,6 @@ export function AccountPage() {
 
               {setup ? (
                 <div className="relative min-w-0 overflow-hidden rounded-xl border border-line bg-sunken p-3">
-                  <GridPattern
-                    className="pointer-events-none absolute inset-full opacity-30"
-                    stroke="var(--c-grid-line)"
-                    fade="radial"
-                  />
-                  <Sparkles className="opacity-70" count={10} />
                   <div className="relative grid min-w-0 gap-2.5">
                     <Banner tone="info">
                       在该浏览器打开验证器 App，选择「手动输入密钥」：粘贴下方密钥或 otpauth URI（二维码的文本降级形式），
@@ -392,7 +386,7 @@ export function AccountPage() {
                 </div>
               ) : null}
             </div>
-          </GlowCard>
+          </div>
         </div>
 
         {/* --------------------------------------------------------- session card */}

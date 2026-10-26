@@ -14,13 +14,6 @@ import {
   SunMoon,
 } from "lucide-react";
 
-import {
-  BackgroundBeams,
-  GridPattern,
-  HoverBorderGradient,
-  Sparkles,
-  TextGenerateEffect,
-} from "@/components/aceternity";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useViewport } from "@/hooks/use-viewport";
@@ -86,19 +79,11 @@ export function LoginPage({ version }: Props) {
 
   return (
     <div className="relative flex app-vh-min w-full flex-col overflow-hidden">
-      {!watch ? <BackgroundBeams fixed count={8} className="opacity-35" /> : null}
-      <GridPattern
-        className="pointer-events-none opacity-60"
-        stroke="var(--c-grid-line)"
-        strokeDasharray="4 6"
-      />
-
       <div className="relative z-10 flex min-h-0 flex-1 flex-col">
         <header className="flex h-14 shrink-0 items-center justify-between px-4 sm:px-6">
           <span className="flex items-center gap-2.5">
-            <span className="ace-brand-orb relative flex size-9 items-center justify-center rounded-2xl border border-line bg-brand-soft text-brand">
-              <span className="ace-brand-orb__ring" aria-hidden="true" />
-              <span className="text-[0.66rem] font-bold">Ob</span>
+            <span className="relative flex size-8 items-center justify-center rounded-md border border-line bg-brand-soft text-brand">
+              <span className="text-[0.62rem] font-bold">Ob</span>
             </span>
             <span className="text-[0.9rem] font-semibold tracking-tight text-ink">
               Observatory
@@ -110,7 +95,7 @@ export function LoginPage({ version }: Props) {
             onClick={cycle}
             aria-label={THEME_LABEL[mode]}
             title={THEME_LABEL[mode]}
-            className="flex size-9 items-center justify-center rounded-xl border border-line bg-sunken text-soft transition-colors hover:text-ink"
+            className="flex size-8 items-center justify-center rounded-md border border-line bg-sunken text-soft transition-colors hover:text-ink"
           >
             <ThemeIcon className="size-4" />
           </button>
@@ -125,18 +110,12 @@ export function LoginPage({ version }: Props) {
                   <span className="inline-block size-1.5 rounded-full bg-brand-3" />
                   deep-field mission control
                 </p>
-                <TextGenerateEffect
-                  as="h1"
-                  words="Observatory"
-                  className="block text-[2.7rem] font-semibold tracking-[-0.045em] text-ink sm:text-[3.4rem]"
-                  wordClassName="text-gradient"
-                  stagger={0.06}
-                />
+                <h1 className="text-[2.2rem] font-semibold tracking-[-0.03em] text-ink sm:text-[2.6rem]">
+                  Observatory
+                </h1>
                 <p className="mt-4 max-w-lg text-[0.98rem] leading-relaxed text-soft">
                   授权设备的观测、远程控制与数据归档，都在同一个深空控制台里。
                 </p>
-                <Sparkles count={16} className="mt-2 h-10 w-48 opacity-70" />
-
                 <ul className="mt-8 grid max-w-md grid-cols-1 gap-2.5">
                   {[
                     { icon: RadioTower, title: "单链路实时观测", text: "WebSocket 与长轮询同一套事实，断线自动降级" },
@@ -145,8 +124,8 @@ export function LoginPage({ version }: Props) {
                   ].map((item) => {
                     const Icon = item.icon;
                     return (
-                      <li key={item.title} className="flex items-start gap-2.5 rounded-xl border border-line bg-sunken px-3 py-2.5">
-                        <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg border border-line bg-panel text-brand">
+                      <li key={item.title} className="flex items-start gap-2.5 rounded-md border border-line bg-sunken px-3 py-2.5">
+                        <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md bg-panel text-soft">
                           <Icon className="size-3.5" />
                         </span>
                         <span className="min-w-0">
@@ -246,20 +225,15 @@ export function LoginPage({ version }: Props) {
                   </p>
                 ) : null}
 
-                <HoverBorderGradient
+                <button
                   type="submit"
-                  duration={2}
-                  block
-                  containerClassName="w-full"
-                  className="h-11 text-[0.92rem]"
                   disabled={busy || !password}
+                  className="flex h-10 w-full items-center justify-center gap-2 rounded-md bg-brand text-[0.9rem] font-medium text-brand-ink transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  <span className="flex items-center justify-center gap-2">
-                    {busy ? <Loader2 className="size-4 animate-spin" /> : <KeyRound className="size-4" />}
-                    {busy ? "正在验证…" : "进入控制台"}
-                    {!busy ? <ArrowRight className="size-4" /> : null}
-                  </span>
-                </HoverBorderGradient>
+                  {busy ? <Loader2 className="size-4 animate-spin" /> : <KeyRound className="size-4" />}
+                  {busy ? "正在验证…" : "进入控制台"}
+                  {!busy ? <ArrowRight className="size-4" /> : null}
+                </button>
 
                 {watch ? null : (
                   <p className="text-[0.7rem] leading-relaxed text-faint">

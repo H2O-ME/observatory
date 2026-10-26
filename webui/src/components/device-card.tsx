@@ -1,7 +1,6 @@
 import { Link } from "react-router-dom";
 import { MonitorSmartphone } from "lucide-react";
 
-import { GlowCard } from "@/components/aceternity/glow-card";
 import { FrameView } from "@/components/frame-view";
 import { Meter } from "@/components/meter";
 import { StatusBadge } from "@/components/status-badge";
@@ -63,13 +62,8 @@ export function DeviceCard({ device, variant = "full" }: Props) {
       aria-label={`打开设备 ${name}`}
       className={cn("device-tile block h-full min-w-0 rounded-panel no-underline", offline && "opacity-80")}
     >
-      <GlowCard
-        isStatic={watch}
-        className="flex h-full min-w-0 flex-col"
-        contentClassName="flex h-full flex-col"
-        tint={offline ? "rgba(124, 136, 160, 0.14)" : "rgba(99, 146, 255, 0.20)"}
-      >
-        <div className="frame-stage ratio-16-10 relative w-full overflow-hidden rounded-xl bg-sunken">
+      <div className="surface surface-hover flex h-full min-w-0 flex-col p-3 sm:p-3.5">
+        <div className="frame-stage ratio-16-10 relative w-full overflow-hidden rounded-md bg-sunken">
           <div className="thumb-zoom inset-full">
             {device.latest_frame_id ? (
               <FrameView
@@ -144,7 +138,7 @@ export function DeviceCard({ device, variant = "full" }: Props) {
             </p>
           ) : null}
         </div>
-      </GlowCard>
+      </div>
     </Link>
   );
 }
