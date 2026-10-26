@@ -30,12 +30,14 @@ usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
 BUMP="patch"
 MSG=""
 WATCH=1
+RUN_TESTS=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     patch|minor|major) BUMP="$1"; shift ;;
     [0-9]*.[0-9]*.[0-9]*) BUMP="$1"; shift ;;
     -m|--message) MSG="${2:-}"; shift 2 ;;
     --no-watch) WATCH=0; shift ;;
+    --no-test) RUN_TESTS=0; shift ;;
     -h|--help) usage ;;
     *) die "未知参数：$1（--help 看用法）" ;;
   esac
@@ -59,6 +61,17 @@ local_head="$(git rev-parse HEAD)"
 remote_head="$(git rev-parse origin/main)"
 behind="$(git rev-list --count HEAD..origin/main)"
 [[ "$behind" == "0" ]] || die "本地落后 origin/main $behind 个提交；先 pull --rebase（领先没关系，本脚本会连 tag 一起推）"
+
+# ---- 本地测试（CI 不再跑重型套件——0.3.7 起测试在本机执行）-----------------
+if [[ "$RUN_TESTS" == "1" ]]; then
+  log "本地测试：pytest 全套（--no-test 跳过）…"
+  python -m pytest tests/unit tests/integration tests/contract tests/acceptance \
+    -q -m "not perf" || die "本地测试未过；未推送任何内容"
+  log "本地测试：WebUI 类型检查 + 生产构建…"
+  (cd webui && npm run typecheck && npm run build >/dev/null) \
+    || die "WebUI 本地检查未过；未推送任何内容"
+  log "本地测试全绿"
+fi
 
 # ---- 版本 bump ------------------------------------------------------------
 log "bump 版本（$BUMP）…"
