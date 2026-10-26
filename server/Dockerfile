@@ -13,12 +13,16 @@
 FROM node:20-alpine AS webui
 
 WORKDIR /build
-COPY webui/package.json webui/package-lock.json ./
-# lockfile 失配必须让构建失败（与 CI 的 F62 红线一致）——npm install 回退会
-# 在生产镜像里拉入 CI 从未验证过的依赖树（供应链漂移），绝不允许静默发生。
-RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
+# 0.3.8 起 webui 用 pnpm（webui/pnpm-lock.yaml）；corepack 按 package.json
+# 的 packageManager 字段固定版本，保证依赖树可复现。
+COPY webui/package.json webui/pnpm-lock.yaml ./
+RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
+# lockfile 失配必须让构建失败（与 CI 的 F62 红线一致）——回退安装会在生产
+# 镜像里拉入从未验证过的依赖树（供应链漂移），绝不允许静默发生。
+RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile --no-fund --no-audit
 COPY webui/ ./
-RUN npm run build
+RUN pnpm run build
 
 
 FROM python:3.12-slim

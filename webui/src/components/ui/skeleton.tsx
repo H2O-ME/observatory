@@ -1,10 +1,11 @@
+import { Skeleton as RadixSkeleton } from "@radix-ui/themes"
 import { cn } from "@/lib/utils"
 
 function Skeleton({ className, ...props }: React.ComponentProps<"div">) {
   return (
-    <div
+    <RadixSkeleton
       data-slot="skeleton"
-      className={cn("animate-pulse rounded-md bg-muted", className)}
+      className={cn("block animate-pulse rounded-md bg-sunken", className)}
       {...props}
     />
   )

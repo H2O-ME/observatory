@@ -1,30 +1,34 @@
 "use client"
 
-import { Switch as SwitchPrimitive } from "@base-ui/react/switch"
+import { Switch as RadixSwitch } from "@radix-ui/themes"
 import { cn } from "@/lib/utils"
 
 /**
- * Switch with explicit `transform` CSS rather than Tailwind `translate-*`
- * utilities (Chromium 81 on the watch lacks the individual `translate`
- * property). The 44px hit area is a pseudo-element so the visual track stays
- * compact while the touch target is comfortable.
+ * Radix Themes 迁移（0.3.8）：开关本体交给 @radix-ui/themes（自带轨道/滑块/
+ * 状态动画），size 保持旧 API。旧 `.ui-switch` 自定义样式停用；44px 命中区
+ * 由伪元素补足（Chromium 81 无独立 translate 属性，勿改回 Tailwind translate）。
  */
 function Switch({
   className,
   size = "default",
   ...props
-}: SwitchPrimitive.Root.Props & {
+}: React.ComponentProps<typeof RadixSwitch> & {
   size?: "sm" | "default"
 }) {
   return (
-    <SwitchPrimitive.Root
+    <RadixSwitch
       data-slot="switch"
-      data-size={size}
-      className={cn("ui-switch", className)}
+      variant="soft"
+      color="indigo"
+      size={size === "sm" ? "1" : "2"}
+      className={cn(
+        "relative shrink-0",
+        // 命中区扩到 44px，视觉轨道保持紧凑
+        "after:absolute after:inset-[-10px] after:content-['']",
+        className
+      )}
       {...props}
-    >
-      <SwitchPrimitive.Thumb data-slot="switch-thumb" className="ui-switch-thumb" />
-    </SwitchPrimitive.Root>
+    />
   )
 }
 
