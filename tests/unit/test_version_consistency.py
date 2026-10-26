@@ -52,15 +52,6 @@ def test_webui_package_version_matches() -> None:
     assert package["version"] == version
 
 
-def test_webui_package_lock_version_matches() -> None:
-    """A19：package-lock 的顶层 + packages[""] 版本跟随 package.json。"""
-
-    version = _read(REPO_ROOT / "VERSION").strip()
-    lock = json.loads(_read(REPO_ROOT / "webui/package-lock.json"))
-    assert lock["version"] == version
-    assert lock["packages"][""]["version"] == version
-
-
 def test_set_version_targets_cover_the_copies() -> None:
     """set_version.py 的同步目标必须覆盖上面断言的所有副本（防止加了副本忘了同步）。"""
 
@@ -89,7 +80,7 @@ def test_set_version_check_covers_readme_and_docs() -> None:
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "README.md" in completed.stdout
     assert "docs/*.md" in completed.stdout
-    assert "package-lock.json" in completed.stdout
+    assert "README artwork" in completed.stdout
     source = _read(REPO_ROOT / "tools/set_version.py")
     assert "README_VERSION" in source and "DOC_HEADING_VERSION" in source
     assert "HISTORICAL_DOCS" in source

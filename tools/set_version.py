@@ -232,7 +232,7 @@ def check() -> int:
         print(f"\n{len(problems)} place(s) out of sync with VERSION={version}.")
         return 1
     print(f"VERSION={version} consistent everywhere.")
-    print("checked: VERSION, FALLBACK_VERSION x2, webui/package.json, webui/package-lock.json, README.md, docs/*.md, README artwork")
+    print("checked: VERSION, FALLBACK_VERSION x2, webui/package.json, README.md, docs/*.md, README artwork")
     return 0
 
 

@@ -419,6 +419,33 @@ def test_a06_certificates_are_real_and_renewal_fails_loudly() -> None:
 
 
 
+def test_a07_server_upgrade_backs_up_and_rolls_back() -> None:
+    """A7：服务端升级先落回滚锚点（旧镜像 ref + DB 快照），健康失败自动切回旧镜像并退出非 0。
+
+    （原 0.2.x“服务器上 git pull 重装、update 预检失败自动回滚”的语义已随 GHCR
+    拉取式交付退役，见 test_n1_n4；回滚锚点换成镜像 ref 与 pre-deploy DB 快照。）
+    """
+
+    script = _deploy_text("pull-and-restart.sh")
+
+    # 回滚锚点：升级前记录旧镜像 ref；换库前 DB 在线快照
+    assert "OLD_IMAGE=" in script, "升级前必须记录旧镜像 ref"
+    assert "a.backup(b)" in script, "升级前必须对 DB 做在线快照（.pre-deploy.db）"
+
+    # 拉取与切换：compose pull + up -d --no-build（服务器零构建）
+    assert "compose pull" in script
+    assert "compose up -d --no-build" in script
+
+    # 健康门禁：区分 restart/exited 等异常态，打 /api/v1/health
+    assert "restarting|exited|dead" in script
+    assert "/api/v1/health" in script
+
+    # 失败路径：显式日志 + 旧镜像回滚 + 非零退出
+    assert "rolling back to" in script
+    assert 'OBS_IMAGE_TAG="$OLD_IMAGE" compose up -d --no-build' in script
+    assert "exit 1" in script
+
+
 def test_a08_deadline_never_inverts_and_slow_device_succeeds() -> None:
     """A8：所有接口服务端 deadline < 客户端超时；一次写死，不许各接口自定。
 
@@ -1003,12 +1030,13 @@ def test_a19_docs_and_version_consistency() -> None:
     assert "/api/v1/agent/link" in interface
     assert "0.2.0" not in interface
 
-    # 打包文档必须列出实际存在的 CI job（A20 的文档侧）
+    # 打包文档必须描述实际存在的 CI 工作流（A20 的文档侧）
     packaging = docs["受控端打包.md"]
-    workflow = (root / ".github/workflows/build.yml").read_text(encoding="utf-8")
-    for job in ("deploy-static", "nginx-config-test"):
-        assert f"  {job}:" in workflow
-        assert job in packaging, f"受控端打包.md 未列出 CI job {job}"
+    workflow = (root / ".github/workflows/ci-cd.yml").read_text(encoding="utf-8")
+    for token in ("ci-cd.yml", "build-agent", "latest-agent"):
+        assert token in packaging, f"受控端打包.md 未描述 {token}"
+    assert "build-agent:" in workflow
+    assert "latest-agent" in workflow
 
     # 安装令牌 TTL 的旧 env 名必须从文档/样例彻底消失（A18/A19）
     assert "OBS_INSTALL_TOKEN_TTL_MINUTES" not in (root / "server/.env.example").read_text(encoding="utf-8")
@@ -1023,29 +1051,22 @@ def test_a19_docs_and_version_consistency() -> None:
         timeout=60,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    for marker in ("README.md", "docs/*.md", "package-lock.json"):
+    for marker in ("README.md", "docs/*.md", "README artwork"):
         assert marker in completed.stdout, f"set_version --check 未覆盖 {marker}"
 
 
-def test_a20_ci_gate_runs_required_jobs() -> None:
-    """A20：CI 必跑 服务端自检 / 受控端逻辑 / 协议兼容 / WebUI 类型检查与构建。"""
+def test_a20_ci_pipeline_matches_ghcr_delivery() -> None:
+    """A20（0.3.7 末修订）：质量门禁在本地；CI 构建镜像推 GHCR，agent 走 Windows runner，部署走 pull-and-restart。"""
 
-    workflow = (REPO_ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8")
-    assert "requirements-dev.txt" in workflow, "CI 必须用 requirements-dev.txt 安装测试依赖"
-    for job in ("version:", "server:", "contract:", "acceptance:", "webui:", "agent-windows:"):
-        assert re.search(rf"^  {re.escape(job)}", workflow, re.MULTILINE), f"缺少 job: {job}"
-    # 服务端自检 / 受控端逻辑 / 协议兼容
-    assert "tests/unit" in workflow and "tests/contract" in workflow and "tests/acceptance" in workflow
-    assert "pytest" in workflow
-    # WebUI 类型检查 + 构建
-    assert "npm run build" in workflow
-    # 版本一致性
-    assert "set_version.py --check" in workflow
-    # Windows runner 上构建/测试受控端
-    assert "windows-latest" in workflow
-    assert "build.ps1" in workflow
-    # 兼容旧对外命令名
-    assert "tools/test_server.py" in workflow
+    workflow = (REPO_ROOT / ".github/workflows/ci-cd.yml").read_text(encoding="utf-8")
+    # 镜像即产物：构建并推 GHCR（latest + :sha，tag 时加 vX.Y.Z 别名）
+    assert "docker/build-push-action" in workflow, "CI 必须构建镜像"
+    assert "ghcr.io" in workflow, "镜像必须推 GHCR"
+    # 受控端 exe 只在 agent/** 或 VERSION 变更时动用 Windows runner
+    assert "windows-latest" in workflow and "build.ps1" in workflow, "受控端必须原生构建"
+    assert "agent/**" in workflow, "agent 构建必须按路径过滤"
+    # 部署：SSH 触发服务器拉取切换，失败自动回滚
+    assert "pull-and-restart.sh" in workflow, "部署必须走服务器 pull-and-restart"
 
 
 def test_a21_dead_code_is_gone_or_justified() -> None:

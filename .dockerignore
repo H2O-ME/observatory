@@ -58,7 +58,7 @@ await_deploy.sh
 await_deploy.status
 agent/observatory_agent/__pycache__
 
-# WebUI 依赖与产物：由镜像内 npm ci / npm run build 重新生成
+# WebUI 依赖与产物：由镜像内 pnpm install / pnpm build 重新生成
 webui/node_modules
 webui/dist
 webui/*.tsbuildinfo

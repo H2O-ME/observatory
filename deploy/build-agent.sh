@@ -1,12 +1,9 @@
 #!/usr/bin/env bash
 # 在服务器上产出受控端 exe 包，并登记到控制台（自动更新就从这里取包）。
 #
-# 【推荐路径】不要用本脚本。受控端由 .github/workflows/build.yml 在 GitHub 的
-# Windows runner 上原生构建，产物由 CI 推到 `agent-dist` 分支；服务器侧只需要：
-#
-#   sudo bash deploy/fetch-agent-package.sh
-#
-# 或者直接 `sudo bash deploy/update.sh`（它会自动调用上面那个脚本）。
+# 【推荐路径】不要用本脚本。受控端由 .github/workflows/ci-cd.yml 在 GitHub 的
+# Windows runner 上原生构建（仅 agent/** 或 VERSION 变更时），产物挂固定
+# Release `latest-agent`；上线时 deploy/pull-and-restart.sh 自行下载登记。
 #
 # 背景：PyInstaller 不做交叉编译，Linux 上的 Python 只能产出 Linux 二进制，
 # 所以"在部署服务器上构建 Windows 包"必须靠 Wine 跑 Windows 版 Python。实测

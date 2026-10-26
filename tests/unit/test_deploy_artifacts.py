@@ -84,40 +84,40 @@ def test_setup_renders_templates_instead_of_copying_static_confs() -> None:
 
 
 
-def st_deploy_worker_preflights_non_root_ownership_and_fails_closed() -> None:
-    """521 回归（迁到 CI 直推的 deploy.sh）：非 root 镜像启动前必须校正属主，失败即回滚，禁止并发。"""
+def test_ghcr_pull_and_restart_fails_closed_to_old_image() -> None:
+    """上线脚本（pull-and-restart.sh）：先记回滚锚点和 DB 快照，健康不过就切回旧镜像。"""
 
-    deploy = _read("deploy.sh")
+    restart = _read("pull-and-restart.sh")
 
-    # 并发部署会把同一容器反复重建。
-    assert "flock -n 9" in deploy
-    assert "OBS_DEPLOY_LOCK_HELD" in deploy
+    # 旧镜像是秒级回滚锚点；换库前先做在线 SQLite 快照。
+    assert "OLD_IMAGE=" in restart
+    assert "a.backup(b)" in restart
 
-    # 非 root 容器需要 /data 与 /certs 都属于容器 UID。
-    assert "ensure_volume_owner" in deploy
-    assert "ensure_cert_owner" in deploy
-    assert 'chown "$uid:$uid" "$crt" "$key"' in deploy
+    # 服务器只拉取，不构建。
+    assert "compose pull" in restart
+    assert "compose up -d --no-build" in restart
 
-    # chown 失败不能只是 warn 后继续：否则脚本报成功、容器 crash loop。
-    assert "数据卷 chown 失败" in deploy
-    assert '|| warn "数据卷 chown' not in deploy
-    assert 'rollback "数据卷属主校正失败' in deploy
-    assert 'rollback "证书属主/存在性校正失败' in deploy
+    # 健康验证要区分 crash（restarting/exited/dead）和慢启动（DB 迁移）。
+    assert "restarting|exited|dead" in restart
+    assert "/api/v1/health" in restart
 
-    # 启动后先看容器是否在 restarting/exited，再等 health，缩短 521 窗口。
-    assert "wait_started 30" in deploy
-    assert "未进入 running" in deploy
-
-    # 多点健康验证（2026-10-26 宕机教训）：真实 Host 头反代路径必须在列——
-    # 只测回环会漏掉 HostSplit/反代层的策略回归。
-    assert "in_container_health" in deploy
-    assert "host_path_health" in deploy
-    assert '-H "Host: $(console_host)"' in deploy
-    assert "/data/webui/.version" in deploy
+    # 失败必须回到旧镜像并退出非 0，不允许留下 crash loop。
+    assert "rolling back to" in restart
+    assert 'OBS_IMAGE_TAG="$OLD_IMAGE" compose up -d --no-build' in restart
+    assert "exit 1" in restart
 
 
+def test_setup_bootstraps_non_root_ownership() -> None:
+    """521 回归：非 root（10001）镜像启动前必须校正数据卷与证书属主。"""
 
-def st_nginx_templates_log_origin_traffic_for_521_diagnosis() -> None:
+    setup = _read("setup.sh")
+    assert "ensure_volume_owner" in setup
+    assert 'chown -R "$OBS_UID:$OBS_UID" /data' in setup
+    assert 'chown "$OBS_UID:$OBS_UID" "$APP_DIR/certs/server.crt"' in setup
+
+
+
+def test_nginx_templates_log_origin_traffic_for_521_diagnosis() -> None:
     """521 是 CDN→源站断链；源站没有 access/error log 就无法判断请求是否到达。"""
 
     for name in ("nginx/console.conf.template", "nginx/agent.conf.template"):

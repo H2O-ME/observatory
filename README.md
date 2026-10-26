@@ -107,8 +107,11 @@ python -m venv .venv
 .venv/Scripts/pip install -r server/requirements.txt -r requirements-dev.txt   # Windows
 # .venv/bin/pip install -r server/requirements.txt -r requirements-dev.txt     # Linux/macOS
 
-# 2. 开发用服务端（弱口令，仅限本机）
-cp server/.env.dev server/.env
+# 2. 开发用服务端（仅限本机）
+cp server/.env.example server/.env
+# 编辑 server/.env：OBS_SECRET_KEY 用
+#   python -c "import secrets;print(secrets.token_urlsafe(48))"
+# 生成；OBS_ADMIN_PASSWORD / OBS_ENROLL_CODE 换成你自己的开发值
 .venv/Scripts/python -m uvicorn observatory.main:app --app-dir server --port 8443
 
 # 3. 控制台（另开终端）
@@ -118,7 +121,7 @@ pnpm install
 pnpm dev
 ```
 
-> `server/.env.dev` 只用于开发机，不要复制到生产。生产用 `deploy/setup.sh` 生成随机密钥。
+> 生产用 `deploy/setup.sh` 生成随机密钥；`server/.env.dev` 里的弱口令值绝不能带到任何对外环境。
 
 ### 质量门禁
 
