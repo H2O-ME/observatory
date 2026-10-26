@@ -83,29 +83,56 @@ def test_setup_renders_templates_instead_of_copying_static_confs() -> None:
     assert "observatory-acme.conf" in setup
 
 
-def test_update_preflights_non_root_ownership_and_fails_closed() -> None:
-    """521 回归：非 root 镜像启动前必须校正数据卷/证书属主，失败即回滚，禁止并发升级。"""
+def test_update_sh_is_deprecated_shim() -> None:
+    """0.3.7 起 update.sh 只是人工兜底 shim：部署逻辑全部在 deploy.sh。"""
 
     update = _read("update.sh")
+    assert "已废弃" in update
+    assert "deploy/deploy.sh" in update
+    assert "origin/main:VERSION" in update
 
-    # 并发升级会把同一容器反复重建（2026-10-24 的 20 分钟 521 由多次重试叠加）。
-    assert "flock -n 9" in update
-    assert "OBS_UPDATE_LOCK_HELD" in update
+
+def test_deploy_worker_preflights_non_root_ownership_and_fails_closed() -> None:
+    """521 回归（迁到 CI 直推的 deploy.sh）：非 root 镜像启动前必须校正属主，失败即回滚，禁止并发。"""
+
+    deploy = _read("deploy.sh")
+
+    # 并发部署会把同一容器反复重建。
+    assert "flock -n 9" in deploy
+    assert "OBS_DEPLOY_LOCK_HELD" in deploy
 
     # 非 root 容器需要 /data 与 /certs 都属于容器 UID。
-    assert "ensure_volume_owner" in update
-    assert "ensure_cert_owner" in update
-    assert "chown \"$uid:$uid\" \"$crt\" \"$key\"" in update
+    assert "ensure_volume_owner" in deploy
+    assert "ensure_cert_owner" in deploy
+    assert 'chown "$uid:$uid" "$crt" "$key"' in deploy
 
     # chown 失败不能只是 warn 后继续：否则脚本报成功、容器 crash loop。
-    assert "数据卷 chown 失败" in update
-    assert "|| warn \"数据卷 chown" not in update
-    assert "rollback \"数据卷属主校正失败" in update
-    assert "rollback \"证书属主/文件校正失败" in update
+    assert "数据卷 chown 失败" in deploy
+    assert '|| warn "数据卷 chown' not in deploy
+    assert 'rollback "数据卷属主校正失败' in deploy
+    assert 'rollback "证书属主/存在性校正失败' in deploy
 
     # 启动后先看容器是否在 restarting/exited，再等 health，缩短 521 窗口。
-    assert "wait_started 20" in update
-    assert "新容器启动后进入 restarting/exited" in update
+    assert "wait_started 30" in deploy
+    assert "未进入 running" in deploy
+
+    # 多点健康验证（2026-10-26 宕机教训）：真实 Host 头反代路径必须在列——
+    # 只测回环会漏掉 HostSplit/反代层的策略回归。
+    assert "in_container_health" in deploy
+    assert "host_path_health" in deploy
+    assert '-H "Host: $(console_host)"' in deploy
+    assert "/data/webui/.version" in deploy
+
+
+def test_ci_gate_whitelists_only_release_verbs() -> None:
+    """CI 部署密钥是 forced-command 网关：只能点火/查状态/看日志。"""
+
+    gate = _read("ci-gate.sh")
+    assert "SSH_ORIGINAL_COMMAND" in gate
+    assert "ci-gate: 拒绝命令" in gate
+    assert "no-pty" in gate
+    # tag 形态严格校验（拒绝元字符进入 deploy.sh 参数位）
+    assert "v[0-9]" in gate and "exit 127" in gate
 
 
 def test_nginx_templates_log_origin_traffic_for_521_diagnosis() -> None:

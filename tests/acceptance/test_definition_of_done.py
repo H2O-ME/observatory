@@ -419,37 +419,37 @@ def test_a06_certificates_are_real_and_renewal_fails_loudly() -> None:
 
 
 def test_a07_upgrade_backs_up_and_rolls_back() -> None:
-    """A7：升级前备份 DB + 记录 commit/镜像；健康失败自动回退且退出非 0。"""
+    """A7（0.3.7 起迁移到 CI 直推的 deploy.sh）：部署前备份 + 记录旧状态；验证失败自动回退。"""
 
-    update = _deploy_text("update.sh")
-    backup = _deploy_text("backup.sh")
+    deploy = _deploy_text("deploy.sh")
 
-    # 升级前：记录旧 commit/版本/镜像，并调用 backup.sh；备份失败中止
-    assert "record_upgrade_state" in update
-    assert "OBS_UPDATE_ROLLBACK_COMMIT" in update
-    assert "OBS_UPDATE_ROLLBACK_VERSION" in update
-    assert "OBS_UPDATE_ROLLBACK_IMAGE" in update
-    assert "upgrade.env" in update
-    assert 'bash "$APP_DIR/deploy/backup.sh"' in update
-    assert "backup_before_upgrade" in update
-    assert "SKIP_BACKUP" in update
+    # 部署前：旧 commit/版本/镜像记录到 upgrade.env；默认快备份，--full-backup 才走 backup.sh
+    assert "upgrade.env" in deploy
+    assert "OLD_COMMIT" in deploy
+    assert "OLD_IMAGE_ID" in deploy
+    assert "fast_backup" in deploy
+    assert 'bash "$APP_DIR/deploy/backup.sh"' in deploy
 
-    # 备份必须发生在拉代码/换镜像之前（失败则什么都不改）
-    main_body = update[update.index("main() {"):]
-    assert main_body.index("backup_before_upgrade") < main_body.index("git fetch --prune origin")
+    # 备份必须发生在检出代码/换镜像之前（worker 顺序：fetch → 备份 → checkout）
+    worker_body = deploy[deploy.index("cmd_worker() {"):]
+    assert worker_body.index("fast_backup") < worker_body.index("git checkout -q -f")
 
-    # 失败回滚：reset 代码 + 旧镜像启动 + 健康检查失败 exit 1
-    assert "rollback()" in update
-    assert ' -C "$APP_DIR" reset --hard "$OLD_COMMIT"' in update
-    assert "compose up -d --no-build" in update
-    assert "if ! wait_health 60; then" in update
-    assert 'rollback "健康检查' in update
-    assert 'rollback "镜像构建失败"' in update
-    assert 'rollback "容器启动失败"' in update
-    assert "trap on_exit EXIT" in update
-    assert re.search(r"^\s*exit 1$", update, re.MULTILINE)
+    # 失败回滚：reset 代码 + 旧镜像启动 + 重新验证；构建/启动/验证失败都进 rollback
+    assert "rollback()" in deploy
+    assert ' -C "$APP_DIR" reset --hard "$OLD_COMMIT"' in deploy
+    assert "compose up -d --no-build" in deploy
+    assert 'rollback "健康验证未通过"' in deploy
+    assert 'rollback "镜像构建失败"' in deploy
+    assert 'rollback "容器启动失败"' in deploy
+    assert "trap on_exit EXIT" in deploy
+
+    # supervisor/worker 分离：触发方（SSH）掉线不可能杀掉部署中途（2026-10-26 教训）
+    assert "setsid" in deploy
+    # 失败路径必须 exit 非 0（CI 红灯可见）
+    assert re.search(r"^\s*exit 1$", deploy, re.MULTILINE)
 
     # 备份脚本本身：SQLite backup API（一致性快照）+ 数据卷 tar
+    backup = _deploy_text("backup.sh")
     assert "sqlite3" in backup and "source.backup(target)" in backup
     assert "tar czf" in backup
 
