@@ -5,6 +5,9 @@
 httpx>=0.28,<1.0
 websockets>=13,<16
 mss>=10,<11
-Pillow>=11,<13
+# 与服务端同一条 Pillow 版本线（server/requirements.txt 已提升到 13.x）：
+# CI 的受控端 job 同时安装 -r server/requirements.txt 与 agent/requirements.txt，
+# 两边区间没有交集时 ResolutionImpossible，整个流水线（含上线）都会失败。
+Pillow>=13,<14
 psutil>=6,<8
 pywin32>=306
