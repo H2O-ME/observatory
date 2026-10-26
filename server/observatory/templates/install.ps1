@@ -28,6 +28,8 @@
 param(
     [string]$Token = '@@INSTALL_TOKEN@@',
     [string[]]$BaseUrls = @(@@BASE_URLS@@),
+    # 本地安装包（U 盘离线安装）：给了就完全不下载，直接用它。
+    [string]$Package = '',
     [switch]$Uninstall,
     [switch]$Insecure,
     [switch]$Quiet,
@@ -134,6 +136,37 @@ function Invoke-WithFailover {
 
 function Request-Elevation {
     <# 唯一的 UAC 提示发生在这里。 #>
+    # 本地脚本（U 盘离线安装）直接原地提权重跑：不联网、不重新下载脚本，
+    # 也把 -Package 一起带过去。只有 `irm | iex` 这种没有脚本路径的运行方式
+    # 才需要回服务器取一份带票据的脚本。
+    if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) {
+        $arguments = @(
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-File', ("`"{0}`"" -f $PSCommandPath),
+            '-Token', ("`"{0}`"" -f $Token)
+        )
+        if ($Package) {
+            # 提权子进程的工作目录会变，先把本地包路径钉成绝对路径。
+            $packageArg = $Package
+            if (-not [System.IO.Path]::IsPathRooted($packageArg)) {
+                $packageArg = Join-Path (Get-Location).Path $packageArg
+            }
+            $arguments += @('-Package', ("`"{0}`"" -f $packageArg))
+        }
+        if ($Insecure) { $arguments += '-Insecure' }
+        if ($Quiet) { $arguments += '-Quiet' }
+        if ($NoStart) { $arguments += '-NoStart' }
+        Write-Step '需要一次管理员授权来安装服务（整个生命周期中只有这一次）'
+        try {
+            $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -Verb RunAs -Wait -PassThru
+            exit $process.ExitCode
+        } catch {
+            Write-Fail '提权被取消，安装中止'
+            exit 4
+        }
+    }
+
     $primary = Resolve-BaseUrl
     if (-not $primary) {
         Write-Fail '两个域名都不可达，无法继续安装。请检查网络或代理。'
@@ -298,36 +331,71 @@ try {
     $primary = Resolve-BaseUrl
     if (-not $primary) { throw '两个域名都不可达' }
 
-    Write-Step '查询服务器上的受控端版本'
-    $package = Invoke-WithFailover -Path '/api/v1/public/agent/latest'
-    $targetVersion = $AgentVersion
-    $expectedSha = ''
-    if ($package -and $package.available) {
-        $targetVersion = $package.version
-        $expectedSha = [string]$package.sha256
-        Write-Step "服务器提供版本: $targetVersion"
-    } else {
-        Write-Step "服务器没有上传安装包，使用脚本内置版本 $AgentVersion"
+    $downloaded = $false
+    $localPackage = ''
+    if ($Package) {
+        # 相对路径按"当前工作目录"解析后转成绝对路径：提权子进程会换工作目录。
+        $candidate = $Package
+        if (-not [System.IO.Path]::IsPathRooted($candidate)) {
+            $candidate = Join-Path (Get-Location).Path $candidate
+        }
+        if (-not (Test-Path -LiteralPath $candidate)) { throw "找不到本地安装包: $Package" }
+        $localPackage = (Resolve-Path -LiteralPath $candidate).Path
     }
 
-    $packagePath = Join-Path $env:TEMP "observatory-agent-$targetVersion.zip"
-    Write-Step "下载安装包 (版本 $targetVersion)"
-    Invoke-WithFailover -Path "/api/v1/public/agent/$targetVersion/package" -OutFile $packagePath | Out-Null
-
-    if ($expectedSha) {
-        $actual = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLower()
-        if ($actual -ne $expectedSha.ToLower()) {
-            Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
-            throw "安装包校验失败 (期望 $expectedSha, 实际 $actual)"
+    if ($localPackage) {
+        $packagePath = $localPackage
+        $targetVersion = $AgentVersion
+        $matched = [regex]::Match((Split-Path -Leaf $localPackage), '(\d+\.\d+\.\d+)')
+        if ($matched.Success) { $targetVersion = $matched.Groups[1].Value }
+        $shaFile = "$localPackage.sha256"
+        if (Test-Path -LiteralPath $shaFile) {
+            $expectedSha = ((Get-Content -LiteralPath $shaFile -Raw) -split '\s+')[0].Trim()
+            $actual = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $expectedSha.ToLower()) {
+                throw "本地安装包校验失败 (期望 $expectedSha, 实际 $actual)"
+            }
+            Write-Step "本地安装包校验通过 sha256=$($actual.Substring(0,16))..."
+        } else {
+            Write-Step '使用本地安装包（同目录没有 .sha256，跳过校验）'
         }
-        Write-Step "校验通过 sha256=$($actual.Substring(0,16))..."
+        Write-Step "本地安装包: $packagePath (版本 $targetVersion)"
+    } else {
+        Write-Step '查询服务器上的受控端版本'
+        $package = Invoke-WithFailover -Path '/api/v1/public/agent/latest'
+        $targetVersion = $AgentVersion
+        $expectedSha = ''
+        if ($package -and $package.available) {
+            $targetVersion = $package.version
+            $expectedSha = [string]$package.sha256
+            Write-Step "服务器提供版本: $targetVersion"
+        } else {
+            Write-Step "服务器没有上传安装包，使用脚本内置版本 $AgentVersion"
+        }
+
+        $packagePath = Join-Path $env:TEMP "observatory-agent-$targetVersion.zip"
+        Write-Step "下载安装包 (版本 $targetVersion)"
+        Invoke-WithFailover -Path "/api/v1/public/agent/$targetVersion/package" -OutFile $packagePath | Out-Null
+        $downloaded = $true
+
+        if ($expectedSha) {
+            $actual = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $expectedSha.ToLower()) {
+                Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
+                throw "安装包校验失败 (期望 $expectedSha, 实际 $actual)"
+            }
+            Write-Step "校验通过 sha256=$($actual.Substring(0,16))..."
+        }
     }
 
     Stop-Existing
     $AgentVersion = $targetVersion
     Install-Files -PackagePath $packagePath
     Install-Service
-    Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
+    # 下载到临时目录的那份才删；U 盘上的本地包留给下一台机器。
+    if ($downloaded) {
+        Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
+    }
 
     $deviceUid = ''
     $configPath = Join-Path $DataDir 'config.json'
