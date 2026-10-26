@@ -10,6 +10,7 @@ name: ci-cd
 on:
   push:
     branches: [main]
+    tags: ["v*.*.*"]
 
 concurrency:
   group: ci-cd-main
@@ -91,10 +92,14 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
+          file: server/Dockerfile
           push: true
+          build-args: BUILD_VERSION=${{ github.sha }}
+          # latest+sha 每次 main/tag 都打；tag 推送额外打 vX.Y.Z 别名
           tags: |
             ghcr.io/h2o-me/observatory:latest
             ghcr.io/h2o-me/observatory:${{ github.sha }}
+            ghcr.io/h2o-me/observatory:${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
