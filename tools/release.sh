@@ -87,6 +87,8 @@ git add -u
 git commit -q -m "chore(release): $TAG${MSG:+ $MSG}"
 git tag -a "$TAG" -m "$TAG${MSG:+: $MSG}"
 log "已提交并打 tag：$TAG"
+# 盯 CI 用的 head_sha 必须是发布提交本身（bump commit），不是进脚本时的 HEAD
+local_head="$(git rev-parse HEAD)"
 
 # ---- 推送 -----------------------------------------------------------------
 TOKEN="${SHENMI_GITHUB_TOKEN:-}"
