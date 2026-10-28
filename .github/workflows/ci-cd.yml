@@ -1,16 +1,21 @@
 name: ci-cd
 
 # 极简交付链路（0.3.7 末重构，用户拍板）：
-#   push main → ubuntu 构建「前后端一体」镜像推 ghcr.io（~90s，gha 缓存）
+#   push main → 质量门禁（pytest + ruff + webui typecheck）
+#   → ubuntu 构建「前后端一体」镜像推 ghcr.io（~90s，gha 缓存）
 #   → SSH 通知香港服务器 docker compose pull && up -d（秒级，零本地构建）
 #   受控端 exe 仅当 agent/** 或 VERSION 变更时才动用 Windows runner（2 倍费率），
 #   产物挂固定 Release tag latest-agent，由香港服务器自行下载登记。
-# 质量门禁在本地（pytest / webui typecheck），CI 不再跑测试。
+#
+# 0.3.7 审计 O05：原来"质量门禁只在本地"，于是 deploy-hk 会在测试从未运行的情况下
+# 直接上线——A10（换库前快照缺 stdin、静默失败）正是这样被推上生产的。
+# 现在 gate 是 deploy-hk 的强依赖：测试不过就不部署。
 
 on:
   push:
     branches: [main]
     tags: ["v*.*.*"]
+  workflow_dispatch: {}
 
 concurrency:
   group: ci-cd-main
@@ -26,6 +31,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       agent: ${{ steps.filter.outputs.agent }}
+      webui: ${{ steps.filter.outputs.webui }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -35,6 +41,41 @@ jobs:
             agent:
               - 'agent/**'
               - 'VERSION'
+            webui:
+              - 'webui/**'
+
+  gate:
+    name: 质量门禁（测试通过才允许部署）
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: 安装依赖
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -r requirements-dev.txt
+      - name: ruff
+        run: python -m ruff check server agent tools tests
+      - name: pytest（非 Windows 专用、非性能用例）
+        run: python -m pytest tests/ -q -m "not windows_only and not perf"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: webui/pnpm-lock.yaml
+      - name: webui typecheck
+        working-directory: webui
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm typecheck
 
   build-agent:
     name: 受控端 exe（仅 agent 变更时）
@@ -105,9 +146,10 @@ jobs:
 
   deploy-hk:
     name: 香港服务器拉取上线
-    needs: [changes, build-server, build-agent]
+    needs: [changes, gate, build-server, build-agent]
     if: >-
       always() &&
+      needs.gate.result == 'success' &&
       needs.build-server.result == 'success' &&
       (needs.build-agent.result == 'success' || needs.build-agent.result == 'skipped')
     runs-on: ubuntu-latest
