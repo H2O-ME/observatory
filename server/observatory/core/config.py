@@ -90,8 +90,38 @@ class Settings(BaseSettings):
     # ---- security -----------------------------------------------------------
     login_rate_limit: int = Field(default=8, ge=1)
     login_rate_window_s: int = Field(default=300, ge=10)
+    #: Legacy single bucket; still the window for the enrolment limiters below and
+    #: the shared install-script limiter. Kept so existing ``.env`` files keep
+    #: working (C8 does not require deleting a key that still has a consumer).
     enroll_rate_limit: int = Field(default=20, ge=1)
     enroll_rate_window_s: int = Field(default=300, ge=10)
+    #: P1 (0.4.0) enrolment is a three-tier *sliding window* limiter. None of
+    #: these is a ban: a bucket only counts recent requests and expires by itself.
+    #:
+    #: * per source IP — deliberately looser than the old 20/300 s because one NAT
+    #:   can install a whole fleet in a single maintenance window;
+    #: * per UID — stops rotation storms and runaway re-registration loops;
+    #: * global — a backstop against distributed scanning, sized for a fleet-wide
+    #:   reinstall with headroom.
+    enroll_ip_rate_limit: int = Field(default=120, ge=1)
+    enroll_uid_rate_limit: int = Field(default=6, ge=1)
+    enroll_global_rate_limit: int = Field(default=600, ge=1)
+    #: How long a *superseded* device token stays accepted (0 disables it). The
+    #: window exists so an enrolment whose response was lost can be retried with
+    #: the old token instead of locking the device out; it is not a ban either.
+    token_rotate_grace_s: int = Field(default=600, ge=0, le=86_400)
+    #: P2: how long an accepted uninstall command may stay unconfirmed. On expiry
+    #: the command becomes ``unconfirmed`` ("outcome unknown") and the device
+    #: record is kept — a silent network is not evidence that the purge ran.
+    uninstall_ack_timeout_s: int = Field(default=600, ge=60, le=86_400)
+    #: P3: remove the device's activity record once an uninstall is *confirmed*.
+    #: Off keeps the old "mark as uninstalled and wait for an operator" behaviour.
+    uninstall_auto_purge_device: bool = True
+    #: Optional deployment-level admission key (empty = open enrolment, the
+    #: default). It only gates *creating a brand-new device row*; credential
+    #: rotation/recovery of an already-known device never requires it, so key
+    #: rotation cannot knock a running fleet offline. It is not a device token.
+    enroll_key: str = ""
     link_rate_limit: int = Field(default=240, ge=1)
     link_rate_window_s: int = Field(default=60, ge=1)
     #: Per-IP backstop: rotating tokens cannot escape one address's bucket.

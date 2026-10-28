@@ -16,14 +16,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..core import device_auth
 from ..core.config import Settings
 from ..core.crypto import device_token_hash
 from ..core.errors import AppError
 from ..core.log import log_event
-from ..core.models import DeletedDevice, Device
 from .session import AgentSession, SessionProtocol
 
 log = logging.getLogger(__name__)
@@ -78,54 +77,33 @@ class InMemoryDeviceDirectory:
 class DatabaseDeviceDirectory:
     """Authenticate device tokens against the ``devices`` table (W1 security).
 
-    Token storage is the same HMAC used by console enrollment and legacy
-    enrollment (``device_token_hash(token, settings.secret_key)``), so a token
-    rotated during re-enrollment immediately invalidates the previous one.
+    The token→device decision itself lives in :mod:`observatory.core.device_auth`
+    (P1): the link directory and the frame-ingress dependency used to carry
+    separate copies (each with its own tombstone lookup), and two copies of a
+    security decision drift. This class only adapts the shared result into the
+    ``DeviceIdentity`` the carriers expect.
+
+    A superseded token stays valid for ``token_rotate_grace_s`` so a lost
+    enrolment response can be retried; see ``device_auth``.
     """
 
     def __init__(self, sessionmaker: async_sessionmaker[AsyncSession], settings: Settings) -> None:
         self._sessionmaker = sessionmaker
-        self._secret_key = settings.secret_key
+        self._settings = settings
 
     async def authenticate(self, token: str) -> DeviceIdentity | None:
-        cleaned = (token or "").strip()
-        if not cleaned:
-            return None
-        digest = device_token_hash(cleaned, self._secret_key)
         async with self._sessionmaker() as session:
-            device = (
-                await session.execute(
-                    select(Device).where(
-                        Device.token_hash == digest,
-                        Device.token_hash != "",
-                    )
-                )
-            ).scalars().first()
-            if device is None:
-                # F9: a deleted device leaves a tombstone. Answer GONE (not 401)
-                # so the agent treats this as terminal and stops retrying —
-                # without it a deleted fleet member spins on 401→enroll forever.
-                tombstone = (
-                    await session.execute(
-                        select(DeletedDevice).where(DeletedDevice.token_hash == digest)
-                    )
-                ).scalars().first()
-            else:
-                tombstone = None
-        if tombstone is not None:
-            raise AppError.gone("该设备记录已被删除")
-        if device is None:
+            resolved = await device_auth.resolve_device(session, token, settings=self._settings)
+        if resolved is None:
             return None
-        if device.uninstalled_at_ms:
-            raise AppError.gone("受控端已卸载，旧令牌不再可用")
         return DeviceIdentity(
-            device_id=int(device.id),
-            uid=str(device.uid or ""),
-            token_hash=digest,
-            protocol=int(device.protocol or 3),
-            agent_version=str(device.agent_version or ""),
-            boot_id=str(device.boot_id or ""),
-            settings=dict(device.settings or {}),
+            device_id=resolved.device_id,
+            uid=resolved.uid,
+            token_hash=resolved.token_hash,
+            protocol=resolved.protocol,
+            agent_version=resolved.agent_version,
+            boot_id=resolved.boot_id,
+            settings=resolved.settings,
         )
 
 

@@ -68,11 +68,6 @@ SPECS: dict[str, Spec] = {
     "archive_path_prefix": Spec("str", "frames", description="归档路径前缀"),
     # ---- misc --------------------------------------------------------------
     "heartbeat_interval_s": Spec("int", 20, 5, 300, per_device=True, description="心跳间隔（秒）"),
-    # 0 = 长期有效。部署票据的定位是"下载/安装授权"，不是逐台秘密：
-    # 默认长期、可复用多台；需要限时可在生成接口里显式给 ttl_s。
-    "install_token_ttl_minutes": Spec(
-        "int", 0, 0, 43200, agent_visible=False, description="安装票据默认有效期（分钟，0=长期有效）"
-    ),
     "install_script_note": Spec("str", "", description="安装页备注"),
 }
 

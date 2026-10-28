@@ -54,7 +54,7 @@ curl -s https://<console-host>/api/v1/health
 - **一个在线判定**：`presence.py` 是唯一产出 `state` 与 `capabilities` 的地方；UI 和业务不直接读通道表。
 - **一个时间源**：响应带 `server_time_ms`，需要预算的带 `deadline_ms`，设备时间命名 `device_time_ms`；不拿本机时钟做在线判断。
 - **破坏性动作可观测**：重启、卸载、清空、删除、更新必须成功或给出可观测失败，不允许 fire-and-forget。
-- **一次性安装令牌**：没有长期共享注册码；令牌单次使用、绑定首台设备，可撤销。
+- **安装无凭据、验证有凭证**：安装脚本不含令牌，设备首启自动注册；之后每个请求只认它自己的 `X-Device-Token`（uid 仅用于识别，不能当凭证）。
 - **手表也能开**：控制台保留 Chromium 81 兼容产物，桌面、手机与手表 WebView 使用同一套界面。
 
 <details>
@@ -111,7 +111,7 @@ python -m venv .venv
 cp server/.env.example server/.env
 # 编辑 server/.env：OBS_SECRET_KEY 用
 #   python -c "import secrets;print(secrets.token_urlsafe(48))"
-# 生成；OBS_ADMIN_PASSWORD / OBS_ENROLL_CODE 换成你自己的开发值
+# 生成；OBS_ADMIN_PASSWORD 换成你自己的开发值
 .venv/Scripts/python -m uvicorn observatory.main:app --app-dir server --port 8443
 
 # 3. 控制台（另开终端）
@@ -147,7 +147,7 @@ git push
 tools/release.sh
 ```
 
-- 镜像在 GitHub Actions 中构建并推 GHCR；日常上线时服务器只 `docker compose pull && up -d`，零服务器构建。首次引导脚本 `setup.sh` 仍会在服务器构建一次作为兜底。
+- 镜像在 GitHub Actions 中构建并推 GHCR；服务器只 `docker compose pull && up -d`，零服务器构建。首次引导脚本 `setup.sh` 也只拉取 `v<VERSION>` 镜像（可用 `OBS_IMAGE_REPO` 覆盖仓库）。
 - `tools/release.sh` 要求工作树干净且位于 `main`；从 `SHENMI_GITHUB_TOKEN` 或 `.localdata/github-token` 读取推送令牌，不写入仓库。
 - 受控端 exe 仅在 `agent/**` 或 `VERSION` 变更时由 Windows runner 构建，挂到固定 Release `latest-agent`。
 - 失败自动回滚到旧镜像；数据库预部署快照留在数据卷。详见 [docs/发布与更新链路.md](docs/发布与更新链路.md)。
@@ -157,7 +157,7 @@ tools/release.sh
 - 8443 默认只绑 `127.0.0.1`，由本机 nginx 反代；CDN 直连才显式设 `OBS_BIND_ADDR=0.0.0.0`。
 - `OBS_TRUST_FORWARDED_FOR` 默认 false；只有可信反代拓扑才在 `.env` 显式打开。
 - 容器非 root（`OBS_UID=10001`）、只读根文件系统、丢弃全部 capabilities、限制内存/CPU/PID。
-- 所有密钥/口令只存 `server/.env`（chmod 600）或数据库哈希；安装包内没有长期共享注册码。
+- 所有密钥/口令只存 `server/.env`（chmod 600）或数据库哈希；安装包与安装脚本内没有任何凭据。
 - 双域名分工：控制台只在 `CONSOLE_HOST`；`AGENT_HOST` 只提供安装脚本与 agent API。
 
 ## 兼容性与边界

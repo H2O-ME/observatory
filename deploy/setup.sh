@@ -13,7 +13,7 @@
 #   5. 用 ACME bootstrap vhost 占住 80 → certbot --webroot 申请单张双域名证书
 #   6. 把证书**实体拷贝**到 /opt/observatory/certs（非符号链接，容器可见）
 #   7. 渲染 nginx 站点模板 → nginx -t → reload
-#   8. 构建并启动容器；健康检查失败必须失败退出（不再打印“部署完成”）
+#   8. 拉取 GHCR 镜像并启动容器；健康检查失败必须失败退出（不再打印“部署完成”）
 #
 # 脚本可以重复运行：已有 .env、证书、数据卷都不会被覆盖。
 # 续期见 deploy/renew-certs.sh（webroot，失败退出非 0）。
@@ -162,17 +162,14 @@ ensure_env() {
   fi
   log "生成 server/.env（随机密钥）"
   mkdir -p "$APP_DIR/server"
-  local secret admin enroll
+  local secret admin
   secret="$(head -c 48 /dev/urandom | base64 | tr -d '\n=+/' | cut -c1-64)"
   admin="$(head -c 12 /dev/urandom | base64 | tr -d '\n=+/' | cut -c1-16)"
-  enroll="$(head -c 18 /dev/urandom | base64 | tr -d '\n=+/' | cut -c1-24)"
   cat > "$env_file" <<EOF
-# 由 deploy/setup.sh 生成（Observatory 0.3.0）。请勿提交到仓库。
+# 由 deploy/setup.sh 生成（Observatory 0.3.7）。请勿提交到仓库。
 OBS_SECRET_KEY=$secret
 OBS_ADMIN_PASSWORD=$admin
-# 0.2.x 受控端兼容用的共享注册码；0.3.0 新安装走一次性安装令牌。
-OBS_ENROLL_CODE=$enroll
-# 一次性安装令牌 TTL 是控制台设置（install_token_ttl_minutes），不是 env。
+# 设备注册开放：不需要共享注册码，也不需要安装票据。
 OBS_DATA_DIR=/data
 OBS_CONSOLE_HOST=$CONSOLE_HOST
 OBS_AGENT_HOSTS=$AGENT_HOST,$CONSOLE_HOST
@@ -187,8 +184,8 @@ OBS_MEM_LIMIT=1g
 OBS_CPUS=2.0
 EOF
   chmod 600 "$env_file"
-  warn "已生成随机管理员密码与注册码，记录在这里： $env_file"
-  grep -E 'OBS_ADMIN_PASSWORD|OBS_ENROLL_CODE' "$env_file" || true
+  warn "已生成随机管理员密码，记录在这里： $env_file"
+  grep -E 'OBS_ADMIN_PASSWORD' "$env_file" || true
 }
 
 ensure_env_defaults() {
@@ -333,14 +330,28 @@ ensure_volume_owner() {
 }
 
 start_stack() {
-  local version served
+  local version served image repo
   version="$(tr -d '[:space:]' < "$APP_DIR/VERSION")"
-  log "构建并启动容器（镜像 tag: $version）"
+  # 0.3.7 起拉取式：镜像由 CI 构建推 GHCR（tag 与 release tag 一致为 v<VERSION>），
+  # 服务器上不再有 build: 段，up --build 只会引用不存在的本地镜像名。
+  repo="${OBS_IMAGE_REPO:-ghcr.io/h2o-me/observatory}"
   cd "$APP_DIR"
   ensure_volume_owner
-  export OBS_IMAGE_TAG="$version"
-  docker compose -f deploy/docker-compose.yml --env-file server/.env up -d --build \
-    || die "容器构建/启动失败；查看 docker compose logs"
+  # 优先 v<VERSION>（tools/release.sh 打过 tag 才有），回退 :latest（main 每次 push 都构建）。
+  # 回退后 355 行的版本一致性断言仍会拦截"跑错版本"，不会静默用旧镜像。
+  for tag in "v${version}" "latest"; do
+    image="${repo}:${tag}"
+    log "拉取镜像 $image"
+    export OBS_IMAGE_TAG="$image"
+    if docker compose -f deploy/docker-compose.yml --env-file server/.env pull; then
+      break
+    fi
+    image=""
+  done
+  [[ -n "$image" ]] || die "两个 tag 都拉不到：${repo}:v${version} / ${repo}:latest（确认 CI 已构建，或用 OBS_IMAGE_REPO 覆盖仓库）"
+  log "启动容器（镜像: $image）"
+  docker compose -f deploy/docker-compose.yml --env-file server/.env up -d \
+    || die "容器启动失败；查看 docker compose logs"
   if ! wait_health 60; then
     docker compose -f deploy/docker-compose.yml --env-file server/.env logs --tail=80 || true
     die "健康检查 120 秒未通过（证书/数据库/端口），未视为部署成功"
@@ -348,8 +359,6 @@ start_stack() {
   served=$(curl -fsSk https://127.0.0.1:8443/api/v1/version \
     | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' || true)
   [[ "$served" == "$version" ]] || die "运行版本 $served 与仓库 VERSION $version 不一致"
-  docker tag "observatory/api:$version" "observatory/api:latest" >/dev/null 2>&1 \
-    || warn "无法追加 latest tag（非致命）"
   log "服务已就绪，版本 $version"
 }
 
@@ -363,7 +372,7 @@ summary() {
 控制台    : https://$CONSOLE_HOST
 受控端接入: https://$CONSOLE_HOST  与  https://$AGENT_HOST （互为备份）
 证书      : $APP_DIR/certs/server.crt（实体拷贝，0.3.0 起不再用符号链接）
-安装命令  : 控制台 → 设置 → 安装程序（一次性安装令牌，默认 24 小时、单次使用）
+安装命令  : 控制台 → 设置 → 安装程序（部署票据，默认长期有效、可绑多台）
 版本      : $version
 
 下一步：

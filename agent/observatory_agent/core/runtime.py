@@ -369,36 +369,18 @@ class ServiceRuntime:
         assert self._link is not None
         if self._store.config.token:
             return
-        code = self._enroll_code()
-        install_token = self._install_token()
-        if not code and not install_token:
-            log.error(
-                "设备尚未注册，且没有注册码/安装令牌（请用安装脚本安装，或设置 OBS_ENROLL_CODE）"
-            )
-            return
+        # 开放注册：没有本地令牌就直接注册，不需要注册码/安装令牌。
         try:
-            await self._enroll(self._link, code)
+            await self._enroll(self._link)
         except Exception as exc:  # noqa: BLE001 - 注册失败由链路的 401 重注册路径继续重试
             log.warning("首次注册失败（链路会继续重试）：%s", exc)
 
-    def _enroll_code(self) -> str:
-        config = self._store.config
-        return str(config.enroll_code or os.environ.get("OBS_ENROLL_CODE", "")).strip()
-
-    def _install_token(self) -> str:
-        """部署票据（A18）：安装器只传 ``--install-token``，不传注册码。"""
-
-        config = self._store.config
-        return str(config.install_token or os.environ.get("OBS_INSTALL_TOKEN", "")).strip()
-
-    async def _enroll(self, link: Link, code: str) -> str:
+    async def _enroll(self, link: Link) -> str:
         from .. import __version__
 
         config = self._store.config
         info = await asyncio.to_thread(sysinfo.collect, __version__, sessions=self._sessions_payload())
         payload = await link.enroll(
-            code=code,
-            install_token=str(config.install_token or ""),
             device_uid=config.device_uid,
             hostname=str(info.get("hostname") or ""),
             os_name=str(info.get("os_name") or ""),
@@ -424,15 +406,18 @@ class ServiceRuntime:
         return token
 
     async def _reauth(self) -> str | None:
-        """401 之后重新注册（A17 受控端侧）；返回新令牌。"""
+        """401 之后重新注册（A17 受控端侧）；返回新令牌。
+
+        开放注册下没有"能不能注册"的前置开关，401 的唯一原因是本地令牌失效，
+        因此直接重注册即可；服务端拒绝时由链路退避后继续重试。
+        """
 
         link = self._link
-        code = self._enroll_code()
-        if link is None or not (code or self._install_token()):
-            log.error("设备令牌失效，且没有注册码/安装令牌，无法重新注册")
+        if link is None:
+            log.error("设备令牌失效，但链路不存在，无法重新注册")
             return None
         try:
-            return await self._enroll(link, code)
+            return await self._enroll(link)
         except Exception as exc:  # noqa: BLE001 - 失败由链路退避后重试
             log.warning("重新注册失败：%s", exc)
             return None

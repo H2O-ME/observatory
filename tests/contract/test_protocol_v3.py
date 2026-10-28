@@ -273,25 +273,25 @@ def _admin_headers(client) -> dict[str, str]:
     return {"Authorization": f"Bearer {response.json()['data']['token']}"}
 
 
-def _mint(client, headers: dict[str, str]) -> str:
-    response = client.post("/api/v1/install-tokens", json={"ttl_s": 600}, headers=headers)
-    assert response.status_code == 200, response.text
-    return response.json()["data"]["token"]
+def _enroll(client, uid: str, *, prev_token: str = "", legacy_ticket: str = ""):
+    """POST /agent/enroll（开放注册：无凭据）。
 
+    ``prev_token`` 是"我持有旧令牌"的证明，放在请求头；``legacy_ticket`` 只用于
+    断言旧客户端多发的字段被忽略，不参与任何判定。
+    """
 
-def _enroll(client, uid: str, install_token: str):
-    return client.post(
-        "/api/v1/agent/enroll",
-        json={
-            "uid": uid,
-            "hostname": "resurrection-test",
-            "os_name": "Windows",
-            "os_version": "11",
-            "arch": "AMD64",
-            "agent_version": "0.3.1",
-            "install_token": install_token,
-        },
-    )
+    body = {
+        "uid": uid,
+        "hostname": "resurrection-test",
+        "os_name": "Windows",
+        "os_version": "11",
+        "arch": "AMD64",
+        "agent_version": "0.3.7",
+    }
+    if legacy_ticket:
+        body["install_token"] = legacy_ticket
+    headers = {"X-Device-Token": prev_token} if prev_token else {}
+    return client.post("/api/v1/agent/enroll", json=body, headers=headers)
 
 
 def _link(client, device_token: str):
@@ -320,26 +320,34 @@ def _age_out(tmp_dir: Path, uid: str) -> None:
         connection.close()
 
 
-def test_delete_then_reinstall_with_fresh_token_reenrolls(tmp_dir: Path) -> None:
-    """一次性安装令牌 = 管理员重新接入授权：可击穿删除墓碑复活 uid。"""
+def test_delete_then_reinstall_reenrolls_without_ticket(tmp_dir: Path) -> None:
+    """P1：删除设备是"忘记记录"，不是"封禁 UID"。
+
+    行被删除后旧 token 只是未知 token（401；410 从此只表示"行存在但已卸载"），
+    同一 UID 重新安装时按首次注册自动建立新记录——不需要安装票据，也不需要
+    任何人工批准。
+    """
 
     from tests.helpers import running_app  # noqa: PLC0415
 
     with running_app(tmp_dir) as client:
         headers = _admin_headers(client)
 
-        first = _enroll(client, "OBS-REBORN-1", _mint(client, headers))
+        first = _enroll(client, "OBS-REBORN-1")
         assert first.status_code == 200, first.text
         old_device_token = first.json()["token"]
 
         _age_out(tmp_dir, "OBS-REBORN-1")
         assert client.delete("/api/v1/devices/OBS-REBORN-1", headers=headers).status_code == 200
-        assert _link(client, old_device_token).status_code == 410
 
-        second = _enroll(client, "OBS-REBORN-1", _mint(client, headers))
+        # 墓碑已移除：删除后既不是 410（那表示"已卸载"），也不再有复活语义
+        assert _link(client, old_device_token).status_code == 401
+
+        second = _enroll(client, "OBS-REBORN-1")
         assert second.status_code == 200, second.text
         new_device_token = second.json()["token"]
         assert new_device_token != old_device_token
+        assert _link(client, new_device_token).status_code == 200
 
         audit = client.get("/api/v1/audit?limit=50", headers=headers)
         enrolls = [
@@ -347,47 +355,51 @@ def test_delete_then_reinstall_with_fresh_token_reenrolls(tmp_dir: Path) -> None
             for entry in audit.json()["data"]["entries"]
             if entry.get("action") == "device.enroll" and entry.get("device_uid") == "OBS-REBORN-1"
         ]
-        assert [entry["detail"].get("resurrected") for entry in enrolls] == [True, False]
-
-        # 墓碑已随复活烧掉：旧 token 401（hash 未知），新 token 正常上线
-        assert _link(client, old_device_token).status_code == 401
-        assert _link(client, new_device_token).status_code == 200
+        modes = [entry["detail"].get("mode") for entry in enrolls]
+        assert "first_seen" in modes
+        assert all("resurrected" not in entry["detail"] for entry in enrolls), "墓碑语义已移除"
 
 
-def test_revoked_ticket_cannot_resurrect_tombstoned_uid(tmp_dir: Path) -> None:
-    """撤销后的票据不能再复活任何设备（新语义：有效票据才代表管理员同意）。"""
+def test_install_ticket_surface_is_gone(tmp_dir: Path) -> None:
+    """P4：部署票据整套删除（管理接口 404、注册忽略残留字段）。
+
+    这是"自动注册不等于免认证"的另一面：**注册**不需要凭据，但注册拿到的
+    设备令牌仍是后续每个请求的唯一凭证——票据从来没有、现在也不再是凭证。
+    """
 
     from tests.helpers import running_app  # noqa: PLC0415
 
     with running_app(tmp_dir) as client:
         headers = _admin_headers(client)
 
-        consumed = _mint(client, headers)
-        assert _enroll(client, "OBS-TOMB-A", consumed).status_code == 200
-        listed = client.get("/api/v1/install-tokens", headers=headers).json()["data"]["tokens"]
-        target = next(item for item in listed if item["used_count"] == 1)
-        assert client.delete(f"/api/v1/install-tokens/{target['id']}", headers=headers).status_code == 200
+        assert client.get("/api/v1/install-tokens", headers=headers).status_code == 404
+        assert client.post("/api/v1/install-tokens", headers=headers, json={}).status_code in (404, 405)
+        assert client.delete("/api/v1/install-tokens/1", headers=headers).status_code in (404, 405)
 
-        assert _enroll(client, "OBS-TOMB-B", _mint(client, headers)).status_code == 200
-        _age_out(tmp_dir, "OBS-TOMB-B")
-        assert client.delete("/api/v1/devices/OBS-TOMB-B", headers=headers).status_code == 200
+        # 旧客户端仍会带 install_token：忽略，不影响注册结果
+        legacy = _enroll(client, "OBS-TOMB-LEGACY", legacy_ticket="some-old-ticket")
+        assert legacy.status_code == 200, legacy.text
+        assert _link(client, legacy.json()["token"]).status_code == 200
 
-        response = _enroll(client, "OBS-TOMB-B", consumed)
-        assert response.status_code == 401, response.text
-        assert "撤销" in response.text
+        # 匿名请求仍被拒绝：识别的标识符（uid）不是认证凭证（设备令牌）
+        anonymous = client.post("/api/v1/agent/enroll", json={"uid": "OBS-TOMB-ANON"})
+        assert anonymous.status_code == 200
+        assert client.post("/api/v1/agent/link", json={"v": 3, "items": []}).status_code == 401
 
 
-def test_tombstoned_uid_with_invalid_token_still_rejected(tmp_dir: Path) -> None:
+def test_deleted_uid_with_unknown_token_registers_as_new_device(tmp_dir: Path) -> None:
     from tests.helpers import running_app  # noqa: PLC0415
 
     with running_app(tmp_dir) as client:
         headers = _admin_headers(client)
 
-        assert _enroll(client, "OBS-TOMB-C", _mint(client, headers)).status_code == 200
+        assert _enroll(client, "OBS-TOMB-C").status_code == 200
         _age_out(tmp_dir, "OBS-TOMB-C")
         assert client.delete("/api/v1/devices/OBS-TOMB-C", headers=headers).status_code == 200
 
-        assert _enroll(client, "OBS-TOMB-C", "not-a-real-token").status_code == 401
+        response = _enroll(client, "OBS-TOMB-C", legacy_ticket="not-a-real-token")
+        assert response.status_code == 200, response.text
+        assert _link(client, response.json()["token"]).status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -440,3 +452,35 @@ def test_files_payload_unwrap() -> None:
 
     plain = {"path": "C:\a.bin", "sha256": "ab" * 32, "size": 1}
     assert _unwrap_agent_payload(plain) is plain
+
+
+def test_patch_device_settings_accepts_per_device_keys(tmp_dir: Path) -> None:
+    """PATCH /devices/{uid} 带 settings：按设备覆盖只放行 per_device 键。
+
+    0.3.7 审计发现的必现 500：handler 内 ``from ..core.config import PER_DEVICE_KEYS``
+    指错了模块（该符号只在 core/settings_spec.py），任何 settings 覆盖都在请求内抛
+    ImportError。这条用例钉住三件事：合法键 200、非法键 422、500 不再回来。
+    """
+
+    from tests.helpers import running_app  # noqa: PLC0415
+
+    with running_app(tmp_dir) as client:
+        headers = _admin_headers(client)
+        assert _enroll(client, "OBS-PATCH-SET-1").status_code == 200
+
+        ok = client.patch(
+            "/api/v1/devices/OBS-PATCH-SET-1",
+            headers=headers,
+            json={"settings": {"capture_interval_s": 60}},
+        )
+        assert ok.status_code == 200, ok.text
+        device = client.get("/api/v1/devices/OBS-PATCH-SET-1", headers=headers).json()["data"]["device"]
+        assert device["settings"]["capture_interval_s"] == 60
+
+        rejected = client.patch(
+            "/api/v1/devices/OBS-PATCH-SET-1",
+            headers=headers,
+            json={"settings": {"frame_retention_days": 3}},
+        )
+        assert rejected.status_code == 422, rejected.text
+        assert rejected.json()["code"] == "BAD_REQUEST"

@@ -417,9 +417,6 @@ class AgentConfig:
     device_uid: str = ""
     token: str = ""
     base_urls: list[str] = field(default_factory=default_base_urls)
-    enroll_code: str = ""
-    #: 部署票据（A18）：与 enroll_code 二选一，服务端优先校验它。默认长期有效、可复用多台。
-    install_token: str = ""
     server_version: str = ""
     settings: dict[str, Any] = field(default_factory=dict)
     last_server_time_ms: int = 0
@@ -441,8 +438,6 @@ class AgentConfig:
             device_uid=str(raw.get("device_uid") or ""),
             token=str(raw.get("token") or ""),
             base_urls=urls or default_base_urls(),
-            enroll_code=str(raw.get("enroll_code") or ""),
-            install_token=str(raw.get("install_token") or ""),
             server_version=str(raw.get("server_version") or ""),
             settings=dict(settings) if isinstance(settings, Mapping) else {},
             last_server_time_ms=_as_int(raw.get("last_server_time_ms")),
@@ -464,8 +459,6 @@ class AgentConfig:
             "device_uid": self.device_uid,
             "token": self.token,
             "base_urls": list(self.base_urls),
-            "enroll_code": self.enroll_code,
-            "install_token": self.install_token,
             "server_version": self.server_version,
             "settings": self.settings,
             "last_server_time_ms": int(self.last_server_time_ms),

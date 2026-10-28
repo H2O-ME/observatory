@@ -680,6 +680,16 @@ class AgentSession:
                 command_id=command_id,
             )
         result = raw_result if isinstance(raw_result, dict) else None
+        # P2: an uninstall handler answers "{started: true}" as soon as it has
+        # spawned the helper — that is "accepted", not "done". The row goes to
+        # ``running`` and only a persisted ACK may settle it ``ok``; otherwise the
+        # console reported success while the purge could still fail.
+        if ok and isinstance(result, dict) and result.get("started"):
+            ack_timeout_ms = int(getattr(self.settings, "uninstall_ack_timeout_s", 600) or 600) * 1000
+            if await self.journal.settle_started(command_id, ack_timeout_ms=ack_timeout_ms):
+                self.outbox.ack(command_id)
+                await self._emit("command_updated", {"command_id": command_id, "ok": True, "status": "running"})
+                return
         error = str(body.get("error") or "") or None
         raw_code = body.get("error_code")
         error_code = str(raw_code) if raw_code else (None if ok else "INTERNAL")

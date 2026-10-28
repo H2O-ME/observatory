@@ -14,6 +14,7 @@ Migration contract:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shutil
 import sqlite3
@@ -36,7 +37,7 @@ from .log import log_event
 log = logging.getLogger(__name__)
 
 #: Bump this and append a migration function when the schema changes.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 9
 
 #: 每个连接都执行的 PRAGMA（W7/F56：journal_mode 需要短暂拿写锁且只需设一次，
 #: 移到迁移路径；NullPool 下每会话新建连接，这里只留真正 per-connection 的项）。
@@ -412,6 +413,210 @@ async def _migration_v6_install_tickets(conn: AsyncConnection) -> None:
     )
 
 
+async def _migration_v7_device_token_history(conn: AsyncConnection) -> None:
+    """P1: superseded device tokens with a grace window (``device_token_history``).
+
+    Why it exists: an enrolment can commit and still lose its response, after
+    which the agent retries with the token it already had. Previously that retry
+    was rejected as unknown, so the device could not recover its own record. The
+    table keeps the *previous* hash for ``OBS_TOKEN_ROTATE_GRACE_S`` so the retry
+    is accepted, and it is what makes concurrent rotations safe (INV-3: every
+    token handed out during a burst stays usable inside the window).
+
+    ``ON DELETE CASCADE`` is load-bearing: deleting a device must also forget its
+    superseded tokens, otherwise an old token would keep authenticating against a
+    device that no longer exists — i.e. an accidental permanent credential, which
+    is exactly the "ban/lockout" shape this release removes.
+    """
+
+    await conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS device_token_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id INTEGER NOT NULL REFERENCES devices (id) ON DELETE CASCADE,
+                token_hash VARCHAR(128) NOT NULL,
+                superseded_at_ms BIGINT NOT NULL
+            )
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_device_token_history_hash "
+            "ON device_token_history (token_hash)"
+        )
+    )
+    await conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_device_token_history_device "
+            "ON device_token_history (device_id)"
+        )
+    )
+
+
+async def _migration_v8_command_history(conn: AsyncConnection) -> None:
+    """P3: keep command history after the device row is gone.
+
+    Enrolment/cleanup now delete the ``devices`` row when a confirmed uninstall
+    removes the activity record. With the old ``ON DELETE CASCADE`` on
+    ``commands.device_id`` that delete silently took the uninstall command — the
+    very evidence that the purge happened — with it.
+
+    So this rebuilds ``commands``::
+
+        device_id  → nullable, ON DELETE SET NULL
+        device_uid → new NOT NULL column, backfilled from devices
+
+    plus ``devices.purge_pending_at_ms`` to mark "uninstalled, record not yet
+    removed" so a failed media cleanup can be retried by housekeeping instead of
+    being reported as a clean delete.
+
+    SQLite cannot alter a foreign key in place, so the table is rebuilt. There is
+    no child table referencing ``commands``, and every existing row joined a live
+    ``devices`` row before this migration (CASCADE guaranteed it), so the
+    ``device_uid`` backfill cannot leave empty values behind.
+    """
+
+    await _ensure_column(conn, "devices", "purge_pending_at_ms", "BIGINT NULL")
+
+    columns = await _column_names(conn, "commands")
+    if "device_uid" in columns:
+        # Already rebuilt (idempotent re-run after a partial deploy).
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_commands_device_uid ON commands (device_uid)"
+            )
+        )
+        return
+
+    await conn.execute(
+        text(
+            """
+            CREATE TABLE commands_v8 (
+                id VARCHAR(36) NOT NULL PRIMARY KEY,
+                device_id INTEGER NULL REFERENCES devices (id) ON DELETE SET NULL,
+                device_uid VARCHAR(64) NOT NULL DEFAULT '',
+                type VARCHAR(48) NOT NULL,
+                payload JSON NOT NULL,
+                status VARCHAR(16) NOT NULL,
+                result JSON,
+                error TEXT,
+                error_code VARCHAR(32),
+                attempts INTEGER NOT NULL DEFAULT 0,
+                actor VARCHAR(64) NOT NULL,
+                created_at_ms BIGINT NOT NULL,
+                dispatched_at_ms BIGINT,
+                finished_at_ms BIGINT,
+                expires_at_ms BIGINT NOT NULL,
+                deadline_ms BIGINT
+            )
+            """
+        )
+    )
+    backfill = (
+        """
+        INSERT INTO commands_v8 (
+            id, device_id, device_uid, type, payload, status, result, error,
+            error_code, attempts, actor, created_at_ms, dispatched_at_ms,
+            finished_at_ms, expires_at_ms, deadline_ms
+        )
+        SELECT
+            c.id,
+            c.device_id,
+            COALESCE((SELECT d.uid FROM devices d WHERE d.id = c.device_id), ''),
+            c.type, c.payload, c.status, c.result, c.error,
+            {error_code}, {attempts}, c.actor, c.created_at_ms,
+            c.dispatched_at_ms, c.finished_at_ms, c.expires_at_ms, {deadline_ms}
+        FROM commands c
+        """
+    ).format(
+        error_code="c.error_code" if "error_code" in columns else "NULL",
+        attempts="COALESCE(c.attempts, 0)" if "attempts" in columns else "0",
+        deadline_ms="c.deadline_ms" if "deadline_ms" in columns else "NULL",
+    )
+    await conn.execute(text(backfill))
+    await conn.execute(text("DROP TABLE commands"))
+    await conn.execute(text("ALTER TABLE commands_v8 RENAME TO commands"))
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_commands_device_id ON commands (device_id)",
+        "CREATE INDEX IF NOT EXISTS ix_commands_status ON commands (status)",
+        "CREATE INDEX IF NOT EXISTS ix_commands_device_status ON commands (device_id, status)",
+        "CREATE INDEX IF NOT EXISTS ix_commands_device_uid ON commands (device_uid)",
+        # P2 invariant, enforced by the database rather than only by the handler:
+        # at most one open uninstall per device. Partial index = SQLite-friendly.
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_commands_one_open_uninstall "
+        "ON commands (device_id) WHERE type = 'uninstall' "
+        "AND status IN ('pending', 'dispatched', 'running')",
+    ):
+        await conn.execute(text(statement))
+
+
+async def _migration_v9_drop_tickets_and_tombstones(conn: AsyncConnection) -> None:
+    """P4: delete the two legacy admission mechanisms.
+
+    Registration is open (no per-machine approval, no tickets, no bans), so the
+    tables that implemented the old model carry no authority any more:
+
+    ``install_tokens`` / ``install_token_uses``
+        deployment tickets and their device bindings (A18);
+    ``deleted_devices``
+        delete tombstones (F9) — deleting a device is "forget the record", not a
+        ban, and a reinstall must be able to register again.
+
+    Dropping them outright would lose the operational record of *who was let in
+    and what was deleted*, so every row is copied into ``audit`` first (one entry
+    per row, hashes only — tickets never stored plaintext). ``audit`` is the
+    table that outlives devices and is already the compliance trail.
+
+    The migration is idempotent: absent tables are simply skipped.
+    """
+
+    tables = await _table_names(conn)
+    stamp = now_ms()
+    for table, action, columns in (
+        (
+            "install_tokens",
+            "legacy.ticket_archive",
+            "id, created_by, created_at_ms, expires_at_ms, max_uses, used_count, "
+            "last_used_at_ms, revoked_at_ms",
+        ),
+        (
+            "install_token_uses",
+            "legacy.ticket_binding_archive",
+            "id, token_id, device_id, used_at_ms, ip, hostname",
+        ),
+        (
+            "deleted_devices",
+            "legacy.tombstone_archive",
+            "id, uid, deleted_at_ms",
+        ),
+    ):
+        if table not in tables:
+            continue
+        rows = (await conn.execute(text(f"SELECT {columns} FROM {table}"))).fetchall()
+        names = [str(item).strip() for item in columns.split(",")]
+        for row in rows:
+            detail = {name: value for name, value in zip(names, row, strict=True)}
+            uid = str(detail.pop("uid", "") or "")
+            await conn.execute(
+                text(
+                    "INSERT INTO audit (ts_ms, actor, action, device_uid, device_name, ip, detail) "
+                    "VALUES (:ts_ms, :actor, :action, :uid, '', :ip, :detail)"
+                ),
+                {
+                    "ts_ms": stamp,
+                    "actor": "migration",
+                    "action": action,
+                    "uid": uid,
+                    "ip": str(detail.get("ip") or ""),
+                    "detail": json.dumps(detail, ensure_ascii=False),
+                },
+            )
+        await conn.execute(text(f"DROP TABLE {table}"))
+        log.info("migrating: %s archived (%d rows) and dropped", table, len(rows))
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline_0_2_10", _migration_v1_baseline),
     Migration(2, "link_v3_0_3_0", _migration_v2_link_v3),
@@ -419,6 +624,9 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(4, "tombstones_and_indexes", _migration_v4_tombstones_and_indexes),
     Migration(5, "archive_frame_ts_and_indexes", _migration_v5_archive_frame_ts),
     Migration(6, "install_tickets_multi_device", _migration_v6_install_tickets),
+    Migration(7, "device_token_history", _migration_v7_device_token_history),
+    Migration(8, "command_history_preserved", _migration_v8_command_history),
+    Migration(9, "drop_tickets_and_tombstones", _migration_v9_drop_tickets_and_tombstones),
 )
 
 

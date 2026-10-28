@@ -74,11 +74,6 @@ server {
         return 404 "该域名仅用于受控端接入与安装\n";
     }
 
-    location ^~ /api/v1/install-tokens {
-        default_type text/plain;
-        return 404 "该域名仅用于受控端接入与安装\n";
-    }
-
     location ^~ /api/v1/control {
         default_type text/plain;
         return 404 "该域名仅用于受控端接入与安装\n";

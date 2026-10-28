@@ -41,7 +41,16 @@ def test_0_3_0_expected_columns_and_tables_are_documented() -> None:
     assert "boot_id" in legacy_db.EXPECTED_NEW_COLUMNS["devices"]
     assert "protocol" in legacy_db.EXPECTED_NEW_COLUMNS["devices"]
     assert "frame_id" in legacy_db.EXPECTED_NEW_COLUMNS["frames"]
-    assert set(legacy_db.EXPECTED_NEW_TABLES) == {"schema_version", "frame_archives", "install_tokens"}
+    assert set(legacy_db.EXPECTED_NEW_TABLES) == {
+        "schema_version",
+        "frame_archives",
+        "device_token_history",
+    }
+    assert set(legacy_db.DROPPED_TABLES) == {
+        "install_tokens",
+        "install_token_uses",
+        "deleted_devices",
+    }
 
 
 def test_json_columns_are_declared_for_every_table_that_needs_them() -> None:
@@ -183,6 +192,10 @@ def test_n3_migrates_legacy_schema_with_backup(tmp_dir) -> None:
         }
         assert set(legacy_db.LEGACY_DB_TABLES) <= tables
         assert set(legacy_db.EXPECTED_NEW_TABLES) <= tables
+        # v9：票据/墓碑表在归档进 audit 之后被删除
+        assert not (set(legacy_db.DROPPED_TABLES) & tables), (
+            f"v9 必须删除这些表: {set(legacy_db.DROPPED_TABLES) & tables}"
+        )
 
         for table, columns in legacy_db.EXPECTED_NEW_COLUMNS.items():
             existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
@@ -203,8 +216,9 @@ def test_n3_migrates_legacy_schema_with_backup(tmp_dir) -> None:
         assert "ix_frames_device_ts" in indexes
         assert "ux_frame_archives_device_remote_path" in indexes, "v4 归档唯一索引（F26）"
         assert "ix_audit_actor" in indexes, "v4 审计 actor 索引（F27）"
-        tombstone_columns = {row[1] for row in connection.execute("PRAGMA table_info(deleted_devices)")}
-        assert {"uid", "token_hash", "deleted_at_ms"} <= tombstone_columns, "v4 删除墓碑表（F9）"
+        # v9：墓碑表与索引一并消失，删除设备不再有"封禁"语义。
+        assert "ux_deleted_devices_token" not in indexes
+        assert "ux_install_tokens_hash" not in indexes
     finally:
         connection.close()
 

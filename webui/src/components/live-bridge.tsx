@@ -113,7 +113,7 @@ export function LiveBridge() {
         void queryClient.invalidateQueries({ queryKey: ["updates"] });
         void queryClient.invalidateQueries({ queryKey: ["system"] });
         void queryClient.invalidateQueries({ queryKey: ["settings"] });
-        void queryClient.invalidateQueries({ queryKey: ["install-tokens"] });
+        void queryClient.invalidateQueries({ queryKey: ["install"] });
       }
     };
 

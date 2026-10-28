@@ -133,7 +133,20 @@ export interface DevicePatch {
 
 // ------------------------------------------------------------------- commands ---
 
-export type CommandStatus = "pending" | "dispatched" | "ok" | "error" | "timeout" | "cancelled";
+/**
+ * `running`: the agent accepted the command and is still working (uninstall).
+ * `unconfirmed`: the deadline passed with no reliable ACK — the outcome is
+ *  *unknown*, which is not the same as failure and must not be shown as one.
+ */
+export type CommandStatus =
+  | "pending"
+  | "dispatched"
+  | "running"
+  | "ok"
+  | "error"
+  | "timeout"
+  | "unconfirmed"
+  | "cancelled";
 
 export interface Command {
   /** Journal id (string: it is a UUID, not a database row id). */
@@ -416,7 +429,7 @@ export interface InstallArtifact {
   kind: "cmd" | "ps1";
   label: string;
   filename: string;
-  /** Served URL; embeds `<一次性令牌>` until the operator picks a token. */
+  /** Fixed public URL; no credential is embedded or required. */
   url: string;
   hint: string;
 }
@@ -424,63 +437,14 @@ export interface InstallArtifact {
 export interface InstallInfo {
   enabled: boolean;
   enroll_required: boolean;
-  /** Unused, unexpired one-shot tokens currently in the database. */
-  available_tokens: number;
-  token_ttl_minutes: number;
   version: string;
   console_host: string;
   base_urls: string[];
-  install_token_endpoint: string;
   script_url: string;
   cmd_url: string;
   artifacts: InstallArtifact[];
   /** Only `GET /install` adds the operator note. */
   note?: string;
-}
-
-export interface InstallTokenDevice {
-  device_id: number;
-  uid: string;
-  name: string;
-  /** 设备行已被删除：绑定记录仍保留用于审计。 */
-  deleted: boolean;
-  used_at_ms: number;
-  ip: string;
-}
-
-export interface InstallToken {
-  id: number;
-  created_by: string;
-  created_at_ms: number;
-  expires_at_ms: number;
-  /** 0 = 长期有效（只受撤销约束）。 */
-  permanent: boolean;
-  used_at_ms: number | null;
-  used_device_id: number | null;
-  /** 可绑定设备数，0 表示不限。 */
-  max_uses: number;
-  unlimited: boolean;
-  /** 已绑定的设备台数（同一台机器重装不重复计数）。 */
-  used_count: number;
-  /** 还能绑定几台；`null` = 不限。 */
-  remaining: number | null;
-  last_used_at_ms: number | null;
-  expired: boolean;
-  exhausted: boolean;
-  used: boolean;
-  devices: InstallTokenDevice[];
-}
-
-export interface InstallTokenCreated {
-  id: number;
-  /** Plaintext token. Returned exactly once by the server; show it and let the
-   *  operator copy it — it can never be read again. */
-  token: string;
-  expires_at_ms: number;
-  permanent: boolean;
-  max_uses: number;
-  install_cmd_url: string;
-  install_ps1_url: string;
 }
 
 // ---------------------------------------------------------------------- backup ---

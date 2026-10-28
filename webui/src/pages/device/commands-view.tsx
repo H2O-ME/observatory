@@ -31,9 +31,11 @@ const TYPE_LABEL: Record<string, string> = {
 const STATUS_LABEL: Record<CommandStatus, string> = {
   pending: "排队中",
   dispatched: "已下发",
+  running: "执行中",
   ok: "成功",
   error: "失败",
   timeout: "超时",
+  unconfirmed: "未确认",
   cancelled: "已取消",
 };
 
@@ -43,9 +45,11 @@ const STATUS_VARIANT: Record<
 > = {
   pending: "neutral",
   dispatched: "default",
+  running: "default",
   ok: "success",
   error: "destructive",
   timeout: "warning",
+  unconfirmed: "warning",
   cancelled: "neutral",
 };
 
@@ -53,9 +57,11 @@ const STATUS_VARIANT: Record<
 const STATUS_DOT: Record<CommandStatus, string> = {
   pending: "bg-faint animate-sm-pulse",
   dispatched: "bg-primary",
+  running: "bg-primary animate-sm-pulse",
   ok: "bg-success",
   error: "bg-destructive",
   timeout: "bg-warning",
+  unconfirmed: "bg-warning",
   cancelled: "bg-faint",
 };
 
@@ -100,7 +106,12 @@ export function CommandsView({ device }: { device: Device }) {
     refetchInterval: (query) => {
       const commands = query.state.data?.commands;
       const active = commands?.some(
-        (command) => command.status === "pending" || command.status === "dispatched",
+        (command) =>
+          command.status === "pending" ||
+          command.status === "dispatched" ||
+          // `running`: the agent is still working (uninstall) — keep polling fast
+          // so the confirmation (or the unconfirmed deadline) shows up promptly.
+          command.status === "running",
       );
       return active ? 5_000 : 30_000;
     },

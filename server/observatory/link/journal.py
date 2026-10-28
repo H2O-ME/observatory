@@ -34,8 +34,22 @@ log = logging.getLogger(__name__)
 #: Commands whose result has been reported are finished from the bus' point of view.
 #: Rows in a terminal status never change again (F20: `"failed"` is terminal —
 #: without it, REPLAY_EXHAUSTED rows leaked forever and a late result could
-#: overwrite an exhausted replay).
-TERMINAL_COMMAND_STATUSES: frozenset[str] = frozenset({"ok", "error", "timeout", "cancelled", "failed"})
+#: overwrite an exhausted replay). ``unconfirmed`` is terminal for *evidence*
+#: purposes: it means "we never learned the outcome". Only a real ACK, which is
+#: new evidence, may upgrade it (see :meth:`CommandJournal.settle_ack`).
+TERMINAL_COMMAND_STATUSES: frozenset[str] = frozenset(
+    {"ok", "error", "timeout", "cancelled", "failed", "unconfirmed"}
+)
+
+#: Statuses with outstanding work: still to be delivered, or delivered and
+#: executing. Used for replay (never re-deliver ``running``) and for UI state.
+OPEN_COMMAND_STATUSES: tuple[str, ...] = ("pending", "dispatched", "running")
+
+#: Why a command is in ``unconfirmed``: the agent never told us the outcome.
+ACK_TIMEOUT = "ACK_TIMEOUT"
+
+#: Why a command failed after the agent did report a failure.
+UNINSTALL_FAILED = "UNINSTALL_FAILED"
 
 #: Replay budget: initial delivery + up to 5 reconnect attempts, then give up.
 MAX_REPLAY_ATTEMPTS = 5
@@ -57,7 +71,8 @@ def replay_backoff_ms(attempts: int) -> int:
 @dataclass(frozen=True, slots=True)
 class CommandRecord:
     id: str
-    device_id: int
+    #: ``None`` once the device record was removed (P3 keeps the command row).
+    device_id: int | None
     kind: str
     body: dict[str, Any]
     status: str
@@ -71,12 +86,14 @@ class CommandRecord:
     finished_at_ms: int | None
     expires_at_ms: int
     deadline_ms: int
+    device_uid: str = ""
 
     @classmethod
     def from_model(cls, row: Command) -> CommandRecord:
         return cls(
             id=row.id,
-            device_id=int(row.device_id),
+            device_id=int(row.device_id) if row.device_id is not None else None,
+            device_uid=str(getattr(row, "device_uid", "") or ""),
             kind=row.type,
             body=dict(row.payload or {}),
             status=row.status,
@@ -183,6 +200,7 @@ class CommandJournal:
         actor: str = "console",
         timeout_ms: int | None = None,
         expires_at_ms: int | None = None,
+        device_uid: str = "",
     ) -> CommandRecord:
         now = self._clock.now_ms()
         budget = int(timeout_ms if timeout_ms is not None else self.deadline_for(kind))
@@ -190,6 +208,9 @@ class CommandJournal:
         row = Command(
             id=uuid.uuid4().hex,
             device_id=int(device_id),
+            # P3: denormalised so the row stays attributable after the device row
+            # is deleted (``device_id`` becomes NULL then).
+            device_uid=str(device_uid or "")[:64],
             type=str(kind),
             payload=dict(body or {}),
             status="pending",
@@ -217,6 +238,30 @@ class CommandJournal:
         statement = select(Command).order_by(Command.created_at_ms.desc())
         if device_id is not None:
             statement = statement.where(Command.device_id == int(device_id))
+        statement = statement.offset(max(0, offset)).limit(max(1, limit))
+        async with self._sessionmaker() as session:
+            rows = (await session.execute(statement)).scalars().all()
+        return [CommandRecord.from_model(row) for row in rows]
+
+    async def list_by_uid(
+        self,
+        uid: str | None = None,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[CommandRecord]:
+        """Command history keyed by ``device_uid`` (P3).
+
+        After a confirmed uninstall removes the device record, ``device_id`` is
+        NULL on the affected rows; ``device_uid`` is what still answers "what
+        happened to that machine" without the device being in the list.
+        """
+
+        statement = select(Command).order_by(Command.created_at_ms.desc())
+        if uid:
+            statement = statement.where(Command.device_uid == str(uid))
+        else:
+            statement = statement.where(Command.device_id.is_(None))
         statement = statement.offset(max(0, offset)).limit(max(1, limit))
         async with self._sessionmaker() as session:
             rows = (await session.execute(statement)).scalars().all()
@@ -451,6 +496,180 @@ class CommandJournal:
             error_code="TIMEOUT",
         )
 
+    # -- uninstall: accepted ≠ finished (P2) --------------------------------
+    async def settle_started(self, command_id: str, *, ack_timeout_ms: int) -> bool:
+        """Move an **uninstall** command to ``running`` (accepted, not finished).
+
+        Before P2 the handler's ``{started: true}`` result went through the normal
+        settlement path, so the console showed ``ok`` seconds after the console
+        click — while the purge helper was still working, and sometimes while it
+        had already failed. ``running`` is the honest state for that window, and
+        it also sets ``expires_at_ms`` to the ACK deadline so housekeeping can
+        flag a missing confirmation later.
+
+        Returns ``True`` when this call performed the transition; ``False`` means
+        the row is not an open uninstall (caller settles it normally).
+        """
+
+        now = self._clock.now_ms()
+        async with self._sessionmaker() as session:
+            outcome = await session.execute(
+                update(Command)
+                .where(
+                    Command.id == str(command_id),
+                    Command.type == "uninstall",
+                    Command.status.in_(("pending", "dispatched")),
+                )
+                .values(status="running", expires_at_ms=now + max(int(ack_timeout_ms), 1_000))
+            )
+            await session.commit()
+            changed = outcome.rowcount == 1
+        if changed:
+            log_event(log, logging.INFO, "journal.started", command_id=command_id)
+        return changed
+
+    async def settle_ack(
+        self, command_id: str, *, result: dict[str, Any] | None = None
+    ) -> tuple[CommandRecord | None, bool]:
+        """Settle an uninstall command from a **persisted ACK** (the only proof).
+
+        Returns ``(record, changed)``. ``changed`` is ``True`` only when *this*
+        call performed the transition, so an idempotent retry can answer "already
+        confirmed" instead of claiming a second success.
+
+        Accepts ``running`` (normal), ``unconfirmed`` (the ACK arrived after the
+        deadline — new evidence, so it upgrades the row and is logged), and the
+        two pre-running states (the ACK can overtake the ``started`` result when
+        the two uplinks are reordered).
+        """
+
+        now = self._clock.now_ms()
+        async with self._sessionmaker() as session:
+            previous = (
+                await session.execute(select(Command.status).where(Command.id == str(command_id)))
+            ).scalar()
+            if previous is None:
+                log_event(log, logging.WARNING, "journal.ack_missing", command_id=command_id)
+                return None, False
+            outcome = await session.execute(
+                update(Command)
+                .where(
+                    Command.id == str(command_id),
+                    Command.type == "uninstall",
+                    Command.status.in_(("pending", "dispatched", "running", "unconfirmed")),
+                )
+                .values(
+                    status="ok",
+                    result=dict(result) if isinstance(result, dict) else {"acked": True},
+                    error=None,
+                    error_code=None,
+                    finished_at_ms=now,
+                )
+            )
+            await session.commit()
+            row = (await session.execute(select(Command).where(Command.id == str(command_id)))).scalars().first()
+            if row is None:
+                return None, False
+            record = CommandRecord.from_model(row)
+            changed = outcome.rowcount == 1
+            if not changed:
+                log_event(
+                    log,
+                    logging.DEBUG,
+                    "journal.ack_ignored",
+                    command_id=command_id,
+                    status=record.status,
+                )
+                return record, False
+        if previous == "unconfirmed":
+            log_event(log, logging.WARNING, "journal.ack_after_deadline", command_id=command_id)
+        slot = self._waiters.get(command_id)
+        if slot is not None:
+            slot.settle(
+                Result(
+                    ok=True,
+                    status="ok",
+                    result=record.result,
+                    error=None,
+                    error_code=None,
+                    retryable=False,
+                    command_id=command_id,
+                    deadline_ms=record.deadline_ms,
+                    server_time_ms=now,
+                    latency_ms=max(0, now - record.created_at_ms),
+                )
+            )
+        return record, True
+
+    async def open_uninstall(self, device_id: int) -> CommandRecord | None:
+        """The single outstanding uninstall command for *device*, if any.
+
+        P2 invariant: at most one open uninstall per device, otherwise a legacy
+        ACK without a command id could settle several rows at once.
+        """
+
+        statement = (
+            select(Command)
+            .where(
+                Command.device_id == int(device_id),
+                Command.type == "uninstall",
+                Command.status.in_(OPEN_COMMAND_STATUSES),
+            )
+            .order_by(Command.created_at_ms.desc())
+            .limit(1)
+        )
+        async with self._sessionmaker() as session:
+            row = (await session.execute(statement)).scalars().first()
+        return CommandRecord.from_model(row) if row is not None else None
+
+    async def expire_uninstall_acks(self, *, now: int | None = None) -> int:
+        """``running`` uninstall past its ACK deadline → ``unconfirmed``.
+
+        Deliberately **not** ``failed``: a missing ACK cannot distinguish "the
+        device finished but the ack was lost" from "the purge never ran", so the
+        row records "we do not know" (C6: observable failure, not a guess) and the
+        device record is left in place for an operator to resolve.
+        """
+
+        moment = now if now is not None else self._clock.now_ms()
+        total = 0
+        async with self._sessionmaker() as session:
+            while True:
+                rows = list(
+                    (
+                        await session.execute(
+                            select(Command.id)
+                            .where(
+                                Command.type == "uninstall",
+                                Command.status == "running",
+                                Command.expires_at_ms > 0,
+                                Command.expires_at_ms < moment,
+                            )
+                            .order_by(Command.expires_at_ms.asc())
+                            .limit(EXPIRE_BATCH)
+                        )
+                    ).scalars().all()
+                )
+                if not rows:
+                    break
+                outcome = await session.execute(
+                    update(Command)
+                    .where(Command.id.in_(rows), Command.status == "running")
+                    .values(
+                        status="unconfirmed",
+                        error="卸载回执超时，执行结果无法确认（设备可能已卸载，也可能未执行）",
+                        error_code=ACK_TIMEOUT,
+                        finished_at_ms=moment,
+                    )
+                )
+                await session.commit()
+                total += int(outcome.rowcount or 0)
+                if len(rows) < EXPIRE_BATCH:
+                    break
+        if total:
+            log_event(log, logging.WARNING, "journal.ack_timeout", count=total)
+        return total
+
     async def expire_stale(self, *, now: int | None = None) -> int:
         """Mark commands past their expiry as timeout; settles any waiter.
 
@@ -519,13 +738,16 @@ class CommandJournal:
 
 
 __all__ = [
+    "ACK_TIMEOUT",
     "CommandJournal",
     "CommandRecord",
     "MAX_REPLAY_ATTEMPTS",
+    "OPEN_COMMAND_STATUSES",
     "REPLAY_BACKOFF_BASE_MS",
     "REPLAY_BACKOFF_MAX_MS",
     "REPLAY_EXHAUSTED",
     "TERMINAL_COMMAND_STATUSES",
+    "UNINSTALL_FAILED",
     "WaiterSlot",
     "replay_backoff_ms",
 ]

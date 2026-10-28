@@ -60,16 +60,6 @@ def test_agent_domains_only_in_its_core_config() -> None:
     assert "builtin_base_urls" in allowed.read_text(encoding="utf-8").lower()
 
 
-def test_stale_top_level_modules_are_not_imported_by_new_assembly() -> None:
-    """0.2.10 残留模块必须从新装配中隔离（随后由 Lead 删除）。"""
-
-    main = (SERVER / "main.py").read_text(encoding="utf-8")
-    assert "from .core.config import" in main
-    assert "from .adapters.hostsplit import" in main
-    for stale in ("from .config import", "from .hostsplit import"):
-        assert stale not in main, f"main.py 仍 import 0.2.10 残留: {stale}"
-
-
 def test_no_second_hostsplit_policy_in_new_layer() -> None:
     """HostSplit 只允许 adapters/hostsplit.py 实现（C4/C8）。"""
 

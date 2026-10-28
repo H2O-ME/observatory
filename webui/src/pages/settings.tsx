@@ -1,15 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ComponentType, ReactNode } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import {
   Archive,
   Camera,
   Check,
-  Copy,
   Download,
   FolderOpen,
-  KeyRound,
   Link2,
   MonitorPlay,
   PackageCheck,
@@ -18,12 +16,10 @@ import {
   Save,
   Settings2,
   Timer,
-  Trash2,
   Wifi,
 } from "lucide-react";
 
 import { Banner, ErrorBlock, LoadingBlock } from "@/components/async-state";
-import { ConfirmDialog } from "@/components/confirm-dialog";
 import { MetaChip, PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -34,8 +30,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { useViewport } from "@/hooks/use-viewport";
 import { api, isApiError } from "@/lib/api";
-import { formatBytes, formatDateTime, formatDuration } from "@/lib/format";
-import type { InstallToken, SettingSpec } from "@/lib/types";
+import { formatBytes, formatDuration } from "@/lib/format";
+import type { SettingSpec } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type IconType = ComponentType<{ className?: string }>;
@@ -103,9 +99,9 @@ const GROUPS: Array<{ id: string; title: string; hint: string; icon: IconType; k
   {
     id: "install",
     title: "安装",
-    hint: "安装票据默认有效期（0 = 长期有效）与脚本提示",
+    hint: "安装页备注",
     icon: Rocket,
-    keys: ["install_token_ttl_minutes", "install_script_note"],
+    keys: ["install_script_note"],
   },
 ];
 
@@ -146,19 +142,10 @@ export function SettingsPage() {
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [copied, setCopied] = useState("");
-  const [created, setCreated] = useState<{
-    token: string;
-    cmd: string;
-    ps1: string;
-    expires: number;
-    permanent: boolean;
-  } | null>(null);
-  const [pendingToken, setPendingToken] = useState<InstallToken | null>(null);
 
   const query = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
   const systemQuery = useQuery({ queryKey: ["system"], queryFn: api.getSystem, refetchInterval: 30_000 });
   const installQuery = useQuery({ queryKey: ["install"], queryFn: api.getInstall, staleTime: 60_000 });
-  const tokensQuery = useQuery({ queryKey: ["install-tokens"], queryFn: api.listInstallTokens });
 
   useEffect(() => {
     // Seed once. `draft !== null` is the guard that keeps refetches from clobbering edits.
@@ -256,39 +243,6 @@ export function SettingsPage() {
     }
   };
 
-  const createToken = useMutation({
-    mutationFn: () => api.createInstallToken(),
-    onSuccess: (result) => {
-      setCreated({
-        token: result.token,
-        cmd: result.install_cmd_url,
-        ps1: result.install_ps1_url,
-        expires: result.expires_at_ms,
-        permanent: result.permanent,
-      });
-      setError("");
-      void queryClient.invalidateQueries({ queryKey: ["install-tokens"] });
-      void queryClient.invalidateQueries({ queryKey: ["install"] });
-      void queryClient.invalidateQueries({ queryKey: ["system"] });
-    },
-    onError: (failure) => setError(isApiError(failure) ? failure.message : "生成失败"),
-  });
-
-  const revokeToken = useMutation({
-    mutationFn: (id: number) => api.deleteInstallToken(id),
-    onSuccess: (result) => {
-      setMessage(result.message);
-      setPendingToken(null);
-      void queryClient.invalidateQueries({ queryKey: ["install-tokens"] });
-      void queryClient.invalidateQueries({ queryKey: ["install"] });
-      void queryClient.invalidateQueries({ queryKey: ["system"] });
-    },
-    onError: (failure) => {
-      setError(isApiError(failure) ? failure.message : "撤销失败");
-      setPendingToken(null);
-    },
-  });
-
   const copy = async (text: string, tag: string) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -333,7 +287,6 @@ export function SettingsPage() {
   const system = systemQuery.data;
   const install = installQuery.data;
   const serverVersion = system?.version ?? query.data?.server_version ?? "—";
-  const tokenTotal = tokensQuery.data?.tokens.length ?? 0;
 
   return (
     <div className={cn("w-full min-w-0", !desktop && "pb-32")}>
@@ -403,183 +356,67 @@ export function SettingsPage() {
             {/* ------------------------------------------------ install launchpad */}
             <div className="min-w-0">
               <SettingsCard
-                title="安装票据"
-                description="长期有效、可绑定多台设备；它只是下载/安装授权，不是每台机器独立的秘密。撤销后已装好的设备保持在线，但不能再拿它重新注册。"
-                actions={
-                  <>
-                    <MetaChip tone="ok">可用 {install?.available_tokens ?? 0}</MetaChip>
-                    <MetaChip>默认长期有效</MetaChip>
-                  </>
-                }
+                title="安装受控端"
+                description="安装脚本内不含任何凭据：下载即可用，设备首次上线会自动注册（不需要审批、不需要令牌）。删除设备后重新安装同样自动注册。"
+                actions={<MetaChip tone="ok">开放注册</MetaChip>}
               >
-                  <div className="min-w-0">
-                    <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end sm:gap-3">
-                      <p className="text-xs leading-relaxed text-muted-foreground">
-                        生成一张票据后，安装脚本里会带上它；同一张票据可以装任意多台机器（按需在服务端设置里限制有效期或台数）。
-                      </p>
-                      <div className="min-w-0">
-                        <Button disabled={createToken.isPending} onClick={() => createToken.mutate()}>
-                          {createToken.isPending ? <Spinner className="size-4" /> : <KeyRound className="size-4" />}
-                          生成票据
+                <div className="min-w-0">
+                  {installQuery.isError ? (
+                    <ErrorBlock
+                      message={isApiError(installQuery.error) ? installQuery.error.message : "无法读取安装信息"}
+                      retryable
+                      onRetry={() => void installQuery.refetch()}
+                    />
+                  ) : (
+                    <>
+                      <div className="grid min-w-0 gap-1.5 sm:grid-cols-2">
+                        <a
+                          href={install?.cmd_url ?? "/api/v1/public/install.cmd"}
+                          download={`Observatory-Install-${install?.version ?? ""}.cmd`}
+                          className={cn(
+                            buttonVariants({ variant: "default", size: "sm" }),
+                            "h-11 min-w-0 justify-center no-underline sm:h-9",
+                          )}
+                        >
+                          <Download className="mr-1.5 size-4 shrink-0" />
+                          <span className="truncate">下载安装程序 (.cmd)</span>
+                        </a>
+                        <a
+                          href={install?.script_url ?? "/api/v1/public/install.ps1"}
+                          download={`Observatory-Install-${install?.version ?? ""}.ps1`}
+                          className={cn(
+                            buttonVariants({ variant: "outline", size: "sm" }),
+                            "h-11 min-w-0 justify-center no-underline sm:h-9",
+                          )}
+                        >
+                          <Download className="mr-1.5 size-4 shrink-0" />
+                          <span className="truncate">下载安装脚本 (.ps1)</span>
+                        </a>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-11 justify-center sm:col-span-2 sm:h-9"
+                          onClick={() =>
+                            void copy(absolute(install?.cmd_url ?? "/api/v1/public/install.cmd"), "cmd")
+                          }
+                        >
+                          {copied === "cmd" ? (
+                            <Check className="mr-1.5 size-4" />
+                          ) : (
+                            <Link2 className="mr-1.5 size-4" />
+                          )}
+                          复制下载链接
                         </Button>
                       </div>
-                    </div>
-
-                    {created ? (
-                      <div className="mt-3 min-w-0 overflow-hidden rounded-md border border-border bg-muted p-3">
-                        <div className="min-w-0">
-                          <div className="min-w-0">
-                            <p className="text-sm font-semibold text-primary">票据只显示这一次</p>
-                            <p className="text-xs leading-relaxed text-muted-foreground">
-                              {created.permanent
-                                ? "长期有效（随时可在下方撤销）"
-                                : `有效至 ${formatDateTime(created.expires)}`}
-                              ；请立即复制或下载安装脚本。
-                            </p>
-                          </div>
-
-                          <div className="mt-2 grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5">
-                            <code className="min-w-0 break-all rounded-md border border-border bg-card px-2.5 py-2 font-mono text-xs leading-relaxed text-foreground">
-                              {created.token}
-                            </code>
-                            <Button
-                              size="icon-sm"
-                              variant="outline"
-                              className={cn("shrink-0", !desktop && "size-11")}
-                              aria-label="复制令牌"
-                              title="复制令牌"
-                              onClick={() => void copy(created.token, "token")}
-                            >
-                              {copied === "token" ? <Check className="size-4" /> : <Copy className="size-4" />}
-                            </Button>
-                          </div>
-
-                          <div className="mt-2 grid min-w-0 gap-1.5 sm:grid-cols-2">
-                            <a
-                              href={created.cmd}
-                              download={`Observatory-Install-${install?.version ?? ""}.cmd`}
-                              className={cn(
-                                buttonVariants({ variant: "default", size: "sm" }),
-                                "h-11 min-w-0 justify-center no-underline sm:h-9",
-                              )}
-                            >
-                              <Download className="mr-1.5 size-4 shrink-0" />
-                              <span className="truncate">下载安装程序 (.cmd)</span>
-                            </a>
-                            <a
-                              href={created.ps1}
-                              download={`Observatory-Install-${install?.version ?? ""}.ps1`}
-                              className={cn(
-                                buttonVariants({ variant: "outline", size: "sm" }),
-                                "h-11 min-w-0 justify-center no-underline sm:h-9",
-                              )}
-                            >
-                              <Download className="mr-1.5 size-4 shrink-0" />
-                              <span className="truncate">下载安装脚本 (.ps1)</span>
-                            </a>
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              className="h-11 justify-center sm:col-span-2 sm:h-9"
-                              onClick={() => void copy(absolute(created.cmd), "cmd")}
-                            >
-                              {copied === "cmd" ? (
-                                <Check className="mr-1.5 size-4" />
-                              ) : (
-                                <Link2 className="mr-1.5 size-4" />
-                              )}
-                              复制下载链接
-                            </Button>
-                          </div>
-                        </div>
-                      </div>
-                    ) : null}
-
-                    {tokensQuery.isError ? (
-                      <div className="mt-3">
-                        <ErrorBlock
-                          message={isApiError(tokensQuery.error) ? tokensQuery.error.message : "无法读取令牌列表"}
-                          retryable
-                          onRetry={() => void tokensQuery.refetch()}
-                        />
-                      </div>
-                    ) : tokensQuery.isLoading ? (
-                      <div className="mt-3">
-                        <LoadingBlock label="正在读取令牌…" rows={2} />
-                      </div>
-                    ) : tokenTotal === 0 ? (
-                      <div className="mt-3 min-w-0 overflow-hidden rounded-md border border-dashed border-border bg-muted px-3 py-6 text-center">
-                        <div>
-                          <KeyRound className="mx-auto size-5 text-faint" />
-                          <p className="mt-2 text-sm font-medium text-foreground">还没有可用的安装票据</p>
-                          <p className="mx-auto mt-1 max-w-sm text-xs leading-relaxed text-muted-foreground">
-                            生成一张票据后即可下载安装脚本；同一张票据可以装任意多台机器，撤销前一直有效。
-                          </p>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="mt-3 h-11 sm:h-9"
-                            onClick={() => createToken.mutate()}
-                            disabled={createToken.isPending}
-                          >
-                            <KeyRound className="size-3.5" />
-                            生成第一张票据
-                          </Button>
-                        </div>
-                      </div>
-                    ) : (
-                      <ul className="mt-3 grid min-w-0 gap-1.5">
-                        {(tokensQuery.data?.tokens ?? []).map((token) => {
-                          const state = token.exhausted ? "已用完" : token.expired ? "已过期" : "可用";
-                          const bound = token.devices ?? [];
-                          return (
-                            <li
-                              key={token.id}
-                              className="grid min-w-0 gap-2 rounded-md border border-border bg-card p-2.5 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center sm:gap-3"
-                            >
-                              <Badge
-                                variant={state === "可用" ? "success" : state === "已过期" ? "warning" : "neutral"}
-                                className="w-fit text-xs font-semibold"
-                              >
-                                {state}
-                              </Badge>
-                              <div className="min-w-0">
-                                <p className="min-w-0 break-all text-xs text-foreground">
-                                  <span className="tnum font-mono text-muted-foreground">#{token.id}</span>
-                                  <span className="ml-2 text-faint">由 {token.created_by || "console"} 创建</span>
-                                  <span className="ml-2 text-faint">
-                                    {token.unlimited ? `已绑定 ${token.used_count} 台` : `已绑定 ${token.used_count}/${token.max_uses} 台`}
-                                  </span>
-                                </p>
-                                <p className="mt-0.5 min-w-0 break-all text-xs leading-relaxed text-faint">
-                                  {token.permanent ? "长期有效" : `有效至 ${formatDateTime(token.expires_at_ms)}`}
-                                  {token.last_used_at_ms ? ` · 最近使用 ${formatDateTime(token.last_used_at_ms)}` : ""}
-                                </p>
-                                {bound.length ? (
-                                  <p className="mt-0.5 min-w-0 break-all text-xs leading-relaxed text-muted-foreground">
-                                    绑定设备：
-                                    {bound
-                                      .map((item) => `${item.name || item.uid}（${formatDateTime(item.used_at_ms)}）`)
-                                      .join("、")}
-                                  </p>
-                                ) : null}
-                              </div>
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                className="h-11 justify-start sm:justify-center"
-                                disabled={revokeToken.isPending}
-                                onClick={() => setPendingToken(token)}
-                              >
-                                <Trash2 className="size-3.5 text-destructive" />
-                                撤销
-                              </Button>
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    )}
-                  </div>
+                      <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
+                        版本 {install?.version ?? "—"}；安装时只弹一次 UAC，之后自动更新、远程卸载都不再提示。命令行安装：
+                      </p>
+                      <code className="mt-1.5 block min-w-0 break-all rounded-md border border-border bg-muted px-2.5 py-2 font-mono text-xs leading-relaxed text-muted-foreground">
+                        irm {absolute(install?.script_url ?? "/api/v1/public/install.ps1")} | iex
+                      </code>
+                    </>
+                  )}
+                </div>
               </SettingsCard>
             </div>
 
@@ -650,30 +487,6 @@ export function SettingsPage() {
             </SettingsCard>
         </div>
       </div>
-
-
-
-      <ConfirmDialog
-        open={pendingToken !== null}
-        onOpenChange={(open) => {
-          if (!open) setPendingToken(null);
-        }}
-        title="撤销安装票据"
-        description={
-          pendingToken
-            ? `撤销票据 #${pendingToken.id}？${
-                pendingToken.used_count > 0
-                  ? `它已绑定 ${pendingToken.used_count} 台设备：这些设备保持在线，但今后不能用该票据重新注册。`
-                  : "尚未绑定任何设备：带它的安装脚本立即失效。"
-              }`
-            : ""
-        }
-        confirmLabel="撤销"
-        busy={revokeToken.isPending}
-        onConfirm={() => {
-          if (pendingToken) revokeToken.mutate(pendingToken.id);
-        }}
-      />
     </div>
   );
 }

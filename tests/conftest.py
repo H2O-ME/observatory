@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import tempfile
 import time
 import uuid
@@ -44,6 +45,21 @@ def _prune_old(base: Path) -> None:
                 shutil.rmtree(entry, ignore_errors=True)
         except OSError:
             continue
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """非 Windows 上把 windows_only 标成 skip 而不是 FAIL。
+
+    这些用例经 tools/win_smoke.py 走命名管道/服务控制，POSIX 上必然失败；
+    不跳过会让 A1/A2/A17 在 Linux 上红掉，把"acceptance 全绿"变成非 Windows
+    环境永远达不到的要求。
+    """
+    if sys.platform == "win32":
+        return
+    skip = pytest.mark.skip(reason="windows_only：仅 Windows runner 可跑")
+    for item in items:
+        if "windows_only" in item.keywords:
+            item.add_marker(skip)
 
 
 def pytest_configure(config: pytest.Config) -> None:

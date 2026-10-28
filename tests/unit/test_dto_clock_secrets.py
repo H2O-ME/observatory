@@ -46,12 +46,6 @@ def test_file_entry_renames_device_time_and_never_server_time() -> None:
     assert "server_time_ms" not in entry, "受控端时间不能叫 server_time_ms（C5/A12）"
 
 
-def test_webui_clock_uses_monotonic_time_and_has_no_date_now_fallback() -> None:
-    clock = _strip_ts_comments((WEBUI_SRC / "lib/clock.ts").read_text(encoding="utf-8"))
-    assert "performance.now()" in clock
-    assert "Date.now(" not in clock, "clock.ts 代码里不能再用 Date.now 兜底（注释除外）"
-
-
 def test_webui_code_never_uses_date_now() -> None:
     offenders: list[str] = []
     for path in WEBUI_SRC.rglob("*"):

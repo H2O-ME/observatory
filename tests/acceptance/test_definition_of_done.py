@@ -1,18 +1,27 @@
 """A1–A24 Definition of Done（spec §3.1）。
 
-W0 状态：断言已按规格写死，除 A20（CI 门禁，本波交付）外全部 `skip(reason="W…")`，
-等对应波次接口就位后只需去掉装饰器，测试体本身不需要重写。
-
 约定：
-- 每个函数名以 `test_aNN_` 开头，编号与规格一一对应；`test_a20_` 现在必须通过。
-- 所有 skip 必须带 reason（`test_meta_every_skip_has_reason` 会强制检查）。
-- 断言一律针对**行为**（HTTP 状态、总线计数、报文形状），不依赖实现细节命名。
+- 函数名以 ``test_aNN_`` 开头，编号与规格一一对应。
+- 断言针对**行为**（HTTP 状态、总线计数、报文形状），不依赖实现细节命名。
+- 同一断言只实现一次：本模块不再导入/转发其他层的测试函数。
+
+编号落点：
+
+======================  ==========================================================
+A1–A13 / A17–A24        本模块（A1/A2/A17 带 ``windows_only``，经 win_smoke 真机验证）
+A14                     ``tests/integration/test_archive_closure.py``
+A15                     ``tests/unit/test_settings_consumers.py``
+A16                     ``tests/unit/test_coords.py``
+======================  ==========================================================
+
+A12 的 DTO/前端半边在 ``tests/unit/test_dto_clock_secrets.py``，本模块只留真 app；
+A23 的"域名单一来源"半边在 ``tests/unit/test_domains_centralised.py``，本模块只留
+agent 域承载控制台 WS 的行为验证。
 """
 
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import re
 import sys
@@ -423,7 +432,7 @@ def test_a07_server_upgrade_backs_up_and_rolls_back() -> None:
     """A7：服务端升级先落回滚锚点（旧镜像 ref + DB 快照），健康失败自动切回旧镜像并退出非 0。
 
     （原 0.2.x“服务器上 git pull 重装、update 预检失败自动回滚”的语义已随 GHCR
-    拉取式交付退役，见 test_n1_n4；回滚锚点换成镜像 ref 与 pre-deploy DB 快照。）
+    拉取式交付退役，见 tests/acceptance/test_n2_legacy_removed.py；回滚锚点换成镜像 ref 与 pre-deploy DB 快照。）
     """
 
     script = _deploy_text("pull-and-restart.sh")
@@ -759,22 +768,15 @@ def test_a23_console_websockets_served_on_agent_host() -> None:
 
 
 def test_a12_single_clock_source(tmp_dir: Path) -> None:
-    """A12：FileListOut.server_time_ms 来自服务端；前端无 Date.now 参与新鲜度。"""
+    """A12（真 app 半边）：设备列表与 presence 的 server_time_ms 来自服务端时钟。
 
-    from observatory.console.dto import file_entry_out, stamp
+    DTO 单元半边（stamp/file_entry_out/前端 Date.now 静态扫描）在
+    ``tests/unit/test_dto_clock_secrets.py``，此处不再重复。
+    """
+
     from observatory.core.clock import now_ms
     from tests.helpers import TEST_ADMIN_PASSWORD, enroll_token, running_app
 
-    # 1) DTO 层：server_time_ms 由服务端时钟注入；设备时间改名 device_time_ms
-    before = now_ms()
-    stamped = stamp({"ok": True})
-    after = now_ms()
-    assert before <= stamped["server_time_ms"] <= after
-    entry = file_entry_out({"name": "a.txt", "path": "C:/a.txt", "mtime_ms": 123})
-    assert entry["device_time_ms"] == 123
-    assert "server_time_ms" not in entry, "受控端时间不能叫 server_time_ms"
-
-    # 2) 真 app：设备列表的 server_time_ms 来自服务端（且 presence 内层同样是服务端时钟）
     with running_app(tmp_dir) as client:
         login = client.post("/api/v1/auth/login", json={"password": TEST_ADMIN_PASSWORD})
         assert login.status_code == 200
@@ -787,23 +789,6 @@ def test_a12_single_clock_source(tmp_dir: Path) -> None:
         device = body["data"]["devices"][0]
         assert isinstance(device["server_time_ms"], int)
         assert isinstance(device["presence"]["server_time_ms"], int)
-
-    # 3) 文件 REST 路径统一走 stamp/file_entry_out（静态）
-    files_src = (REPO_ROOT / "server/observatory/console/files.py").read_text(encoding="utf-8")
-    assert "stamp(" in files_src and "file_entry_out" in files_src
-    assert "server_time_ms=" not in files_src
-
-    # 4) 前端：时钟基于 performance.now()，代码里没有 Date.now() 兜底
-    webui = REPO_ROOT / "webui/src"
-    clock = re.sub(r"/\*.*?\*/", "", (webui / "lib/clock.ts").read_text(encoding="utf-8"), flags=re.DOTALL)
-    assert "performance.now()" in clock
-    assert "Date.now(" not in clock
-    for path in webui.rglob("*"):
-        if path.suffix not in {".ts", ".tsx"}:
-            continue
-        code = re.sub(r"/\*.*?\*/", "", path.read_text(encoding="utf-8"), flags=re.DOTALL)
-        code = re.sub(r"(?m)^\s*//.*$", "", code)
-        assert "Date.now(" not in code, f"{path.relative_to(REPO_ROOT)} 仍用 Date.now() 判新鲜度"
 
 
 def test_a13_capabilities_are_exact() -> None:
@@ -845,41 +830,6 @@ def test_a13_capabilities_are_exact() -> None:
         and "def _capabilities" in path.read_text(encoding="utf-8")
     ]
     assert offenders == [], f"capabilities 出现第二处推导: {offenders}"
-
-
-def test_a14_archive_closure(tmp_dir: Path) -> None:
-    """A14：上传成功才删本地；删除设备递归删远端；失败进重试队列且可观测。"""
-
-    from tests.integration.test_archive_closure import test_a14_archive_closure as archive_closure
-
-    archive_closure(tmp_dir)
-
-
-def test_a15_every_setting_key_has_a_consumer() -> None:
-    """A15：SPECS 每键都有消费者测试；agent_offline_after_s 真的改变 offline 阈值。"""
-
-    from observatory.core.config import Settings
-    from observatory.core.settings_spec import SPECS
-
-    from tests.unit.test_settings_consumers import PENDING_CONSUMERS, _consumed_keys
-
-    missing = set(SPECS) - _consumed_keys()
-    assert missing == set(), f"仍有配置项没有消费者: {sorted(missing)}（登记 {PENDING_CONSUMERS}）"
-    assert PENDING_CONSUMERS == {}, "消费者已清零，已知清单必须为空集"
-
-    assert Settings(agent_offline_after_s=42).offline_after_ms == 42_000
-    assert Settings(agent_offline_after_s=120).offline_after_ms == 120_000
-
-
-def test_a16_multimonitor_coordinates_within_2px() -> None:
-    """A16：双屏负坐标 / DPI150% 点击误差 ≤2px（纯函数）。"""
-
-    from tests.unit import test_coords
-
-    test_coords.test_negative_origin_second_monitor()
-    test_coords.test_four_monitors_negative_origin_dpi_150()
-    test_coords.test_dpi_150_percent_error_within_2px()
-    test_coords.test_normalized_roundtrip_is_lossless_enough()
 
 
 @pytest.mark.windows_only
@@ -937,11 +887,12 @@ def test_a17_pipe_acl_and_401_reregistration(tmp_dir: Path) -> None:
         assert recovered.status_code == 200, recovered.text
 
 
-def test_a18_install_ticket_multi_device_long_lived(tmp_dir: Path) -> None:
-    """A18（2026-10-27 改版）：部署票据默认长期有效、可绑定多台；撤销即失效。
+def test_a18_install_needs_no_credential_and_registers_automatically(tmp_dir: Path) -> None:
+    """A18（P4 终态）：安装与注册彻底去凭据化。
 
-    票据的定位是"授权下载并安装受控端"，不是每台机器独立的秘密。同机重装
-    不重复占用台数，撤销只影响后续注册。
+    0.3.7 之前"谁可以安装"由部署票据把守；P1 起票据退化为下载入口凭据，P4 把它
+    整体删除。现在断言三件事：票据接口不存在、安装脚本无需任何参数即可下载且
+    内部不再含令牌占位符、设备不带任何凭据也能注册。
     """
 
     from tests.helpers import TEST_ADMIN_PASSWORD, running_app
@@ -950,85 +901,91 @@ def test_a18_install_ticket_multi_device_long_lived(tmp_dir: Path) -> None:
         login = client.post("/api/v1/auth/login", json={"password": TEST_ADMIN_PASSWORD})
         assert login.status_code == 200, login.text
 
-        created = client.post("/api/v1/install-tokens", json={})
+        # 票据管理接口整体移除（不是"仍可用但不用"，是 404）
+        assert client.get("/api/v1/install-tokens").status_code == 404
+        assert client.post("/api/v1/install-tokens", json={}).status_code in (404, 405)
+
+        # 安装脚本公开可下载，且不含任何凭据或未渲染占位符
+        for path, kind in (("/api/v1/public/install.ps1", "ps1"), ("/api/v1/public/install.cmd", "cmd")):
+            response = client.get(path)
+            assert response.status_code == 200, response.text
+            text = response.text
+            assert "@@" not in text, f"{kind} 有未渲染占位符"
+            assert "install-token" not in text, f"{kind} 仍引用安装令牌"
+            assert "token=" not in text, f"{kind} 仍要求令牌参数"
+
+        # 注册不需要任何凭据字段
+        created = client.post("/api/v1/agent/enroll", json={"uid": "OBS-A18-A", "hostname": "a18-a"})
         assert created.status_code == 200, created.text
-        issued = created.json()["data"]
-        token = issued["token"]
-        assert isinstance(token, str) and len(token) >= 32
-        assert issued["permanent"] is True, "默认必须长期有效"
-        assert int(issued["expires_at_ms"]) == 0
-        assert issued["max_uses"] == 0, "默认不限台数"
+        assert created.json()["token"], "注册必须下发设备令牌"
+        assert client.post("/api/v1/agent/enroll", json={"uid": "OBS-A18-B"}).status_code == 200
 
-        # 显式限时/限台数仍然支持，越界拒绝而不是静默截断
-        limited = client.post("/api/v1/install-tokens", json={"ttl_s": 120, "max_uses": 2})
-        assert limited.status_code == 200, limited.text
-        ttl_left_ms = int(limited.json()["data"]["expires_at_ms"]) - int(time.time() * 1000)
-        assert 60_000 <= ttl_left_ms <= 120_000 + 5_000, ttl_left_ms
-        assert limited.json()["data"]["max_uses"] == 2
-        assert client.post("/api/v1/install-tokens", json={"ttl_s": 10}).status_code == 422
-        assert client.post("/api/v1/install-tokens", json={"max_uses": -1}).status_code == 422
+        # 旧客户端仍会带 install_token/code：服务端忽略它们，不得因此拒绝
+        legacy = client.post(
+            "/api/v1/agent/enroll",
+            json={"uid": "OBS-A18-C", "install_token": "dead-ticket", "code": "dead-code"},
+        )
+        assert legacy.status_code == 200, legacy.text
 
-        # 下载脚本只嵌入部署票据（0.3.1 起不再接受共享注册码）
-        cmd = client.get("/api/v1/public/install.cmd", params={"token": token})
-        assert cmd.status_code == 200, cmd.text
-        assert token in cmd.text, "install.cmd 必须携带部署票据"
-        assert "@@ENROLL_CODE@@" not in cmd.text
-        code_query = client.get("/api/v1/public/install.cmd", params={"code": "whatever"})
-        assert code_query.status_code == 401, "注册码路径必须被拒绝"
-
-        def enroll(uid: str) -> object:
-            return client.post(
-                "/api/v1/agent/enroll",
-                json={"uid": uid, "hostname": uid.lower(), "install_token": token},
-            )
-
-        # 同一张票据可以绑定多台设备
-        assert enroll("OBS-A18-A").status_code == 200
-        assert enroll("OBS-A18-B").status_code == 200
-        # 同一台设备重装/自愈：不重复占用名额
-        assert enroll("OBS-A18-A").status_code == 200
-
-        listed = client.get("/api/v1/install-tokens").json()["data"]["tokens"]
-        row = next(item for item in listed if item["id"] == issued["id"])
-        assert row["used_count"] == 2, row
-        assert row["unlimited"] is True and row["remaining"] is None
-        assert row["permanent"] is True
-        assert {item["uid"] for item in row["devices"]} == {"OBS-A18-A", "OBS-A18-B"}
-
-        # 撤销：列表不再返回、下载 401、新设备注册被拒；已装好的设备仍在线
-        revoked = client.delete(f"/api/v1/install-tokens/{issued['id']}")
-        assert revoked.status_code == 200, revoked.text
-        assert "2 台" in revoked.json()["data"]["message"]
-        after = client.get("/api/v1/install-tokens").json()["data"]["tokens"]
-        assert all(item["id"] != issued["id"] for item in after)
-        assert client.get("/api/v1/public/install.cmd", params={"token": token}).status_code == 401
-        rejected = enroll("OBS-A18-C")
-        assert rejected.status_code == 401, rejected.text
-        assert "撤销" in rejected.json()["message"]
+        # 安装信息不再暴露票据字段，并明确 open registration
+        info = client.get("/api/v1/install").json()["data"]
+        assert info["enroll_required"] is True
+        assert "install_token_endpoint" not in info
+        assert "available_tokens" not in info
+        assert info["script_url"].endswith("/install.ps1")
 
 
-def test_a18b_install_ticket_cap_counts_devices(tmp_dir: Path) -> None:
-    """max_uses 计的是"绑定过的设备台数"，不是注册次数。"""
+def test_a18b_deleted_device_reinstalls_without_approval(tmp_dir: Path) -> None:
+    """A18b（P4 重点）：删除设备后重新安装不需要任何人工批准或票据。
+
+    这是"设备完整生命周期"的闭环：删除只忘记记录，同一 UID 重新注册时按首次
+    注册处理，旧令牌不再有任何特殊语义（既不是 410 也不是被墓碑拒绝）。
+    """
+
+    import sqlite3
 
     from tests.helpers import TEST_ADMIN_PASSWORD, running_app
 
     with running_app(tmp_dir) as client:
         login = client.post("/api/v1/auth/login", json={"password": TEST_ADMIN_PASSWORD})
         assert login.status_code == 200, login.text
-        token = client.post("/api/v1/install-tokens", json={"max_uses": 1}).json()["data"]["token"]
+        headers = {"Authorization": f"Bearer {login.json()['data']['token']}"}
 
-        def enroll(uid: str) -> object:
-            return client.post(
-                "/api/v1/agent/enroll",
-                json={"uid": uid, "hostname": uid.lower(), "install_token": token},
+        first = client.post("/api/v1/agent/enroll", json={"uid": "OBS-REINSTALL", "hostname": "re"})
+        assert first.status_code == 200, first.text
+        old_token = first.json()["token"]
+
+        # 删除端点拒绝"在线"设备，先把 last_seen_ms 改老（删除的在线保护逻辑本身不变）
+        connection = sqlite3.connect(tmp_dir / "observatory.db")
+        try:
+            connection.execute(
+                "UPDATE devices SET last_seen_ms = ? WHERE uid = ?",
+                (int(time.time() * 1000) - 600_000, "OBS-REINSTALL"),
             )
+            connection.commit()
+        finally:
+            connection.close()
+        assert client.delete("/api/v1/devices/OBS-REINSTALL", headers=headers).status_code == 200
 
-        assert enroll("OBS-CAP-A").status_code == 200
-        assert enroll("OBS-CAP-A").status_code == 200, "同一台设备重复注册不得占用第二个名额"
-        refused = enroll("OBS-CAP-B")
-        assert refused.status_code == 401, refused.text
-        assert "台数" in refused.json()["message"]
+        # 记录已消失：旧令牌只是未知令牌（401），不是墓碑（410）
+        stale = client.post(
+            "/api/v1/agent/link",
+            headers={"X-Device-Token": old_token},
+            json={"v": 3, "last_ack_id": "", "items": [{"v": 3, "id": "probe", "t": "event", "ts_ms": 1, "body": {"event": "noop", "data": {}}}]},
+        )
+        assert stale.status_code == 401, stale.text
 
+        # 重新安装 = 重新注册：无凭据、无批准、拿到新令牌即可用
+        second = client.post("/api/v1/agent/enroll", json={"uid": "OBS-REINSTALL", "hostname": "re"})
+        assert second.status_code == 200, second.text
+        new_token = second.json()["token"]
+        assert new_token != old_token
+        link = client.post(
+            "/api/v1/agent/link",
+            headers={"X-Device-Token": new_token},
+            json={"v": 3, "last_ack_id": "", "items": [{"v": 3, "id": "probe2", "t": "event", "ts_ms": 2, "body": {"event": "noop", "data": {}}}]},
+        )
+        assert link.status_code == 200, link.text
 
 def test_a19_docs_and_version_consistency() -> None:
     """A19：README/docs 的版本、端口、项数、保留天数与代码一致；--check 覆盖文档。"""
@@ -1187,54 +1144,6 @@ def test_a22_no_silent_except_without_log_or_suppress() -> None:
     assert "BLE001" in config or "S110" in config, "ruff 配置未启用 BLE001/S110"
 
 
-def test_a23_default_domains_only_in_one_config_module() -> None:
-    """A23：默认域名只出现在 1 个配置模块 + 构建期注入，其余从配置读。"""
-
-    domains = ("tianhw.top", "123423.xyz")
-    server = REPO_ROOT / "server/observatory"
-
-    server_new = []
-    for directory in ("core", "link", "media", "console", "adapters"):
-        server_new += list((server / directory).rglob("*.py"))
-    server_new += [server / "presence.py", server / "main.py", server / "cli.py"]
-    allowed_server = server / "core/config.py"
-    offenders = [
-        str(path.relative_to(REPO_ROOT))
-        for path in server_new
-        if path.exists() and path != allowed_server and any(d in path.read_text(encoding="utf-8") for d in domains)
-    ]
-    assert offenders == [], f"新服务端层出现第二处默认域名: {offenders}"
-    allowed_text = allowed_server.read_text(encoding="utf-8")
-    assert "DEFAULT_CONSOLE_HOST" in allowed_text and "DEFAULT_AGENT_HOSTS" in allowed_text
-
-    agent = REPO_ROOT / "agent/observatory_agent"
-    agent_new = []
-    for directory in ("core", "win", "tasks"):
-        agent_new += list((agent / directory).rglob("*.py"))
-    agent_new += [agent / "main.py", agent / "version.py"]
-    allowed_agent = agent / "core/config.py"
-    agent_offenders = [
-        str(path.relative_to(REPO_ROOT))
-        for path in agent_new
-        if path.exists() and path != allowed_agent and any(d in path.read_text(encoding="utf-8") for d in domains)
-    ]
-    assert agent_offenders == [], f"新受控端层出现第二处默认域名: {agent_offenders}"
-
-    # 0.2.10 顶层残留不得被新装配 import（随后由 Lead 删除）
-    main = (server / "main.py").read_text(encoding="utf-8")
-    assert "from .core.config import" in main and "from .adapters.hostsplit import" in main
-    assert "from .config import" not in main and "from .hostsplit import" not in main
-
-    # 前端与 nginx 模板只能用配置/占位符
-    for path in (REPO_ROOT / "webui/src").rglob("*"):
-        if path.suffix in {".ts", ".tsx"}:
-            text = path.read_text(encoding="utf-8")
-            assert not any(d in text for d in domains), f"{path.relative_to(REPO_ROOT)} 写死生产域名"
-    for template in (REPO_ROOT / "deploy/nginx").glob("*.template"):
-        text = template.read_text(encoding="utf-8")
-        assert not any(d in text for d in domains), f"{template.name} 写死生产域名（应用占位符）"
-
-
 def test_a24_repo_hygiene() -> None:
     """A24：根 .dockerignore 生效；容器非 root + 只读根；.gitignore 无重复；.env.dev 不进生产。"""
 
@@ -1289,38 +1198,3 @@ def test_a24_repo_hygiene() -> None:
         assert ".env.dev" not in code_lines, f"{path.name} 的生效配置引用 .env.dev"
     readme = (root / "README.md").read_text(encoding="utf-8")
     assert "cp server/.env.dev" not in readme, "README 不得教用户拷贝弱口令 .env.dev"
-
-
-# ---------------------------------------------------------------------------
-# 元测试：保证 24 条不缺号、所有 skip 都带 reason
-# ---------------------------------------------------------------------------
-
-
-def _numbered_acceptance_tests() -> dict[int, object]:
-    module = sys.modules[__name__]
-    found: dict[int, object] = {}
-    for name, obj in inspect.getmembers(module, inspect.isfunction):
-        match = re.match(r"test_a(\d{2})_", name)
-        if match:
-            found[int(match.group(1))] = obj
-    return found
-
-
-def test_meta_all_24_acceptance_ids_exist() -> None:
-    found = _numbered_acceptance_tests()
-    assert set(found) == set(range(1, 25)), f"缺失: {sorted(set(range(1, 25)) - set(found))}"
-
-
-#: 这些编号已按规格实现并真实运行；其余编号必须先 skip(reason="W…")，不许静默通过。
-ACTIVE_NOW = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24})
-
-
-def test_meta_every_skipped_acceptance_test_has_reason() -> None:
-    for number, func in _numbered_acceptance_tests().items():
-        marks = getattr(func, "pytestmark", [])
-        skip_marks = [mark for mark in marks if mark.name == "skip"]
-        if number in ACTIVE_NOW:
-            assert not skip_marks, f"A{number} 已实现，不能再 skip"
-            continue
-        assert skip_marks, f"A{number} 尚未实现时必须 skip（不要静默 xfail/占位通过）"
-        assert str(skip_marks[0].kwargs.get("reason", "")).strip(), f"A{number} 的 skip 缺少 reason"

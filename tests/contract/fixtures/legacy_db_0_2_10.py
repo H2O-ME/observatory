@@ -38,8 +38,11 @@ EXPECTED_NEW_COLUMNS = {
     "frames": ("frame_id",),
 }
 
-#: 0.3.0 新增的表（spec §6）
-EXPECTED_NEW_TABLES = ("schema_version", "frame_archives", "install_tokens")
+#: 0.3.x 新增的表（v9 之后仍存在的部分；票据/墓碑表已被 v9 删除）
+EXPECTED_NEW_TABLES = ("schema_version", "frame_archives", "device_token_history")
+
+#: 0.3.x 期间创建、又在 P4(v9) 被删除的表——它们不该出现在迁移后的库里。
+DROPPED_TABLES = ("install_tokens", "install_token_uses", "deleted_devices")
 
 DDL = (
     """CREATE TABLE audit (
@@ -158,6 +161,7 @@ def create_legacy_schema(connection) -> None:
 
 __all__ = [
     "DDL",
+    "DROPPED_TABLES",
     "EXPECTED_NEW_COLUMNS",
     "EXPECTED_NEW_TABLES",
     "JSON_COLUMNS",

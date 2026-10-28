@@ -9,7 +9,6 @@ import asyncio
 import contextlib
 import logging
 import os
-import shutil
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -190,6 +189,24 @@ async def _run_media_retention(app: FastAPI) -> None:
         app.state.retention_task = None
 
 
+async def _retry_pending_purges(app: FastAPI) -> int:
+    """P3: retry device cleansups flagged ``purge_pending_at_ms``.
+
+    A failed media cleanup keeps the device row (so nothing is claimed that did not
+    happen); this pass finishes the job once the media layer recovers.
+    """
+
+    database = getattr(app.state, "db", None)
+    if database is None:
+        return 0
+    try:
+        from .console.device_purge import retry_pending_purges
+    except ImportError:  # pragma: no cover - console always present in the assembly
+        return 0
+    async with database.sessionmaker() as session:
+        return await retry_pending_purges(app, session)
+
+
 async def _housekeeping(app: FastAPI) -> None:
     interval = app.state.settings.housekeeping_interval_s
     app.state.retention_task = None
@@ -200,6 +217,17 @@ async def _housekeeping(app: FastAPI) -> None:
             expired = await app.state.journal.expire_stale()
             if expired:
                 log_event(log, logging.INFO, "housekeeping.commands_expired", count=expired)
+            # P2: a `running` uninstall whose ACK never arrives becomes
+            # `unconfirmed` — "we do not know", never "failed" and never "done".
+            # The device record stays until an operator resolves it.
+            unconfirmed = await app.state.journal.expire_uninstall_acks()
+            if unconfirmed:
+                log_event(log, logging.WARNING, "housekeeping.uninstall_unconfirmed", count=unconfirmed)
+            # P3: retry device records whose media cleanup failed after a
+            # confirmed uninstall (bounded per tick: single SQLite writer).
+            retried = await _retry_pending_purges(app)
+            if retried:
+                log_event(log, logging.INFO, "housekeeping.purge_retried", count=retried)
             media = getattr(app.state, "media", None)
             if media is not None:
                 task = app.state.retention_task
@@ -300,7 +328,7 @@ def _make_agent_event_sink(app: FastAPI) -> Any:
     async def sink(kind: str, device_id: int, uid: str, body: dict[str, Any]) -> None:
         database = getattr(app.state, "db", None)
         if kind == "uninstall_ack":
-            await _handle_uninstall_ack(app, int(device_id), uid)
+            await _handle_uninstall_ack(app, int(device_id), uid, body)
         elif kind == "command_updated":
             from .console.events import EVENT_COMMAND_UPDATED, emit
 
@@ -324,31 +352,38 @@ def _make_agent_event_sink(app: FastAPI) -> Any:
     return sink
 
 
-async def _handle_uninstall_ack(app: FastAPI, device_id: int, uid: str) -> None:
-    """Persist ``uninstalled_at_ms``, audit, drop the session and revoke grants."""
+async def _handle_uninstall_ack(app: FastAPI, device_id: int, uid: str, body: dict[str, Any] | None = None) -> None:
+    """Legacy uplink path: delegate to the one confirmation implementation (P2).
 
-    from .console import audit as console_audit
-    from .console.control import revoke_device_grants
+    0.3.7 agents report completion as an ``uninstall_ack`` envelope carried by the
+    outbox. New agents POST to ``/api/v1/agent/uninstall/ack`` instead, because
+    the purge helper is about to delete the outbox file. Both paths converge in
+    ``console.uninstall_ack.confirm_uninstall`` so "confirm" means one thing.
+    """
+
+    from .console.uninstall_ack import confirm_uninstall
     from .core.models import Device
 
     database = getattr(app.state, "db", None)
-    if database is not None:
-        async with database.sessionmaker() as session:
-            device = await session.get(Device, device_id)
-            if device is not None and not device.uninstalled_at_ms:
-                device.uninstalled_at_ms = clock.now_ms()
-                await session.commit()
-            await console_audit.record(
-                session,
-                action=console_audit.ACTION_DEVICE_UNINSTALL,
-                device=device,
-                device_uid=uid,
-                detail={"stage": "acked", "protocol": 3},
-            )
-    links = getattr(app.state, "links", None)
-    if links is not None:
-        await links.unregister(device_id)
-    await revoke_device_grants(app, device_id, reason="device uninstalled")
+    if database is None:
+        return
+    command_id = ""
+    if isinstance(body, dict):
+        command_id = str(body.get("command_id") or "")
+    async with database.sessionmaker() as session:
+        device = await session.get(Device, device_id)
+        if device is None:
+            log_event(log, logging.WARNING, "uninstall.ack_unknown_device", device_id=device_id)
+            return
+        await confirm_uninstall(
+            app,
+            session,
+            device,
+            command_id=command_id or None,
+            source="legacy_uplink",
+            stage="acked",
+        )
+    del uid
 
 
 def _wire_frame_events(app: FastAPI) -> None:
@@ -564,6 +599,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.link_ip_limiter = RateLimiter(settings.link_ip_rate_limit, settings.link_rate_window_s)
     app.state.enroll_limiter = RateLimiter(settings.enroll_rate_limit, settings.enroll_rate_window_s)
     app.state.install_limiter = RateLimiter(settings.enroll_rate_limit, settings.enroll_rate_window_s)
+    # P1: enrolment rates are per-IP / per-UID / global sliding windows. They are
+    # temporary throttles only — nothing here writes a lasting refusal, so a
+    # bucket that expires can never turn into a ban.
+    app.state.enroll_ip_limiter = RateLimiter(
+        settings.enroll_ip_rate_limit, settings.enroll_rate_window_s
+    )
+    app.state.enroll_uid_limiter = RateLimiter(
+        settings.enroll_uid_rate_limit, settings.enroll_rate_window_s
+    )
+    app.state.enroll_global_limiter = RateLimiter(
+        settings.enroll_global_rate_limit, settings.enroll_rate_window_s
+    )
 
     app.add_middleware(
         HostSplit,

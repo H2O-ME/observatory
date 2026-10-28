@@ -1,7 +1,7 @@
 # Observatory 0.3.0 生产部署
 #
 #   cp server/.env.example server/.env   # 填好密钥（生产不要用 .env.dev）
-#   docker compose -f deploy/docker-compose.yml --env-file server/.env up -d --build
+#   OBS_IMAGE_TAG=ghcr.io/h2o-me/observatory:v0.3.7 docker compose -f deploy/docker-compose.yml --env-file server/.env up -d
 #
 # 0.3.0 安全默认值（A11/A24）：
 #   * 8443 默认只绑 127.0.0.1，由本机 nginx 反代；只有 CDN/上游代理直连时才设

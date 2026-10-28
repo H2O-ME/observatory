@@ -48,6 +48,10 @@ class Device(Base):
     enrolled_at_ms: Mapped[int] = mapped_column(BigInteger, default=now_ms)
     last_seen_ms: Mapped[int] = mapped_column(BigInteger, default=0, index=True)
     uninstalled_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    #: P3: set when a confirmed uninstall could not finish purging (media layer
+    #: busy/missing). Housekeeping retries and the console shows "cleaning up"
+    #: instead of claiming a clean delete that did not happen.
+    purge_pending_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     last_result_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     #: Changes across an agent reboot; A2 uses it to prove a restart happened.
@@ -102,7 +106,13 @@ class Command(Base):
     __table_args__ = (Index("ix_commands_device_status", "device_id", "status"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    device_id: Mapped[int] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"), index=True)
+    #: Nullable since P3: a confirmed uninstall removes the device record, and the
+    #: command (the evidence that the purge happened) must survive that delete.
+    #: ``device_uid`` keeps the row attributable after ``device_id`` goes NULL.
+    device_id: Mapped[int | None] = mapped_column(
+        ForeignKey("devices.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    device_uid: Mapped[str] = mapped_column(String(64), default="", index=True)
     type: Mapped[str] = mapped_column(String(48))
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
@@ -183,95 +193,37 @@ class FrameArchive(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
-class InstallToken(Base):
-    """部署票据：可长期有效、可绑定多台设备的一次性凭据池。
+class DeviceTokenHistory(Base):
+    """A superseded device token, accepted for a short grace window (P1).
 
-    语义（2026-10-27 改版）：``max_uses`` 是**可绑定设备数**而不是"注册次数"——
-    同一台设备重复注册（401 自愈、重装）不会重复计数，见
-    :class:`InstallTokenUse`。``max_uses = 0`` 表示不限台数；
-    ``expires_at_ms = 0`` 表示长期有效（需显式撤销）。
+    Written on every credential rotation. It exists for one reason: an enrolment
+    can commit on the server and still lose its response, and the agent then
+    retries with the *old* token. Without a grace window that retry would be
+    rejected as unknown and the device would be locked out of its own record.
+
+    Rows cascade with the device, so deleting a device also forgets its old
+    tokens: after a delete the previous token is simply unknown (401), which is
+    the same answer any other unknown token gets. Nothing here can ban a device.
     """
 
-    __tablename__ = "install_tokens"
+    __tablename__ = "device_token_history"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    token_hash: Mapped[str] = mapped_column(String(128), unique=True, index=True)
-    created_by: Mapped[str] = mapped_column(String(64), default="console")
-    created_at_ms: Mapped[int] = mapped_column(BigInteger, default=now_ms)
-    expires_at_ms: Mapped[int] = mapped_column(BigInteger, default=0)
-    used_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    used_device_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    max_uses: Mapped[int] = mapped_column(Integer, default=1)
-    #: 已绑定的设备数量（由 install_token_uses 去重维护，见 enroll）。
-    used_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    last_used_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    #: 软撤销：保留行与绑定记录用于审计，列表默认不展示。
-    revoked_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-
-    @property
-    def unlimited_uses(self) -> bool:
-        return int(self.max_uses or 0) <= 0
-
-    @property
-    def permanent(self) -> bool:
-        return int(self.expires_at_ms or 0) <= 0
-
-    @property
-    def remaining_uses(self) -> int | None:
-        """还能绑定几台设备；``None`` 表示不限。"""
-
-        if self.unlimited_uses:
-            return None
-        return max(0, int(self.max_uses) - int(self.used_count or 0))
-
-
-class InstallTokenUse(Base):
-    """一条"某票据绑定过某设备"的记录。
-
-    ``(token_id, device_id)`` 唯一：同一台机器重装/自愈注册只更新这一行，
-    不会重复消耗名额。"已绑定 N 台"和"绑定的是哪些设备"都来自这里。
-    """
-
-    __tablename__ = "install_token_uses"
-    __table_args__ = (UniqueConstraint("token_id", "device_id", name="ux_install_token_uses_pair"),)
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    token_id: Mapped[int] = mapped_column(Integer, index=True)
-    device_id: Mapped[int] = mapped_column(Integer, index=True)
-    used_at_ms: Mapped[int] = mapped_column(BigInteger, default=now_ms)
-    ip: Mapped[str] = mapped_column(String(64), default="")
-    hostname: Mapped[str] = mapped_column(String(128), default="")
-
-
-class DeletedDevice(Base):
-    """Delete tombstone (0.3.1 F9, resurrection semantics amended same release).
-
-    A deleted device's token hash lives on here so the link directory can answer
-    ``410 GONE`` instead of ``401`` — the agent treats GONE as terminal and stops
-    retrying. Enrolment refuses to resurrect the uid **with old credentials**;
-    a freshly minted one-time install token pierces the tombstone (the admin
-    minting it is the re-admission consent) and burns the row inside the claim
-    transaction. Rows are tiny and carry no expiry by design.
-    """
-
-    __tablename__ = "deleted_devices"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    uid: Mapped[str] = mapped_column(String(64), index=True)
+    device_id: Mapped[int] = mapped_column(
+        ForeignKey("devices.id", ondelete="CASCADE"), index=True
+    )
     token_hash: Mapped[str] = mapped_column(String(128), unique=True)
-    deleted_at_ms: Mapped[int] = mapped_column(BigInteger, default=now_ms)
+    superseded_at_ms: Mapped[int] = mapped_column(BigInteger, default=now_ms)
 
 
 __all__ = [
     "AuditEntry",
     "Base",
     "Command",
-    "DeletedDevice",
     "Device",
+    "DeviceTokenHistory",
     "Frame",
     "FrameArchive",
-    "InstallToken",
-    "InstallTokenUse",
     "Package",
     "Setting",
 ]

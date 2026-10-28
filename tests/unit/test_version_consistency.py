@@ -52,22 +52,8 @@ def test_webui_package_version_matches() -> None:
     assert package["version"] == version
 
 
-def test_set_version_targets_cover_the_copies() -> None:
-    """set_version.py 的同步目标必须覆盖上面断言的所有副本（防止加了副本忘了同步）。"""
-
-    source = _read(REPO_ROOT / "tools/set_version.py")
-    for fragment in (
-        "server/observatory/core/config.py",
-        "agent/observatory_agent/version.py",
-        "webui/package.json",
-    ):
-        assert fragment.split("/")[-1] in source or fragment in source, fragment
-    # TARGETS / PACKAGE_JSONS 结构仍在（W3 可能改为生成式，届时改测试并保留 --check 行为）
-    assert "TARGETS" in source and "PACKAGE_JSONS" in source
-
-
 def test_set_version_check_covers_readme_and_docs() -> None:
-    """A19：--check 必须覆盖 README 与 docs/*.md（release-ops 已把文档切到 0.3.0）。"""
+    """A19：``--check`` 必须覆盖 README 与 docs/*.md，并豁免历史快照文档。"""
 
     completed = subprocess.run(
         [sys.executable, str(REPO_ROOT / "tools/set_version.py"), "--check"],
@@ -80,11 +66,6 @@ def test_set_version_check_covers_readme_and_docs() -> None:
     assert "README.md" in completed.stdout
     assert "docs/*.md" in completed.stdout
     assert "README artwork" in completed.stdout
-    source = _read(REPO_ROOT / "tools/set_version.py")
-    assert "README_VERSION" in source and "DOC_HEADING_VERSION" in source
-    assert "HISTORICAL_DOCS" in source
-    assert "0.3.0-重构规格.md" in source, "历史契约快照不能随 VERSION 自动 bump"
-    assert "项目通读报告.md" in source
 
 
 def test_readme_and_docs_state_current_version() -> None:

@@ -41,8 +41,6 @@ import type {
   FileOpResult,
   FrameList,
   InstallInfo,
-  InstallToken,
-  InstallTokenCreated,
   LatestFrame,
   LiveEvent,
   LoginResult,
@@ -691,29 +689,10 @@ export const api = {
     });
   },
 
-  // ---- install / enrolment tokens ------------------------------------
+  // ---- install (open registration) -----------------------------------
   /** Installer artifacts + enrolment note (the console's `GET /install`). */
   getInstall() {
     return request<InstallInfo>(`${API_ROOT}/install`, { opKey: "install.get" });
-  },
-  listInstallTokens() {
-    return request<{ tokens: InstallToken[] }>(`${API_ROOT}/install-tokens`, {
-      opKey: "install.tokens.list",
-    });
-  },
-  /** Mint a one-shot enrolment token. The plaintext token is returned once. */
-  createInstallToken(ttlS?: number) {
-    return request<InstallTokenCreated>(`${API_ROOT}/install-tokens`, {
-      method: "POST",
-      json: ttlS === undefined ? {} : { ttl_s: ttlS },
-      opKey: "install.tokens.create",
-    });
-  },
-  deleteInstallToken(id: number) {
-    return request<OkResult>(`${API_ROOT}/install-tokens/${id}`, {
-      method: "DELETE",
-      opKey: "install.tokens.delete",
-    });
   },
 
   // ---- backup / archive (A14) ----------------------------------------

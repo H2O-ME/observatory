@@ -1,32 +1,15 @@
-<#
-.SYNOPSIS
-    Observatory 受控端安装程序 / Observatory agent installer.
-
-.DESCRIPTION
-    一次性安装，之后自动更新，不再需要重新安装。
-
-    * 只会在本脚本首次提升权限时弹一次 UAC；安装完成后所有操作（自动更新、
-      远程卸载、远程控制）都在 SYSTEM 服务内完成，不再弹 UAC。
-    * 双域名热备：control.tianhw.top 与 observatory.123423.xyz 互为备份，
-      任意一个可达即可完成安装与上报。
-    * 版本号在开头显著显示，且与服务器、控制台完全一致。
-    * 安装凭据只接受**部署票据**（默认长期有效、可绑定多台设备；撤销后失效）；
-      旧版共享注册码已于 0.3.1 随 0.2.x 兼容层一并移除。
-
-.PARAMETER Token
-    部署票据（必填，控制台「安装」页生成；默认长期有效、可绑定任意多台设备，
-    管理员撤销后立即失效）。
-
-.PARAMETER Uninstall
-    卸载受控端（需要提权一次）。
-
-.EXAMPLE
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://control.tianhw.top/api/v1/public/install.ps1?token=xxxx' | iex"
-#>
+# Observatory 受控端安装程序 / Observatory agent installer.
+#
+# 零凭据安装：脚本地址固定、下载与注册都不需要令牌。设备身份来自本机的
+# MachineGuid，注册时服务端自动建立设备记录并下发设备令牌。
+#
+# 用法一（推荐，双击）：下载 Observatory-Install-<版本>.cmd，双击运行。
+# 用法二（命令行）：
+#   powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://<控制台域名>/api/v1/public/install.ps1' | iex"
+# 用法三（离线/U 盘）：把这个脚本与安装包放在同一目录，用 -Package 指定。
 
 [CmdletBinding()]
 param(
-    [string]$Token = '@@INSTALL_TOKEN@@',
     [string[]]$BaseUrls = @(@@BASE_URLS@@),
     # 本地安装包（U 盘离线安装）：给了就完全不下载，直接用它。
     [string]$Package = '',
@@ -38,9 +21,6 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-
-# 渲染器未注入的占位符（@@...@@）视为“未提供”。
-$HasToken = [bool]($Token -and $Token -notlike '@@*')
 
 # ----------------------------------------------------------------- constants --
 $ProductName    = 'Observatory'
@@ -84,9 +64,6 @@ function Show-Banner {
     Write-Host "     目标机 : $env:COMPUTERNAME" -ForegroundColor Gray
     Write-Host "     安装到 : $InstallDir" -ForegroundColor Gray
     Write-Host "     服务器 : $($BaseUrls -join '  |  ')" -ForegroundColor Gray
-    if ($HasToken) {
-        Write-Host "     凭据   : 部署票据（长期、可复用多台）" -ForegroundColor Gray
-    }
     Write-Host '  ==================================================' -ForegroundColor DarkGray
     Write-Host ''
 }
@@ -138,13 +115,12 @@ function Request-Elevation {
     <# 唯一的 UAC 提示发生在这里。 #>
     # 本地脚本（U 盘离线安装）直接原地提权重跑：不联网、不重新下载脚本，
     # 也把 -Package 一起带过去。只有 `irm | iex` 这种没有脚本路径的运行方式
-    # 才需要回服务器取一份带票据的脚本。
+    # 才需要回服务器取一份脚本。
     if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) {
         $arguments = @(
             '-NoProfile',
             '-ExecutionPolicy', 'Bypass',
-            '-File', ("`"{0}`"" -f $PSCommandPath),
-            '-Token', ("`"{0}`"" -f $Token)
+            '-File', ("`"{0}`"" -f $PSCommandPath)
         )
         if ($Package) {
             # 提权子进程的工作目录会变，先把本地包路径钉成绝对路径。
@@ -172,9 +148,8 @@ function Request-Elevation {
         Write-Fail '两个域名都不可达，无法继续安装。请检查网络或代理。'
         exit 3
     }
-    # 提权子进程从服务器重新下载脚本；凭据放在 query 里（撤销后失效）。
-    $childQuery = "token=$([uri]::EscapeDataString($Token))"
-    $childUrl = "$primary/api/v1/public/install.ps1?$childQuery"
+    # 提权子进程从服务器重新下载脚本（脚本本身不含任何凭据）。
+    $childUrl = "$primary/api/v1/public/install.ps1"
     $arguments = @(
         '-NoProfile',
         '-ExecutionPolicy', 'Bypass',
@@ -258,8 +233,8 @@ function Install-Service {
     if (-not (Test-Path $exe)) { throw "找不到 $exe" }
 
     Write-Step '注册并启动服务'
-    # 部署票据由受控端在注册时提交；同一张票据可注册任意多台机器。
-    $arguments = @('--install', '--exe', "`"$exe`"", '--install-token', $Token)
+    # 注册不需要任何凭据：受控端自己用 MachineGuid 生成设备标识，服务端自动建记录。
+    $arguments = @('--install', '--exe', "`"$exe`"")
     foreach ($url in $BaseUrls) { $arguments += @('--base-url', $url) }
 
     $output = & $exe @arguments 2>&1
@@ -318,10 +293,6 @@ if ($Uninstall) {
     exit 0
 }
 
-if (-not $HasToken) {
-    Write-Fail '缺少安装凭据（部署票据）。请从控制台复制完整安装命令。'
-    exit 2
-}
 if (-not $BaseUrls -or $BaseUrls.Count -eq 0) {
     Write-Fail '缺少服务器地址。'
     exit 2
@@ -399,7 +370,7 @@ try {
 
     $deviceUid = ''
     $configPath = Join-Path $DataDir 'config.json'
-    for ($i = 0; $i -lt 10; $i++) {
+    for ($i = 0; $i -lt 15; $i++) {
         Start-Sleep -Milliseconds 600
         if (Test-Path $configPath) {
             try {

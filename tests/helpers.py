@@ -62,28 +62,47 @@ def running_app(tmp_dir: Path) -> Iterator[object]:
         yield client
 
 
-def enroll_token(client: object, *, uid: str = "OBS-ENROLL-TEST") -> str:
-    """走真实安装链路：控制台签发一次性令牌 → v3 enroll → 返回设备令牌。"""
+def enroll_device(
+    client: object,
+    *,
+    uid: str = "OBS-ENROLL-TEST",
+    prev_token: str = "",
+    code: str = "",
+    payload_extra: dict | None = None,
+) -> dict:
+    """Enrol without any install ticket (P1 semantics) and return the raw body.
 
-    login = client.post("/api/v1/auth/login", json={"password": TEST_ADMIN_PASSWORD})
-    assert login.status_code == 200, login.text
-    issued = client.post("/api/v1/install-tokens", json={"ttl_s": 600})
-    assert issued.status_code == 200, issued.text
-    install_token = issued.json()["data"]["token"]
-    payload = {
+    ``prev_token`` is offered as ownership proof (``X-Device-Token``); a brand-new
+    UID needs none. ``code`` is the optional deployment admission key.
+    """
+
+    payload: dict = {
         "uid": uid,
-        "hostname": "enroll-test",
+        "hostname": f"{uid.lower()}-host",
         "os_name": "Windows",
         "os_version": "11",
         "arch": "AMD64",
         "agent_version": "0.3.1",
-        "install_token": install_token,
     }
-    response = client.post("/api/v1/agent/enroll", json=payload)
+    if code:
+        payload["code"] = code
+    payload.update(payload_extra or {})
+    headers = {"X-Device-Token": prev_token} if prev_token else {}
+    response = client.post("/api/v1/agent/enroll", json=payload, headers=headers)
     assert response.status_code == 200, response.text
-    token = response.json().get("token")
-    assert isinstance(token, str) and token
-    return token
+    body = response.json()
+    assert isinstance(body.get("token"), str) and body["token"]
+    return body
+
+
+def enroll_token(client: object, *, uid: str = "OBS-ENROLL-TEST") -> str:
+    """Backwards-compatible alias: enrol a *new* device, return its token.
+
+    The name is kept so existing tests do not churn; tickets are no longer part
+    of enrolment (P1), so this is just :func:`enroll_device`.
+    """
+
+    return str(enroll_device(client, uid=uid)["token"])
 
 
 def seed_device(
@@ -220,6 +239,7 @@ __all__ = [
     "TEST_AGENT_HOSTS",
     "TEST_CONSOLE_HOST",
     "TEST_SECRET_KEY",
+    "enroll_device",
     "enroll_token",
     "prepare_env",
     "run_win_smoke",

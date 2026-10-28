@@ -107,7 +107,7 @@ INBOX_PUT_TIMEOUT_S: Final[float] = 10.0
 #: 的基数（15s→30s→…→3600s 封顶）。
 REAUTH_RETRY_S: Final[float] = 15.0
 #: F32：一次成功的重新注册结果在这么长时间内被并发的 401 直接复用，
-#: 不再重复 enroll（install_token 是一次性的，重复消费会烧掉令牌）。
+#: 不再重复 enroll（三处载体同时 401 时只该打一次注册端点）。
 REAUTH_RESULT_REUSE_S: Final[float] = 60.0
 #: F32：重新注册连续失败的退避上限。
 REAUTH_BACKOFF_MAX_S: Final[float] = 3600.0
@@ -404,8 +404,8 @@ class Link:
         self._last_downlink_id = self._outbox.last_downlink_id
         self._terminated = False
         #: F32：重新注册单飞（single-flight）。载体循环、帧循环、WS 探测三处
-        #: 都会在 401 时并发调用 ``_reauth_or_wait``，没有互斥的话两次并发
-        #: enroll 会把一次性 install_token 烧掉，设备永久 401。
+        #: 都会在 401 时并发调用 ``_reauth_or_wait``，没有互斥的话一次令牌失效
+        #: 会变成三次并发注册，白白放大服务端与限流压力。
         self._reauth_lock = asyncio.Lock()
         #: 最近一次成功重新注册的失效时刻（``loop.time()`` 基准）；在此之前
         #: 并发的 401 直接复用结果。
@@ -710,8 +710,6 @@ class Link:
     async def enroll(
         self,
         *,
-        code: str,
-        install_token: str = "",
         device_uid: str,
         hostname: str,
         os_name: str,
@@ -721,19 +719,17 @@ class Link:
         sysinfo: Mapping[str, Any] | None,
         sessions: list[Mapping[str, Any]] | None,
     ) -> dict[str, Any]:
-        """入网注册（0.2.x 与 0.3.0 共用的引导端点）。
+        """入网注册。
 
         注册是"链路上线之前"的一次性动作，不是第二条心跳路径：拿到令牌后所有
         上行一律走 ``send``/``enqueue_frame``。
 
-        ``install_token``（A18，部署票据）与 ``code``（旧服务端共享注册码）
-        **同时发送**：新服务端优先校验安装令牌，旧服务端只认 ``code``，这样同一份
-        受控端二进制在 0.2.x 与 0.3.0 服务端上都能入网（N2 零重装升级）。
+        注册不需要任何凭据（0.3.7 / P4）：服务端按 ``uid`` 自动建立或复用设备
+        记录并下发新的设备令牌。``uid`` 只是标识符，**不是**秘密——请求里没有
+        任何"证明有权注册"的字段，这正是开放注册的含义。
         """
 
         body = {
-            "code": str(code),
-            "install_token": str(install_token or ""),
             "uid": str(device_uid),
             "hostname": str(hostname),
             "os_name": str(os_name),
@@ -1464,9 +1460,9 @@ class Link:
     async def _reauth_or_wait(self) -> None:
         """401 之后走一次重新注册（A17）；全程单飞（single-flight）+ 指数退避。
 
-        F32：载体循环、帧循环、WS 探测三处都会在 401 时调用本方法。注册是
-        **一次性 install_token** 的消费动作，两个循环并发 enroll 会把令牌烧掉、
-        设备永久 401，因此全程持一把 ``asyncio.Lock`` 串行化：
+        F32：载体循环、帧循环、WS 探测三处都会在 401 时调用本方法。三处同时
+        401 时并发注册只会放大服务端压力，因此全程持一把 ``asyncio.Lock``
+        串行化：
 
         - 拿到锁后若 ``REAUTH_RESULT_REUSE_S`` 内已有成功结果，直接复用返回，
           不再重复 enroll；

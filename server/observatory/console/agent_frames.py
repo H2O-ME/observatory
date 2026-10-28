@@ -19,11 +19,10 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.clock import now_ms
-from ..core.crypto import DEVICE_TOKEN_HEADER, device_token_hash
+from ..core.crypto import DEVICE_TOKEN_HEADER
 from ..core.db import get_session
 from ..core.errors import AppError
 from ..core.models import Device
@@ -46,25 +45,25 @@ async def require_device_token(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> Device:
+    """Authenticate ``X-Device-Token`` through the one shared decision point.
+
+    P1: this used to re-implement the token lookup *and* the delete-tombstone
+    branch (returning 410 for a deleted device). The lookup now lives in
+    :mod:`observatory.core.device_auth`, so the frame path and the link path can
+    never disagree. Answering 401 for an unknown token is what lets the agent's
+    frame loop trigger a re-enrol; a deleted record is simply unknown.
+    """
+
+    from ..core import device_auth
+
     token = request.headers.get(DEVICE_TOKEN_HEADER, "").strip()
     if not token:
         raise AppError.auth("缺少设备令牌")
-    digest = device_token_hash(token, request.app.state.settings.secret_key)
-    device = (await session.execute(select(Device).where(Device.token_hash == digest))).scalars().first()
+    device = await device_auth.load_device(
+        session, token, settings=request.app.state.settings
+    )
     if device is None:
-        # P1（2026-10 业务审查）：已删除设备的 token 命中的是墓碑——必须回
-        # 410 终态而不是 401。链路目录早已这么做（F9），但帧上传路径此前只查
-        # devices 表，已删设备的帧循环会陷入 401 → 重注册 → 401 死循环。
-        from ..core.models import DeletedDevice
-
-        tombstone = (
-            await session.execute(select(DeletedDevice).where(DeletedDevice.token_hash == digest))
-        ).scalars().first()
-        if tombstone is not None:
-            raise AppError.gone("该设备已删除")
         raise AppError.auth("设备令牌无效")
-    if device.uninstalled_at_ms:
-        raise AppError.gone("该设备已卸载")
     return device
 
 

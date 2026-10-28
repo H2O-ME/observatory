@@ -16,11 +16,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import presence
-from ..core.settings_spec import SettingsError, normalize
+from ..core.settings_spec import PER_DEVICE_KEYS, SettingsError, normalize
 from ..core.db import get_session
-from ..core.errors import AppError
-from ..core.clock import now_ms as clock_ms
-from ..core.models import Command, DeletedDevice, Device, Frame
+from ..core.errors import AppError, ErrorCode
+from ..core.models import Command, Device, Frame
 from . import audit
 from .deps import client_ip, get_journal, get_links, get_settings, require_admin, store
 from .dto import budget_ms, command_out, device_out, device_state, stamp
@@ -56,7 +55,11 @@ CONFIRM_REQUIRED = frozenset({"uninstall", "restart_agent", "reboot", "poweroff"
 _FILE_OPS = frozenset(
     {"list", "stat", "mkdir", "delete", "rename", "copy", "move", "search", "drives", "read", "write", "hash"}
 )
-_PENDING_STATUSES = ("pending", "dispatched")
+#: Statuses that mean "an uninstall is under way". ``running`` (P2) covers the
+#: window between the agent accepting the command and its final ACK; without it
+#: presence flipped back to "online" the moment the handler returned
+#: ``{started: true}``, i.e. while the purge helper was still at work.
+_PENDING_STATUSES = ("pending", "dispatched", "running")
 
 
 async def load_device(session: AsyncSession, uid: str) -> Device:
@@ -175,6 +178,7 @@ async def create_command(
         body,
         actor=actor,
         timeout_ms=deadline_ms,
+        device_uid=str(device.uid or ""),
     )
     links = get_links(request)
     agent_session = links.get(device.id)
@@ -228,6 +232,33 @@ async def list_devices(
     )
 
 
+@router.get("/history/records")
+async def device_history(
+    request: Request,
+    uid: str = Query(default="", description="只查某台设备；留空返回全部历史"),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """P3: command history of devices whose record no longer exists.
+
+    Declared **before** ``/{uid}`` on purpose: FastAPI matches in declaration
+    order, and ``/history/records`` would otherwise be read as a device uid.
+
+    This is where "the uninstall really happened" is still answerable after the
+    activity record is gone — the command keeps its ``device_uid`` and its audit
+    entry stays put (v8 migration made ``commands.device_id`` nullable).
+    """
+
+    commands = await get_journal(request).list_by_uid(uid or None, limit=limit, offset=offset)
+    return stamp(
+        {
+            "commands": [command_out(command) for command in commands],
+            "uid": uid,
+        }
+    )
+
+
 @router.get("/{uid}")
 async def get_device(
     uid: str,
@@ -264,7 +295,6 @@ async def patch_device(
         if not isinstance(submitted, dict):
             raise AppError.bad_request("settings 必须是对象")
         overrides = dict(device.settings or {})
-        from ..core.config import PER_DEVICE_KEYS
 
         for key, value in submitted.items():
             if key not in PER_DEVICE_KEYS:
@@ -306,39 +336,25 @@ async def delete_device(
     if snapshot.get("state") in {"online", "degraded", "uninstalling"}:
         raise AppError.bad_request("设备仍在线，请先远程卸载再删除记录")
 
-    agents = get_links(request)
-    await agents.unregister(device.id)
-    await audit.record(
+    # P1/P3: one implementation for both delete paths (manual delete here, and the
+    # automatic purge after a confirmed uninstall). Deletion forgets the record;
+    # it is not a ban — no tombstone is written, so a reinstall registers again.
+    from .device_purge import purge_device_record
+
+    result = await purge_device_record(
+        request.app,
         session,
-        action=audit.ACTION_DEVICE_DELETE,
-        device=device,
+        device,
+        reason="manual",
+        purge_remote=bool(purge_remote),
         ip=client_ip(request),
-        detail={"purge_remote": bool(purge_remote)},
     )
-    try:
-        from ..media import ingest as media_ingest
-    except ImportError as exc:  # pragma: no cover - W0 skeleton guard
-        raise AppError.internal("媒体层未就绪，拒绝在未清理画面数据的情况下删除设备") from exc
-    media_result = await media_ingest.delete_device_data(
-        session, device, await store().load(session), purge_remote=bool(purge_remote)
-    )
-    # F9: leave a tombstone so the running agent gets 410 GONE (terminal) instead
-    # of 401 (infinite re-enroll loop), and enrolment cannot resurrect the uid.
-    session.add(
-        DeletedDevice(
-            uid=device.uid,
-            token_hash=device.token_hash or "",
-            deleted_at_ms=clock_ms(),
+    if not result.get("ok"):
+        # The row is kept and flagged; say so instead of claiming a clean delete.
+        raise AppError.internal(
+            f"设备记录保留：画面数据清理失败，将在后台重试（{result.get('error') or '未知原因'}）"
         )
-    )
-    await session.delete(device)
-    await session.commit()
-    from .control import revoke_device_grants
-    from .events import EVENT_DEVICE_REMOVED, emit
-
-    await revoke_device_grants(request.app, device.id, reason="device deleted")
-
-    await emit(EVENT_DEVICE_REMOVED, device_uid=uid, data={"purge_remote": bool(purge_remote)})
+    media_result = dict(result.get("media") or {})
     archive_error = str(media_result.get("archive_error") or "")
     if archive_error:
         # The local tree and frame rows are gone, but the remote copy is not;
@@ -366,6 +382,15 @@ async def uninstall_device(
         raise AppError.bad_request("需要确认才能真正卸载")
     if device.uninstalled_at_ms:
         raise AppError.bad_request("该设备已经卸载过")
+    # P2 invariant: at most one open uninstall per device. Two concurrent
+    # requests would otherwise produce two commands and an ambiguous legacy ACK.
+    if await uninstall_pending(session, device.id):
+        raise AppError(
+            ErrorCode.BAD_REQUEST,
+            "该设备已有进行中的卸载任务（uninstall.in_progress）",
+            http_status=409,
+            retryable=True,
+        )
     _effective, snapshot = await device_state_for(session, device)
     if not snapshot.get("capabilities", {}).get("uninstall"):
         raise AppError.bad_request(snapshot.get("reason") or "设备当前不在线，无法下发卸载指令")
@@ -491,7 +516,7 @@ async def get_command(
 ) -> dict[str, Any]:
     device = await load_device(session, uid)
     command = await get_journal(request).get(command_id)
-    if command is None or int(command.device_id) != device.id:
+    if command is None or command.device_id is None or int(command.device_id) != int(device.id):
         raise AppError.gone("命令不存在")
     return command_out(command)
 

@@ -69,13 +69,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stop", action="store_true", help="停止服务")
     parser.add_argument("--status", action="store_true", help="查看服务状态")
     parser.add_argument("--doctor", action="store_true", help="打印诊断信息")
-    parser.add_argument("--enroll-code", dest="enroll_code", default="", help="注册码")
-    parser.add_argument(
-        "--install-token",
-        dest="install_token",
-        default="",
-        help="一次性安装令牌（install.ps1 传入；与注册码二选一，服务端优先校验令牌）",
-    )
+    # 兼容：旧安装脚本仍会传这两个参数。0.3.7 起注册开放，它们是空操作，
+    # 保留只为让"老脚本 + 新二进制"能装完，不再写进配置（也不打印）。
+    parser.add_argument("--enroll-code", dest="enroll_code", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--install-token", dest="install_token", default="", help=argparse.SUPPRESS)
     parser.add_argument("--base-url", dest="base_urls", action="append", default=[], help="服务器地址（可多次）")
     parser.add_argument("--exe", default="", help="注册服务时使用的可执行文件路径")
     return parser
@@ -228,10 +225,7 @@ def _apply_cli_config(args: argparse.Namespace) -> None:
 
 def _cli_config_changes(args: argparse.Namespace) -> dict:
     changes: dict = {}
-    if args.enroll_code:
-        changes["enroll_code"] = args.enroll_code
-    if args.install_token:
-        changes["install_token"] = args.install_token
+    # --enroll-code / --install-token 已废弃：注册不需要凭据，旧脚本传了也不写配置。
     if args.base_urls:
         changes["base_urls"] = [str(url).rstrip("/") for url in args.base_urls if str(url).strip()]
     return changes
@@ -300,7 +294,6 @@ def _run_doctor() -> int:
     print(f"设备标识        : {config.device_uid}")
     print(f"本次 boot_id    : {config.boot_id}")
     print(f"已注册          : {'是' if config.token else '否'}")
-    print(f"安装令牌        : {'已配置' if config.install_token else '未配置'}（不打印明文）")
     print(f"服务器地址      : {', '.join(config.base_urls)}")
     print(f"心跳间隔        : {config.setting('heartbeat_interval_s', 20)}s")
     print(f"outbox 上限     : {limits.max_items} 条 / {limits.max_bytes // (1024 * 1024)} MiB（{limits.overflow}）")

@@ -134,11 +134,6 @@ async def main() -> int:
     parser.add_argument("--agent-host", default="observatory.123423.xyz")
     parser.add_argument("--password", default="", help="控制台管理员密码（优先用 --password-stdin，避免 ps 可见）")
     parser.add_argument("--password-stdin", action="store_true", help="从 stdin 读控制台管理员密码（F64）")
-    parser.add_argument(
-        "--token",
-        default="",
-        help="可选：已生成的一次性安装令牌；省略则登录后现场签发。注意：传给本工具的令牌会被体检设备消费掉，不要传准备装真机的令牌。",
-    )
     parser.add_argument("--device-uid", default="", help="体检设备 uid（默认随机，避免冲突）")
     parser.add_argument("--expect-version", default="", help="期望版本；默认不强制")
     parser.add_argument("--min-cert-days", type=int, default=7, help="证书最少剩余天数（默认 7）")
@@ -199,7 +194,7 @@ async def main() -> int:
             devices_on_agent = await client.get(f"{agent}/api/v1/devices")
             check("受控端域名拒绝后台接口", devices_on_agent.status_code == 404, str(devices_on_agent.status_code))
             tokens_on_agent = await client.get(f"{agent}/api/v1/install-tokens")
-            check("受控端域名拒绝令牌管理", tokens_on_agent.status_code == 404, str(tokens_on_agent.status_code))
+            check("安装票据接口已移除（受控端域名 404）", tokens_on_agent.status_code == 404, str(tokens_on_agent.status_code))
 
             group("错误信封")
             bad_link = await client.post(
@@ -220,64 +215,42 @@ async def main() -> int:
             session = data(await client.get(f"{console}/api/v1/auth/session", headers=auth))
             check("会话有效", session.get("authenticated") is True, str(session)[:120])
 
-            group("安装令牌")
+            group("安装信息")
             install = data(await client.get(f"{console}/api/v1/system", headers=auth)).get("install") or {}
             check("install_info 可见", isinstance(install, dict) and bool(install), str(install)[:200])
-            check("install_info.token_ttl_minutes 是整数", isinstance(install.get("token_ttl_minutes"), int))
+            check("install_info 标记开放注册", install.get("enroll_required") is True, str(install)[:200])
             check(
-                "install_info.install_token_endpoint 指向令牌接口",
-                isinstance(install.get("install_token_endpoint"), str)
-                and "install" in str(install.get("install_token_endpoint")),
-                str(install.get("install_token_endpoint")),
+                "install_info 不再暴露票据字段",
+                "install_token_endpoint" not in install and "available_tokens" not in install,
+                str(sorted(install))[:200],
             )
-            token = args.token.strip()
-            if token:
-                print("  info 使用命令行传入的一次性令牌（不会再次签发）")
-            else:
-                created = await client.post(f"{console}/api/v1/install-tokens", headers=auth, json={"ttl_s": 600})
-                created_body = data(created)
-                token = str(created_body.get("token") or "")
-                check("可签发一次性令牌", created.status_code == 200 and bool(token), created.text[:160])
-                check("令牌 max_uses=1", created_body.get("max_uses") == 1, str(created_body)[:160])
-                ttl_left_ms = int(created_body.get("expires_at_ms") or 0) - int(time.time() * 1000)
-                check("令牌 TTL 被限制到请求值", 60_000 <= ttl_left_ms <= 605_000, str(ttl_left_ms))
-                too_short = await client.post(f"{console}/api/v1/install-tokens", headers=auth, json={"ttl_s": 10})
-                check("TTL 越界被拒绝（422）", too_short.status_code == 422, str(too_short.status_code))
-                check("TTL 越界错误码 BAD_REQUEST", envelope_ok(body(too_short), "BAD_REQUEST"), too_short.text[:160])
-                client.cookies.clear()
-                injected = await client.post(f"{console}/api/v1/install-tokens", json={"ttl_s": 120})
-                check("未登录不能签发令牌（401）", injected.status_code == 401, str(injected.status_code))
-            if not token:
-                return 1
+            removed = await client.get(f"{console}/api/v1/install-tokens", headers=auth)
+            check("安装票据接口已移除（404）", removed.status_code == 404, str(removed.status_code))
 
             group("渲染后的安装脚本")
             for host, label in ((console, "控制台"), (agent, "受控端")):
-                script = await client.get(f"{host}/api/v1/public/install.ps1", params={"token": token})
+                script = await client.get(f"{host}/api/v1/public/install.ps1")
                 text = script.text
-                check(f"{label}域名可下载安装脚本", script.status_code == 200, str(script.status_code))
-                check(f"{label}域名脚本内嵌令牌", token in text, "未找到令牌")
-                check(f"{label}域名脚本无未渲染占位符", "@@INSTALL_TOKEN@@" not in text and "@@ENROLL_CODE@@" not in text and "@@BASE_URLS@@" not in text)
-                check(f"{label}域名脚本用 -Token 参数", "$Token" in text and "install-token" in text)
-                wrapper = await client.get(f"{host}/api/v1/public/install.cmd", params={"token": token})
+                check(f"{label}域名下载安装脚本无需凭据", script.status_code == 200, str(script.status_code))
+                check(f"{label}域名脚本无未渲染占位符", "@@" not in text, text[:160])
+                check(
+                    f"{label}域名脚本不再要求令牌参数",
+                    "-Token " not in text and "install-token" not in text and "TOKEN=" not in text,
+                    "脚本仍引用 Token 参数",
+                )
+                check(f"{label}域名脚本内嵌双域名", text.count("http") >= 2, "未找到备用地址")
+                wrapper = await client.get(f"{host}/api/v1/public/install.cmd")
                 cmd = wrapper.text
                 disposition = wrapper.headers.get("content-disposition", "")
                 check(f"{label}域名可下载 .cmd", wrapper.status_code == 200, str(wrapper.status_code))
                 check(f"{label}域名 .cmd 为附件", "attachment" in disposition and ".cmd" in disposition, disposition)
-                check(f"{label}域名 .cmd 内嵌令牌", token in cmd, "未找到令牌")
-                check(f"{label}域名 .cmd 使用 ?token= 传参", "token=" in cmd)
-                check(f"{label}域名 .cmd 无未渲染占位符", "@@INSTALL_TOKEN@@" not in cmd and "@@URL_LINES@@" not in cmd)
+                check(f"{label}域名 .cmd 无未渲染占位符", "@@" not in cmd, cmd[:160])
+                check(f"{label}域名 .cmd 不再携带/索要凭据", "TOKEN" not in cmd and "token=" not in cmd, "cmd 仍引用令牌")
                 check(f"{label}域名 .cmd 纯 ASCII", all(ord(ch) < 128 for ch in cmd))
                 check(f"{label}域名 .cmd 含多线路 URL", 'set "URL1=' in cmd)
-            bad_script = await client.get(f"{agent}/api/v1/public/install.ps1", params={"token": "wrong-token"})
-            check("错误令牌下载脚本被拒（401）", bad_script.status_code == 401, str(bad_script.status_code))
-            check("错误令牌错误码 AUTH", envelope_ok(body(bad_script), "AUTH"), bad_script.text[:160])
-            code_script = await client.get(f"{console}/api/v1/public/install.ps1", params={"code": "whatever"})
-            check("注册码路径已拒绝（401）", code_script.status_code == 401, str(code_script.status_code))
 
-            group("受控端注册（一次性令牌）")
+            group("受控端注册（开放注册）")
             enroll_payload = {
-                "install_token": token,
-                "code": "",
                 "uid": uid,
                 "hostname": "deploy-check",
                 "os_name": "Windows",
@@ -289,7 +262,7 @@ async def main() -> int:
             }
             enroll = await client.post(f"{agent}/api/v1/agent/enroll", json=enroll_payload)
             enroll_body = body(enroll)
-            check("受控端注册", enroll.status_code == 200, enroll.text[:200])
+            check("无需任何凭据即可注册", enroll.status_code == 200, enroll.text[:200])
             if enroll.status_code != 200:
                 return 1
             device_token = str(enroll_body.get("token") or "")
@@ -299,14 +272,15 @@ async def main() -> int:
             replay = dict(enroll_payload)
             replay["uid"] = uid + "-REPLAY"
             replayed = await client.post(f"{agent}/api/v1/agent/enroll", json=replay)
-            check("同一令牌不能用于第二台设备（401）", replayed.status_code == 401, str(replayed.status_code))
-            check("重放错误码 AUTH", envelope_ok(body(replayed), "AUTH"), replayed.text[:160])
-            code_enroll = dict(enroll_payload)
-            code_enroll.pop("install_token", None)
-            code_enroll["code"] = "whatever"
-            code_enroll["uid"] = uid + "-CODE"
-            code_result = await client.post(f"{agent}/api/v1/agent/enroll", json=code_enroll)
-            check("注册码注册已拒绝（401）", code_result.status_code == 401, str(code_result.status_code))
+            check("第二台设备同样自动注册（200）", replayed.status_code == 200, str(replayed.status_code))
+            if replayed.status_code == 200:
+                check("第二台设备同样下发设备令牌", bool(body(replayed).get("token")), str(body(replayed))[:160])
+            legacy_enroll = dict(enroll_payload)
+            legacy_enroll["uid"] = uid + "-LEGACY"
+            legacy_enroll["install_token"] = "legacy-ticket-ignored"
+            legacy_enroll["code"] = "legacy-code-ignored"
+            legacy_result = await client.post(f"{agent}/api/v1/agent/enroll", json=legacy_enroll)
+            check("旧客户端带票据/注册码仍可注册（兼容）", legacy_result.status_code == 200, legacy_result.text[:160])
 
             device_headers = {"X-Device-Token": device_token}
             group("协议 v3 /agent/link")
@@ -415,6 +389,12 @@ async def main() -> int:
                         "删除体检设备",
                         f"删除被拒（{deleted.status_code}）；请稍后手动删除 {uid}（agent_offline_after_s 可能大于 --cleanup-wait）",
                     )
+                # 第二台绑定设备从未建立链路，必然离线，可直接删。
+                replay_deleted = await client.delete(f"{console}/api/v1/devices/{uid}-REPLAY", headers=auth)
+                if replay_deleted.status_code in (200, 204):
+                    check("可以删除第二台体检设备", True)
+                elif replay_deleted.status_code != 404:
+                    skip("删除第二台体检设备", f"删除被拒（{replay_deleted.status_code}）；请手动删除 {uid}-REPLAY")
         except httpx.HTTPError as exc:
             check("网络请求", False, repr(exc)[:200])
         except Exception as exc:  # noqa: BLE001

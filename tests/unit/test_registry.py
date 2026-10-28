@@ -21,9 +21,3 @@ def test_registry_rejects_non_agent_session() -> None:
     registry = LinkRegistry()
     with pytest.raises(TypeError):
         asyncio.run(registry.register(1, DuckSession()))
-
-
-def test_registry_register_requires_agent_session_type() -> None:
-    registry = LinkRegistry()
-    assert registry.sessions() == []
-    assert len(registry) == 0

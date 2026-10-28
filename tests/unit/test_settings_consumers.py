@@ -1,9 +1,4 @@
-"""A15：settings_spec 里的每个键都必须有真实消费者（禁止 placebo 配置）。
-
-当前 5 个键的消费者属于上游任务（尚未落地），因此：
-* ``test_no_new_placebo_settings`` 现在通过：缺消费者的集合必须 **不超过** 已知清单；
-* ``test_all_settings_have_consumers`` 在上游落地前 skip（带 reason），落地后摘掉。
-"""
+"""A15：settings_spec 里的每个键都必须有真实消费者（禁止 placebo 配置）。"""
 
 from __future__ import annotations
 
@@ -18,9 +13,6 @@ pytestmark = pytest.mark.unit
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SERVER = REPO_ROOT / "server/observatory"
 AGENT = REPO_ROOT / "agent/observatory_agent"
-
-#: 已知待消费键 → 责任任务（W1 结束前必须清空；当前已清零，保留结构防止再引入 placebo）
-PENDING_CONSUMERS: dict[str, str] = {}
 
 
 def _new_surface_files() -> list[Path]:
@@ -45,21 +37,6 @@ def _consumed_keys() -> set[str]:
         if any(f'"{key}"' in text for text in texts):
             consumed.add(key)
     return consumed
-
-
-def test_no_new_placebo_settings() -> None:
-    missing = set(SPECS) - _consumed_keys()
-    unexpected = missing - set(PENDING_CONSUMERS)
-    assert not unexpected, f"新增了没有消费者的配置项: {sorted(unexpected)}"
-    assert set(PENDING_CONSUMERS) >= missing
-
-
-@pytest.mark.skip(reason="占位：消费者清零后本测试已由 test_all_settings_have_consumers 取代")
-def test_pending_consumers_are_owned_and_tracked() -> None:
-    missing = set(SPECS) - _consumed_keys()
-    for key in missing:
-        assert key in PENDING_CONSUMERS, f"{key} 缺消费者但未登记责任任务"
-        assert PENDING_CONSUMERS[key].startswith("task-")
 
 
 def test_all_settings_have_consumers() -> None:

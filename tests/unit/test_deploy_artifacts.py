@@ -60,15 +60,6 @@ def test_nginx_templates_have_no_literal_production_domains() -> None:
         assert "123423.xyz" not in text, f"{name} 写死了生产域名"
 
 
-def test_obsolete_static_confs_are_marked_deprecated() -> None:
-    """旧静态站点配置保留为“已废弃”占位，避免被误 include。"""
-
-    for name in ("nginx/control.tianhw.top.conf", "nginx/observatory.123423.xyz.conf"):
-        text = _read(name)
-        assert "已废弃" in text, name
-        assert "console.conf.template" in text, name
-
-
 def test_setup_renders_templates_instead_of_copying_static_confs() -> None:
     setup = _read("setup.sh")
     for fragment in (

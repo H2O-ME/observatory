@@ -272,7 +272,7 @@ export function SystemPage() {
                   </Kv>
                   <Kv label="安装">
                     <span className="break-all">
-                      {system.install.enabled ? `可用 · 待用令牌 ${system.install.available_tokens}` : "未启用"}
+                      {system.install.enabled ? "可用 · 开放注册（无需令牌）" : "未启用"}
                     </span>
                   </Kv>
                 </dl>

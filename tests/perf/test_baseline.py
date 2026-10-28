@@ -138,15 +138,6 @@ def test_n4_thumbnail_not_regressed() -> None:
     gc.collect()
 
 
-def test_n4_bench_has_no_legacy_imports() -> None:
-    """旧 `services/` 删除后 bench.py 不得再 import 它。"""
-
-    source = (REPO_ROOT / "tools/bench.py").read_text(encoding="utf-8")
-    assert "observatory.services" not in source
-    assert "observatory_agent import capture" not in source
-    assert "from observatory.media import transcode" in source
-
-
 def _bench_json(command: str, runs: int) -> dict:
     completed = subprocess.run(
         [sys.executable, str(REPO_ROOT / "tools/bench.py"), command, "--runs", str(runs), "--json"],

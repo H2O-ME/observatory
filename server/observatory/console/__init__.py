@@ -24,12 +24,14 @@ from . import (
     install,
     settings,
     system,
+    uninstall_ack,
     updates,
 )
 
 console_router = APIRouter()
 console_router.include_router(agent_frames.router)
 console_router.include_router(enroll.router)
+console_router.include_router(uninstall_ack.router)
 console_router.include_router(auth.router)
 console_router.include_router(backup.router)
 console_router.include_router(devices.router)
