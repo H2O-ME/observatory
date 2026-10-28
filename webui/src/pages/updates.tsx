@@ -61,11 +61,18 @@ export function UpdatesPage() {
         signal: controller.signal,
         onProgress: (loaded, total) => setProgress({ loaded, total: total || file.size, name: file.name }),
       });
-      setMessage(
-        `已上传 v${pkg.version} · sha256 ${pkg.sha256.slice(0, 16)}…${
-          query.data?.latest_agent_version && pkg.version === query.data.latest_agent_version ? "" : "（低于当前最新版本，不会成为最新）"
-        }`,
-      );
+      // 0.3.7 审计 O06：原先用"不等于 latest"判定，把更高版本也说成"低于最新"。
+      // 服务端的 latest 是最高 semver，所以这里必须真的比较大小（与 server 侧
+      // `is_newer`/`parse_version` 同一套语义，只比较 major.minor.patch）。
+      const latest = query.data?.latest_agent_version ?? "";
+      const compare = compareSemver(pkg.version, latest);
+      const hint =
+        !latest || compare === 0
+          ? ""
+          : compare > 0
+            ? "（高于当前最新版本，已成为最新）"
+            : "（低于当前最新版本，不会成为最新）";
+      setMessage(`已上传 v${pkg.version} · sha256 ${pkg.sha256.slice(0, 16)}…${hint}`);
       void queryClient.invalidateQueries({ queryKey: ["updates"] });
       void queryClient.invalidateQueries({ queryKey: ["devices"] });
     } catch (failure) {
@@ -335,4 +342,26 @@ export function UpdatesPage() {
       />
     </div>
   );
+}
+
+/**
+ * 比较两个 `major.minor.patch` 版本号，返回 -1 / 0 / 1。
+ *
+ * 0.3.7 审计 O06：上传后的提示原先用"是否等于 latest"来判断，于是上传更高版本
+ * 也会被说成"低于当前最新版本"。服务端 `PackageService.latest` 取的是最高
+ * semver（等价于 server 侧 `parse_version` 的元组比较），前端要给出正确提示就
+ * 必须真的比大小。无法解析的版本号按 0.0.0 处理，不抛错（提示文案不值得崩页面）。
+ */
+function compareSemver(candidate: string, current: string): number {
+  const parse = (value: string): [number, number, number] => {
+    const matched = /^(\d+)\.(\d+)\.(\d+)$/.exec((value || "").trim());
+    if (!matched) return [0, 0, 0];
+    return [Number(matched[1]), Number(matched[2]), Number(matched[3])];
+  };
+  const left = parse(candidate);
+  const right = parse(current);
+  for (let index = 0; index < 3; index += 1) {
+    if (left[index] !== right[index]) return left[index] > right[index] ? 1 : -1;
+  }
+  return 0;
 }

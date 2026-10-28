@@ -47,20 +47,25 @@ import threading
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..tasks.input import InputState
 from . import sysinfo
-from .commands import Command, CommandDispatcher, CommandResult
+from .commands import ERROR_BAD_REQUEST, Command, CommandDispatcher, CommandResult, expired_result
 from .config import (
+    DEFAULT_SETTINGS,
     INSTALL_DIR,
     STAGING_DIR,
     ConfigStore,
     ensure_dirs,
     outbox_limits_from_env,
     outbox_path,
+    resolve_enroll_key,
+    sanitize_settings,
 )
-from .envelope import EnvelopeError, envelope_from_dict, new_envelope, new_id
+from .envelope import EnvelopeError, EnvelopeTooLarge, envelope_from_dict, new_envelope, new_id
 from .link import PROBE_BASE_S, Link, LinkClosed
 from .logging import read_tail, setup_logging
 from .outbox import Outbox, OutboxFull, SqliteOutboxStore
@@ -80,10 +85,25 @@ LAUNCH_BACKOFF_MAX_S = 1800.0
 RESULT_FLUSH_S = 1.0
 #: 控制会话 TTL 的兜底清理间隔（服务端会发 control stop，这里只防泄漏）。
 CONTROL_REAP_S = 300.0
+#: 控制会话租约的默认/上下限（秒）。服务端在 ``control`` 信封里下发 ``ttl_s``
+#: （``console/control.py`` 的 grant TTL，默认 600s），受控端必须**本地**也执行
+#: 到期——只靠服务端定时器/stop 报文时，一条丢掉的 stop 就能让画面与输入无限
+#: 期地留在"控制中"（A3）。上限与 ``MAX_TTL_S`` 对齐，下限防止 0/负数。
+CONTROL_TTL_DEFAULT_S = 600.0
+CONTROL_TTL_MIN_S = 15.0
+CONTROL_TTL_MAX_S = 3600.0
+#: 租约到期检查的粒度（秒）：控制循环每一帧都查，空闲时也至少每这么多秒查一次。
+CONTROL_LEASE_CHECK_S = 1.0
 
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _monotonic_ms() -> int:
+    """单调毫秒时钟（A6：worker 侧命令预算用它，墙钟跳变不影响超时判定）。"""
+
+    return int(time.monotonic() * 1000)
 
 
 #: 更新包内版本文件（``agent/build/build.ps1`` 把仓库 VERSION 放在 zip 根）。
@@ -132,6 +152,22 @@ def _launch_backoff(failures: int) -> float:
         return 0.0
     exponent = min(failures - 1, 16)
     return min(LAUNCH_COOLDOWN_S * (2**exponent), LAUNCH_BACKOFF_MAX_S)
+
+
+def _pipe_failure(exc: BaseException) -> dict[str, Any]:
+    """把管道写失败翻译成 ``CommandResult`` 的字段（A1）。
+
+    超限（``EnvelopeTooLarge`` / ``PipePayloadTooLarge``）是**输入太大**，不是
+    管道坏了：回一条 ``BAD_REQUEST`` + 可读原因，服务端/前端能据此提示"减小
+    分片"，而不是看到一条笼统的断链错误或干脆等到超时。其余异常仍按断链处理。
+    """
+
+    if isinstance(exc, EnvelopeTooLarge):
+        return {
+            "error": f"命令数据超过管道单帧上限，请减小分片后重试：{exc}",
+            "error_code": ERROR_BAD_REQUEST,
+        }
+    return {"error": f"与用户会话的管道已断开: {exc}"}
 
 
 # ------------------------------------------------------------ 采集健康聚合 ---
@@ -204,6 +240,28 @@ class CaptureHealthAggregator:
         }
 
 
+# ------------------------------------------------------------ 控制租约 ---
+@dataclass(frozen=True)
+class ControlLease:
+    """一个控制会话的**本地**租约（A3）。
+
+    ``expires_at`` 用单调时钟（``ServiceRuntime._control_clock``）。服务端确实
+    会下发 ``ttl_s`` 并在到期时发 stop + 关 WS，但受控端不能把"控制一定会被
+    正确停止"寄托在一条可能丢失的报文上：丢一条 stop 就等于画面无限期在线、
+    输入无限期可注入。本地租约是第二道闸门。
+    """
+
+    token: str
+    session_id: int
+    expires_at: float
+
+    def expired(self, now: float) -> bool:
+        return now >= self.expires_at
+
+    def remaining_ms(self, now: float) -> int:
+        return max(0, int((self.expires_at - now) * 1000))
+
+
 # ------------------------------------------------------------- 服务运行时 ---
 class ServiceRuntime:
     """服务进程运行时；实现 ``win.service.ServiceApplication`` 协议。"""
@@ -233,7 +291,8 @@ class ServiceRuntime:
         self._launch_failures: dict[int, tuple[int, float]] = {}
         self._sessions: list[Any] = []
         self._session_state: dict[int, dict[str, Any]] = {}
-        self._controllers: dict[str, int] = {}
+        #: A3：控制会话租约表（token → 本地租约，单调时钟到期）。
+        self._controls: dict[str, ControlLease] = {}
         self._health = CaptureHealthAggregator()
         self._updating = False
         self._update_running = False
@@ -380,6 +439,8 @@ class ServiceRuntime:
 
         config = self._store.config
         info = await asyncio.to_thread(sysinfo.collect, __version__, sessions=self._sessions_payload())
+        # A4：配置了部署准入密钥才带 code；空串时 enroll() 不写该字段（零凭据）。
+        enroll_key = resolve_enroll_key(config.enroll_key)
         payload = await link.enroll(
             device_uid=config.device_uid,
             hostname=str(info.get("hostname") or ""),
@@ -389,6 +450,8 @@ class ServiceRuntime:
             agent_version=__version__,
             sysinfo=info,
             sessions=list(info.get("sessions") or []),
+            code=enroll_key,
+            boot_id=config.boot_id,
         )
         token = str(payload.get("token") or "")
         if not token:
@@ -498,7 +561,7 @@ class ServiceRuntime:
             "connected": bool(link.connected) if link is not None else False,
             "sessions": self._sessions_payload(),
             "spool": link.pending_uplink if link is not None else 0,
-            "control": sorted(self._controllers),
+            "control": sorted(self._controls),
             "updating": self._updating,
             "uptime_s": max(0, (_now_ms() - self._started_at_ms) // 1000),
             "capture": self._health.snapshot(_now_ms()),
@@ -674,13 +737,15 @@ class ServiceRuntime:
             return None
 
     def _launch_worker(self, session_id: int) -> None:
+        # A2：worker 不读配置，boot_id 只能经命令行传给子进程。
+        boot_id = self._store.config.boot_id
         if not self._service_mode:
             # 前台/调试模式：直接在当前会话 spawn worker（无需 CreateProcessAsUser，
             # 普通用户也能跑完整链路；service 模式仍走跨会话拉起）。
             try:
                 from ..win.session import spawn_local, worker_arguments
 
-                process = spawn_local(worker_arguments(session_id))
+                process = spawn_local(worker_arguments(session_id, boot_id=boot_id))
             except Exception as exc:  # noqa: BLE001 - 拉起失败要可观测并按退避重试
                 log.warning("会话 %s 前台模式拉起 worker 失败：%s", session_id, exc)
                 return
@@ -694,7 +759,7 @@ class ServiceRuntime:
             log.error("win.session 不可用，无法拉起 worker：%s", exc)
             return
         try:
-            pid = int(launch_worker(session_id))
+            pid = int(launch_worker(session_id, boot_id=boot_id))
         except Exception as exc:  # noqa: BLE001 - CreateProcessAsUser 失败要可观测并按退避重试
             log.warning("会话 %s 拉起 worker 失败：%s", session_id, exc)
             return
@@ -834,6 +899,10 @@ class ServiceRuntime:
                 # ``self._sessions``——会话表的唯一来源是 _session_loop 的 WTS 枚举，
                 # 用上报覆盖会引入第二个真相源（worker 看到的列表更陈旧）。
                 log.debug("worker hello sessions=%s", body["sessions"])
+            # A2：worker 不再读 config.json（SYSTEM 独占），所以**必须**在 hello
+            # 之后立刻把非敏感设置推给它。此前这条同步只在配置变化时发生，
+            # worker 靠自读文件兜底；现在兜底没有了，首帧推送就是唯一来源。
+            self._send_config_to(session_id)
             return
         if envelope.type == "heartbeat":
             self._health.update(
@@ -891,7 +960,7 @@ class ServiceRuntime:
                         CommandResult(ok=False, error="更新进行中，拒绝重启", error_code="BAD_REQUEST"),
                     )
                 return
-            await self._handle_command(body, ts_ms=envelope.ts_ms)
+            await self._handle_command(body)
             return
         if kind == "config":
             values = body.get("config")
@@ -925,15 +994,19 @@ class ServiceRuntime:
             return
         log.debug("忽略下行信封类型 %s", kind)
 
-    async def _handle_command(self, body: dict[str, Any], *, ts_ms: int) -> None:
+    async def _handle_command(self, body: dict[str, Any]) -> None:
         """下行命令的**唯一**入口：本进程有处理器就本地执行，否则转发 worker。
 
         服务命令与 worker 命令不再各有一条分发路径：处理器注册在同一个
         ``CommandDispatcher`` 上，命令 id 去重、异常回执、超时语义全部一份实现。
+
+        A6：命令预算的"接收时刻"一律取**本进程单调时钟**，不接受信封里的
+        ``ts_ms``（那是服务端时钟，与本地 ``_monotonic_ms()`` 不同源，做差会把
+        预算算成负数或几天）。
         """
 
         try:
-            command = Command.from_body(body, ts_ms=ts_ms)
+            command = Command.from_body(body, ts_ms=_monotonic_ms())
         except ValueError as exc:
             log.warning("下行命令格式非法（忽略）：%s", exc)
             command_id = str(body.get("command_id") or "")
@@ -942,6 +1015,17 @@ class ServiceRuntime:
                     command_id,
                     CommandResult(ok=False, error=f"命令格式非法: {exc}", error_code="BAD_REQUEST"),
                 )
+            return
+        # A6：执行前先校验预算。已经超时的命令绝不执行——服务端/用户已收到
+        # 超时，此时再执行删除/写入/重启是"看不见的破坏性动作"。
+        if command.is_expired(_monotonic_ms()):
+            log.warning(
+                "命令 %s 超出执行预算（type=%s deadline_ms=%s），拒绝执行",
+                command.id,
+                command.type,
+                command.deadline_ms,
+            )
+            await self._send_result(command.id, expired_result(command))
             return
         if command.type in self._dispatcher.handlers:
             result = await self._dispatcher.dispatch(command)
@@ -1112,13 +1196,68 @@ class ServiceRuntime:
     def _cmd_reload_config(self, _command: Command) -> CommandResult:
         return CommandResult(ok=True, result={"config": self._store.settings_snapshot()})
 
-    def _cmd_restart_agent(self, _command: Command) -> CommandResult:
-        self._spawn(self._restart_agent())
-        return CommandResult(ok=True, result={"restarting": True})
+    def _cmd_restart_agent(self, command: Command) -> CommandResult:
+        """重启：先**提交**（注册重启机制）再回执，然后才退出进程（A6）。
 
-    def _cmd_power(self, _command: Command, *, reboot: bool) -> CommandResult:
-        self._spawn(asyncio.to_thread(_shutdown_machine, reboot))
-        return CommandResult(ok=True, result={"ok": True, "reboot": reboot})
+        旧实现立刻回 ``ok``，后台再申请重启；两个机制都失败时用户已经看到
+        "已重启"而机器毫无变化（后台失败只写日志）。现在把"提交"拉进回执窗口：
+        SCM recovery 与计划任务都成功登记才算成功，否则回可读错误并**保持运行**。
+        ��交成功后必须等回执真的发出去再退出（RESULT_FLUSH_S），所以退出动作
+        仍然放在后台任务里。
+        """
+
+        try:
+            from ..win.service import ServiceController, ServiceError, commit_restart
+        except ImportError as exc:  # pragma: no cover - 打包缺模块
+            return CommandResult(ok=False, error=f"重启组件不可用: {exc}", error_code="INTERNAL")
+        try:
+            outcome = commit_restart(ServiceController(), tmp_dir=STAGING_DIR)
+        except ServiceError as exc:
+            log.warning("重启提交失败：%s", exc)
+            return CommandResult(ok=False, error=f"重启提交失败: {exc}", error_code="INTERNAL")
+        except Exception as exc:  # noqa: BLE001 - 非 Windows/权限不足都要变成可读回执
+            log.warning("重启提交异常：%s", exc, exc_info=True)
+            return CommandResult(ok=False, error=f"重启提交异常: {exc}", error_code="INTERNAL")
+        if not outcome["registered"] and not outcome["recovery"]:
+            return CommandResult(
+                ok=False,
+                error="无法注册任何重启机制（计划任务与 SCM recovery 都失败），未重启",
+                error_code="INTERNAL",
+            )
+        # 提交已确认：剩余预算不够就别再扛着——直接把决定权交回调用方。
+        self._spawn(self._restart_agent(committed=True))
+        return CommandResult(
+            ok=True,
+            result={
+                "restarting": True,
+                "mechanisms": sorted(
+                    name for name, ok in (("scm-recovery", outcome["recovery"]), ("scheduled-task", outcome["registered"])) if ok
+                ),
+                "commit": True,
+            },
+        )
+
+    def _cmd_power(self, command: Command, *, reboot: bool) -> CommandResult:
+        """重启/关机：以 ``shutdown.exe`` 的**真实退出码**回执（A6）。
+
+        旧实现把 ``asyncio.to_thread(_shutdown_machine)`` 一扔就回 ``ok``，失败
+        只写日志——用户看到"已关机"而机器还开着。现在同步等提交结果（受同一
+        命令预算约束），失败回可读错误并补一条事件。
+        """
+
+        budget_s = float(command.remaining_ms(_monotonic_ms()) or 0) / 1000.0
+        ok, detail = _shutdown_machine(reboot, timeout_s=budget_s if budget_s > 0 else 30.0)
+        if ok:
+            return CommandResult(ok=True, result={"ok": True, "reboot": bool(reboot), "commit": True})
+        log.error("重启/关机提交失败 reboot=%s: %s", reboot, detail)
+        # 破坏性动作失败必须可观测：除了回执，再补一条事件（后台/前端都能看到）。
+        on_event = self._send_event
+        self._spawn(on_event("power_failed", {"reboot": bool(reboot), "error": detail}))
+        return CommandResult(
+            ok=False,
+            error=f"{'重启' if reboot else '关机'}提交失败: {detail}",
+            error_code="INTERNAL",
+        )
 
     async def _uninstall_ack(self) -> None:
         """helper 写回 ok=true 之后才 ack（A1：先确认再报卸载）。
@@ -1222,18 +1361,23 @@ class ServiceRuntime:
                     {
                         "command_id": command.id,
                         "type": command.type,
+                        # A6：转交的是**剩余**预算，不是原始 deadline_ms。worker 用自己的
+                        # 单调时钟起算，排队时间因此也被算进预算——旧实现把原始值转发
+                        # 过去，worker 每次重新拿到满额预算，排队多久都能执行。
+                        "deadline_ms": (
+                            command.remaining_ms(_monotonic_ms())
+                            if command.deadline_ms
+                            else 0
+                        )
+                        or 0,
                         "payload": command.payload,
-                        "deadline_ms": command.deadline_ms or 0,
                     },
                     ts_ms=_now_ms(),
                 )
             )
         except Exception as exc:  # noqa: BLE001 - 管道断开要变成可观测失败回执
             log.warning("会话 %s 的命令转发失败：%s", session_id, exc)
-            await self._send_result(
-                command.id,
-                CommandResult(ok=False, error=f"与用户会话的管道已断开: {exc}"),
-            )
+            await self._send_result(command.id, CommandResult(ok=False, **_pipe_failure(exc)))
 
     def _pick_session(self) -> int | None:
         connected = [session_id for session_id, pipe in self._pipes.items() if pipe.connected.is_set()]
@@ -1260,12 +1404,37 @@ class ServiceRuntime:
                 action = "start"
             else:
                 action = "stop"
-        session_id = self._pick_session()
-        if session_token:
-            if action == "stop":
-                self._controllers.pop(session_token, None)
-            else:
-                self._controllers[session_token] = int(session_id or 0)
+        now = self._control_clock()
+        # A3：先把过期的租约统统清掉（每条控制报文都顺手做一次，成本可忽略）。
+        self._expire_control_leases(now)
+
+        if session_token and action == "stop":
+            # stop 只清**这一个** token：另一个并发观看者（另一台控制台）不能
+            # 因为别人 stop 而被误清。
+            self._drop_control_lease(session_token, reason="stop")
+        elif session_token and action != "stop":
+            # A3（严格 session 匹配）：start 建租约；input 只有**当前**租约才能
+            # 通过，非当前 session 的输入直接丢弃，且绝不影响现有流（旧实现对
+            # 任意 stop 都会停掉现有流，任意 input 都会注入到当前桌面）。
+            lease = self._controls.get(session_token)
+            if action == "start":
+                self._controls[session_token] = ControlLease(
+                    token=session_token,
+                    session_id=int(self._pick_session() or 0),
+                    expires_at=now + self._lease_seconds(body.get("ttl_s")),
+                )
+            elif lease is None:
+                log.warning(
+                    "丢弃非当前控制会话的输入（session=%s，当前=%s）",
+                    session_token,
+                    sorted(self._controls),
+                )
+                return
+        # A3：控制流一旦建立就**钉在那个会话上**——会话表每次扫描都可能变化
+        # （用户切换登录/RDP 重连），重新 ``_pick_session`` 会把同一个控制流
+        # 的帧与输入拆到两个不同的桌面上（画面在 A、输入进 B）。
+        lease = self._controls.get(session_token) if session_token else None
+        session_id = lease.session_id if lease is not None and lease.session_id else self._pick_session()
         pipe = self._pipes.get(session_id) if session_id is not None else None
         if session_id is None or pipe is None or not pipe.connected.is_set():
             log.warning("没有可用会话，控制指令 %s 丢弃 (session=%s)", action, session_token)
@@ -1281,13 +1450,71 @@ class ServiceRuntime:
                         "fps": int(body.get("fps") or 0),
                         "quality": int(body.get("quality") or 0),
                         "ev": body.get("ev") or {},
+                        # A3：把本地租约的剩余毫秒数下发给 worker——由真正的执行者
+                        # （按住键的那一端）执行到期检查，断链时也能自清。
+                        "lease_ms": lease.remaining_ms(now) if lease is not None else 0,
+                        "ttl_s": int(body.get("ttl_s") or 0),
                     },
                     ts_ms=_now_ms(),
                 )
             )
         except Exception as exc:  # noqa: BLE001 - 管道断开要可观测
             log.warning("控制指令转发失败 session=%s：%s", session_token, exc)
-            await self._send_event("control_failed", {"reason": str(exc), "session": session_token})
+            if isinstance(exc, EnvelopeTooLarge):
+                # 控制报文头不会超限；真超限说明输入事件异常大，明确拒绝。
+                await self._send_event(
+                    "control_failed", {"reason": f"控制数据超过管道上限: {exc}", "session": session_token}
+                )
+            else:
+                await self._send_event("control_failed", {"reason": str(exc), "session": session_token})
+
+    # -- 控制租约（A3） ---------------------------------------------------
+    @staticmethod
+    def _control_clock() -> float:
+        """控制租约用的**单调**时钟。
+
+        必须是单调源而不是墙钟：改系统时间 / NTP 跳变既不能让租约无限延长，
+        也不能让它瞬间到期。事件循环在跑时用 ``loop.time()``（它本身就是
+        ``time.monotonic``，且与 asyncio 内部计时同源）；没有事件循环的同步
+        上下文（维护线程/单测）退回 ``time.monotonic``——两者是同一个时钟。
+        """
+
+        try:
+            return asyncio.get_running_loop().time()
+        except RuntimeError:
+            return time.monotonic()
+
+    @staticmethod
+    def _lease_seconds(raw: Any) -> float:
+        """把服务端下发的 ``ttl_s`` 折算成本地租约秒数（带上下限）。"""
+
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = 0.0
+        if value <= 0:
+            return CONTROL_TTL_DEFAULT_S
+        return max(CONTROL_TTL_MIN_S, min(CONTROL_TTL_MAX_S, value))
+
+    def _drop_control_lease(self, token: str, *, reason: str) -> None:
+        """移除一个控制租约（不向 worker 发包，释放按键由 worker 的清理统一做）。"""
+
+        lease = self._controls.pop(token, None)
+        if lease is not None:
+            log.info("控制租约结束 session=%s reason=%s", token, reason)
+
+    def _expire_control_leases(self, now: float) -> list[str]:
+        """收割到期租约，返回被收割的 token（A3 的本地 TTL）。
+
+        返回 token 让调用方可以给每个过期会话补一条 ``control_failed`` 事件，
+        使"控制过期"对前端可观测（而不是画面忽然停住）。
+        """
+
+        expired = [token for token, lease in self._controls.items() if lease.expired(now)]
+        for token in expired:
+            log.warning("控制租约到期（本地 TTL），结束 session=%s", token)
+            self._drop_control_lease(token, reason="ttl")
+        return expired
 
     def _broadcast_config(self) -> None:
         config = self._store.settings_snapshot()
@@ -1299,8 +1526,43 @@ class ServiceRuntime:
             except Exception as exc:  # noqa: BLE001 - 未连接/断开的会话下次 hello 会重新同步
                 log.debug("向会话 %s 广播配置失败：%s", session_id, exc)
 
+    def _send_config_to(self, session_id: int) -> None:
+        """把当前设置推给**指定**会话（A2：worker 的唯一设置来源）。
+
+        worker 用登录用户令牌运行，读不了 SYSTEM 独占的 config.json；它启动时
+        只有 ``DEFAULT_SETTINGS``，必须由服务进程在 hello 之后把服务端下发的
+        设置补上，否则"服务端改配置"在真机上永远不会生效。
+        """
+
+        pipe = self._pipes.get(session_id)
+        if pipe is None or not pipe.connected.is_set():
+            return
+        config = self._store.settings_snapshot()
+        try:
+            pipe.send(new_envelope("config", {"config": config}, ts_ms=_now_ms()))
+            log.info("已向会话 %s 下发配置（%s 项）", session_id, len(config))
+        except Exception as exc:  # noqa: BLE001 - 管道断开时记日志，下次 hello 再同步
+            log.warning("向会话 %s 下发配置失败：%s", session_id, exc)
+
     # -- 重启 ------------------------------------------------------------
-    async def _restart_agent(self) -> None:
+    async def _restart_agent(self, *, committed: bool = False) -> None:
+        """退出进程以触发重启。
+
+        ``committed=True`` 表示 :meth:`_cmd_restart_agent` 已经成功登记了重启机制
+        （A6 的真实提交结果），这里只需等回执出链路再退出。``committed=False``
+        是兼容路径（内部/旧调用方）：自己走完整的 ``request_restart``。
+        """
+
+        if committed:
+            await asyncio.sleep(RESULT_FLUSH_S)  # 让刚发的 result 先出链路
+            try:
+                from ..win.service import exit_for_restart
+
+                await asyncio.to_thread(exit_for_restart)
+            except Exception as exc:  # noqa: BLE001 - 退出失败等于服务仍活着，必须可观测
+                log.exception("退出进程失败，服务保持运行")
+                await self._send_event("restart_failed", {"error": str(exc)})
+            return
         try:
             from ..win.service import ServiceController, request_restart
         except ImportError as exc:
@@ -1335,26 +1597,48 @@ class ServiceRuntime:
             await self._sleep_or_stop(CONTROL_REAP_S)
             if self._stop_flag.is_set():
                 return
-            if len(self._controllers) > 32:
-                keep = dict(list(self._controllers.items())[-16:])
-                log.warning("控制会话表异常增长（%s），保留最近 16 个", len(self._controllers))
-                self._controllers = keep
+            expired = self._expire_control_leases(self._control_clock())
+            for token in expired:
+                await self._send_event("control_failed", {"reason": "控制会话已到期", "session": token})
+            if len(self._controls) > 32:
+                keep = dict(list(self._controls.items())[-16:])
+                log.warning("控制会话表异常增长（%s），保留最近 16 个", len(self._controls))
+                self._controls = keep
 
 
 # ------------------------------------------------------------------ worker ---
 class WorkerRuntime:
-    """用户会话内的 worker：管道 + 采集引擎 + 任务处理器。"""
+    """用户会话内的 worker：管道 + 采集引擎 + 任务处理器。
 
-    def __init__(self, session_id: int) -> None:
+    **A2（2026-10 审查）：worker 不碰 ``%ProgramData%``**。它用登录用户令牌
+    启动，而数据目录被收紧到 SYSTEM+Administrators——旧实现里的
+    ``ConfigStore()``（读 config.json 拿令牌）、``ensure_dirs()``（写日志目录）
+    在真机上会直接 PermissionError，worker 起不来。
+    现在 worker 只有两样东西来自服务进程，全部经管道：
+      * 非敏感设置：``config`` 信封（``_apply_remote_config``）；
+      * 令牌/uid 之类**根本不需要**——worker 不做任何链路 IO。
+    日志写 :func:`core.config.worker_log_dir`（``%LOCALAPPDATA%``，用户可写、
+    SYSTEM 可读，``log_tail`` 照常工作）。
+    """
+
+    def __init__(self, session_id: int, *, boot_id: str = "") -> None:
         self.session_id = int(session_id)
         self._pipe: Any = None
-        self._store = ConfigStore()
+        #: A2：worker 的设置**只**来自管道；默认值与 AgentConfig 同源
+        #: （``DEFAULT_SETTINGS``），因此首帧 config 到达之前的采集行为不变。
+        self._config_values: dict[str, Any] = dict(DEFAULT_SETTINGS)
+        #: boot_id 由服务进程通过管道下发（worker 从不读配置）。
+        self._boot_id = str(boot_id or "")
         self._engine: Any = None
         self._dispatcher = CommandDispatcher()
         self._executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="worker-cmd")
         self._stop = threading.Event()
         self._control_stop = threading.Event()
         self._control_session = ""
+        #: A3：控制租约的单调截止时刻（``time.monotonic``）。
+        self._control_deadline = 0.0
+        #: A3：已按下键/鼠标按钮的账本（控制结束时统一抬起）。
+        self._input_state = InputState()
         self._control_thread: threading.Thread | None = None
         self._capture_thread: threading.Thread | None = None
         self._heartbeat_thread: threading.Thread | None = None
@@ -1365,8 +1649,8 @@ class WorkerRuntime:
         from ..tasks.capture import CaptureEngine
         from ..win.pipe import PipeClient
 
+        # A2：worker 日志写用户可写目录（不调用 ensure_dirs，不碰 %ProgramData%）。
         setup_logging(f"worker-{self.session_id}")
-        ensure_dirs()
         # 0.3.1（F29）：必须在做任何窗口/GDI 调用之前切 PerMonitorV2 DPI 感知——
         # DPI-unaware 进程在非 100% 缩放机器上 GetSystemMetrics 会被虚拟化，
         # 控制坐标整体漂移（input.py 的 A16 换算修复要在这里才真正生效）。
@@ -1383,13 +1667,13 @@ class WorkerRuntime:
         except Exception as exc:  # noqa: BLE001 - 连不上服务管道就没有存在意义
             log.error("无法连接服务管道，退出：%s", exc)
             return 2
-        self._engine = CaptureEngine(settings=self._store.settings_snapshot())
+        self._engine = CaptureEngine(settings=self._settings_snapshot())
         self._register_handlers()
         self._send_envelope(
             "hello",
             {
                 "agent_version": __version__,
-                "boot_id": self._store.config.boot_id,
+                "boot_id": self._boot_id,
                 "session_id": self.session_id,
                 "capture": self._engine.health_dict(),
                 "control_active": False,
@@ -1417,7 +1701,9 @@ class WorkerRuntime:
 
     def _shutdown(self) -> None:
         self._stop.set()
-        self._stop_control()
+        # A3：worker 退出（管道断开/会话注销/服务重拉）也必须抬起按键，
+        # 否则用户会话里的 Ctrl/鼠标左键会保持按下直到重启。
+        self._cleanup_control(reason="worker_shutdown", notify=False)
         self._executor.shutdown(wait=False, cancel_futures=True)
         pipe = self._pipe
         if pipe is not None:
@@ -1426,15 +1712,29 @@ class WorkerRuntime:
         log.info("worker 已停止 session=%s", self.session_id)
 
     # -- 发送 ------------------------------------------------------------
-    def _send_envelope(self, kind: str, body: dict[str, Any], payload: bytes = b"") -> None:
+    def _send_envelope(self, kind: str, body: dict[str, Any], payload: bytes = b"", *, fatal: bool = True) -> bool:
+        """发一条管道信封；返回是否成功。
+
+        A1：``PipePayloadTooLarge``（这条消息装不进一帧）**不**终止 worker——
+        旧实现把所有发送异常都当成断链并 ``self._stop.set()``，于是一条超限的
+        ``files`` 回执就能让整个会话的 worker 退出。超限交给调用方回明确失败
+        回执；只有真正的管道错误才停 worker（等下次拉起）。
+        """
+
         pipe = self._pipe
         if pipe is None:
-            return
+            return False
         try:
             pipe.send(new_envelope(kind, body, ts_ms=_now_ms()), payload)
+            return True
+        except EnvelopeTooLarge as exc:
+            log.error("发送 %s 到服务失败（单帧超限，worker 继续运行）：%s", kind, exc)
+            return False
         except Exception as exc:  # noqa: BLE001 - 管道断开时 worker 只能退出，由服务重拉
             log.warning("发送 %s 到服务失败：%s", kind, exc)
-            self._stop.set()
+            if fatal:
+                self._stop.set()
+            return False
 
     def _send_frame(self, frame: Any) -> None:
         if self._pipe is None:
@@ -1501,8 +1801,28 @@ class WorkerRuntime:
         lines = int(command.payload.get("lines") or 200)
         return CommandResult(ok=True, result={"lines": read_tail(lines, f"worker-{self.session_id}")})
 
+    def _settings_snapshot(self) -> dict[str, Any]:
+        """worker 当前生效的设置快照（只来自管道 + 本地默认值）。"""
+
+        return dict(self._config_values)
+
+    def _apply_remote_config(self, values: dict[str, Any]) -> None:
+        """应用服务进程经管道下发的**非敏感**设置（A2）。
+
+        剥敏感键复用 ``core.config.sanitize_settings``（与服务进程同一份实现），
+        所以即使服务端配置视图写错，令牌也不会出现在 worker 内存里。worker
+        **不落盘**：它没有 config.json，进程结束设置就没了，下次 hello 之后
+        服务进程会重新广播。
+        """
+
+        cleaned = sanitize_settings(values)
+        self._config_values = cleaned
+        if self._engine is not None:
+            self._engine.apply_settings(self._settings_snapshot())
+        log.info("worker 已应用新配置：%s", sorted(cleaned))
+
     def _settings(self) -> dict[str, Any]:
-        return self._store.settings_snapshot()
+        return self._settings_snapshot()
 
     # -- 分发 ------------------------------------------------------------
     def _dispatch(self, header: dict[str, Any], payload: bytes) -> None:
@@ -1523,9 +1843,7 @@ class WorkerRuntime:
         if kind == "config":
             values = body.get("config")
             if isinstance(values, dict):
-                self._store.apply_server_config(values)
-                self._engine.apply_settings(self._store.settings_snapshot())
-                log.info("worker 已应用新配置：%s", sorted(values))
+                self._apply_remote_config(values)
             return
         if kind == "command":
             self._submit_command(body)
@@ -1544,7 +1862,9 @@ class WorkerRuntime:
 
     def _submit_command(self, body: dict[str, Any]) -> None:
         try:
-            command = Command.from_body(body, ts_ms=0)
+            # A6：worker 用**单调**时钟做预算（进程内自洽即可；跨进程的剩余量
+            # 已由服务进程折算好）。
+            command = Command.from_body(body, ts_ms=_monotonic_ms())
         except ValueError as exc:
             command_id = str(body.get("command_id") or "")
             log.warning("服务下发命令格式非法：%s", exc)
@@ -1555,9 +1875,24 @@ class WorkerRuntime:
                     CommandResult(ok=False, error=f"命令格式非法: {exc}", error_code="BAD_REQUEST"),
                 )
             return
+        if command.is_expired(_monotonic_ms()):
+            log.warning("命令 %s 在入队前已超预算，直接回超时", command.id)
+            self._executor.submit(self._send_result, command.id, expired_result(command))
+            return
         self._executor.submit(self._execute_command, command)
 
     def _execute_command(self, command: Command) -> None:
+        # A6：线程池排队期间可能早已超出预算（3 个 worker 线程被慢操作占满时
+        # 最坏能等几十秒）。**执行前**再校验一次：超时的破坏性动作绝不落地。
+        if command.is_expired(_monotonic_ms()):
+            log.warning(
+                "命令 %s 排队后已超预算（type=%s deadline_ms=%s），拒绝执行",
+                command.id,
+                command.type,
+                command.deadline_ms,
+            )
+            self._send_result(command.id, expired_result(command))
+            return
         started = time.monotonic()
         try:
             result = asyncio.run(self._dispatcher.dispatch(command))
@@ -1568,9 +1903,27 @@ class WorkerRuntime:
         self._send_result(command.id, result, elapsed_ms=elapsed_ms)
 
     def _send_result(self, command_id: str, result: CommandResult, *, elapsed_ms: int = 0) -> None:
+        """回执必须送达或变成明确的失败回执（A1）。
+
+        一条超大回执（例如 ``files`` 读出的分片）装不进管道帧时，旧实现会让
+        worker 退出、服务端只能等到命令超时。现在补发一条**最小**的失败回执，
+        把"数据太大"变成服务端/前端立刻可见的结果。
+        """
+
+        body = result.to_body(command_id, device_time_ms=_now_ms(), elapsed_ms=elapsed_ms)
+        if self._send_envelope("result", body):
+            return
+        if self._pipe is None:
+            return
+        fallback = CommandResult(
+            ok=False,
+            error="回执数据超过管道单帧上限（A1），请减小分片后重试",
+            error_code=ERROR_BAD_REQUEST,
+        )
         self._send_envelope(
             "result",
-            result.to_body(command_id, device_time_ms=_now_ms(), elapsed_ms=elapsed_ms),
+            fallback.to_body(command_id, device_time_ms=_now_ms(), elapsed_ms=elapsed_ms),
+            fatal=False,
         )
 
     # -- 采集 ------------------------------------------------------------
@@ -1618,31 +1971,63 @@ class WorkerRuntime:
     # -- 实时控制 --------------------------------------------------------
     def _handle_control(self, body: dict[str, Any]) -> None:
         action = str(body.get("action") or "stop")
+        session = str(body.get("session") or "")
         if action == "start":
             self._start_control(
-                session=str(body.get("session") or ""),
+                session=session,
                 fps=int(body.get("fps") or 0),
                 quality=int(body.get("quality") or 0),
+                lease_ms=int(body.get("lease_ms") or 0),
             )
         elif action == "input":
+            # A3（严格 session 匹配）：只接受**当前**控制会话的输入。旧实现
+            # 不校验就注入，于是过期的控制台（或另一台机器）仍能把输入打到
+            # 当前桌面——而 stop 又会把别人的流停掉。这里两条都堵住：
+            #   * 非当前 session 的输入丢弃（记日志，不影响现有流）；
+            #   * 租约到期先自清（含释放按键）再丢弃。
+            if not self._control_session or session != self._control_session:
+                log.warning(
+                    "丢弃非当前控制会话的输入（收到 %s，当前 %s）",
+                    session or "<空>",
+                    self._control_session or "<无>",
+                )
+                return
+            if self._control_expired():
+                self._cleanup_control(reason="lease_expired", notify=True)
+                return
             event = body.get("ev") or {}
             try:
                 from ..tasks.input import handle_event
 
-                if not handle_event(event):
+                if not handle_event(event, state=self._input_state):
                     log.debug("未识别的输入事件：%s", event.get("kind"))
             except ImportError as exc:  # pragma: no cover - 打包缺模块
                 log.error("输入注入不可用：%s", exc)
+            return
         else:
-            self._stop_control()
+            # stop 只结束**匹配的**那个会话：别人的 stop（或缺少 session 的畸形
+            # stop）不能停我们的流。空闲时（没有控制会话）cleanup 本身是幂等的。
+            # 万一真的漏掉一条合法 stop，租约到期会兜底清理——这是 A3 的分层。
+            if self._control_session and session != self._control_session:
+                log.warning(
+                    "忽略非当前控制会话的 stop（收到 %s，当前 %s）",
+                    session or "<空>",
+                    self._control_session,
+                )
+                return
+            self._cleanup_control(reason=f"stop:{action}", notify=False)
 
-    def _start_control(self, *, session: str, fps: int, quality: int) -> None:
-        self._stop_control()
+    def _start_control(self, *, session: str, fps: int, quality: int, lease_ms: int = 0) -> None:
+        self._cleanup_control(reason="restart", notify=False)
         if not session:
             log.warning("控制启动缺少 session 令牌，忽略")
             return
         self._control_session = session
-        settings = self._store.settings_snapshot()
+        # A3：本地租约用单调时钟；lease_ms 由服务进程按它自己的 loop.time()
+        # 下发剩余量，这里重新起算，避免两个进程的时钟基准不同。
+        seconds = (lease_ms / 1000.0) if lease_ms > 0 else CONTROL_TTL_DEFAULT_S
+        self._control_deadline = time.monotonic() + max(CONTROL_TTL_MIN_S, min(CONTROL_TTL_MAX_S, seconds))
+        settings = self._settings_snapshot()
         control_fps = max(1, min(15, fps or int(settings.get("control_fps", 8) or 8)))
         control_quality = max(20, min(95, quality or int(settings.get("control_quality", 55) or 55)))
         self._control_stop.clear()
@@ -1655,21 +2040,65 @@ class WorkerRuntime:
         )
         engine.set_control_active(True)
         self._control_thread.start()
-        log.info("实时控制流开始 fps=%s quality=%s session=%s", control_fps, control_quality, session)
+        log.info(
+            "实时控制流开始 fps=%s quality=%s session=%s 租约=%.0fs",
+            control_fps,
+            control_quality,
+            session,
+            self._control_deadline - time.monotonic(),
+        )
 
-    def _stop_control(self) -> None:
+    def _control_expired(self) -> bool:
+        deadline = self._control_deadline
+        return bool(self._control_session) and deadline > 0 and time.monotonic() >= deadline
+
+    def _cleanup_control(self, *, reason: str, notify: bool) -> None:
+        """结束实时控制并释放**所有**按住的键/鼠标按钮（A3 的统一清理函数）。
+
+        stop 报文、本地 TTL 到期、管道断开、worker 退出全部走这里——旧实现只有
+        stop 分支会停线程，且从不释放按键，实测会卡住 Ctrl/鼠标左键。释放动作
+        放在最后（线程先停），避免"释放后控制循环又按下"的竞态。
+        """
+
+        had_session = bool(self._control_session)
+        session = self._control_session
         self._control_stop.set()
-        self._control_session = ""
         thread = self._control_thread
-        if thread is not None and thread.is_alive():
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=2.0)
         self._control_thread = None
+        self._control_session = ""
+        self._control_deadline = 0.0
         if self._engine is not None:
             self._engine.set_control_active(False)
+        released = 0
+        try:
+            released = self._input_state.release_all()
+        except Exception:  # noqa: BLE001 - 释放失败也必须继续收尾（记日志）
+            log.exception("释放按住的按键失败")
+        if had_session or released:
+            log.info(
+                "实时控制结束 reason=%s session=%s 已释放=%s",
+                reason,
+                session or "<无>",
+                released,
+            )
+        if notify and had_session:
+            # TTL 到期要上报，前端才能从"画面冻住"变成"控制已过期"。
+            self._send_envelope(
+                "event",
+                {"event": "control_ended", "data": {"reason": reason, "session": session}},
+                fatal=False,
+            )
 
     def _control_loop(self, fps: int, quality: int) -> None:
         interval = 1.0 / max(1, fps)
         while not self._control_stop.is_set() and not self._stop.is_set():
+            # A3：租约到期由**执行端**自己判定——即使服务进程的 stop 丢了、
+            # 管道断了，这条循环也一定会停下来并释放按键。
+            if self._control_expired():
+                self._cleanup_control(reason="lease_expired", notify=True)
+                return
             started = time.monotonic()
             try:
                 frame = self._engine.capture_control_frame(session_id=self.session_id, quality=quality)
@@ -1703,28 +2132,37 @@ def run_console() -> int:
     return 0
 
 
-def run_worker(session_id: int) -> int:
-    return WorkerRuntime(session_id).run()
+def run_worker(session_id: int, *, boot_id: str = "") -> int:
+    return WorkerRuntime(session_id, boot_id=boot_id).run()
 
 
-def _shutdown_machine(reboot: bool) -> None:
-    """重启/关机（SYSTEM 权限足够；失败只记日志，不能让服务崩溃）。"""
+def _shutdown_machine(reboot: bool, *, timeout_s: float = 30.0) -> tuple[bool, str]:
+    """执行重启/关机，返回 ``(是否真实提交, 失败原因)``（A6）。
+
+    旧签名返回 ``None`` 且只记日志：调用方在 ``shutdown.exe`` 真正跑之前就回了
+    ``ok``，失败也不会有人知道。现在把 ``shutdown.exe`` 的退出码带回回执——
+    SYSTEM 权限下这一步就是最真实的"已受理关机"证据。
+    """
 
     flag = "/r" if reboot else "/s"
     try:
         completed = subprocess.run(  # noqa: S603 - 固定 argv，无外部输入
             ["shutdown.exe", flag, "/t", "5"],
             capture_output=True,
-            timeout=30,
+            timeout=max(1.0, float(timeout_s)),
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             check=False,
         )
+    except subprocess.TimeoutExpired:
+        return False, f"shutdown.exe 在 {timeout_s:.0f}s 内未返回"
     except (OSError, subprocess.SubprocessError) as exc:
         log.error("执行关机/重启失败: %s", exc)
-        return
+        return False, str(exc)
     if completed.returncode != 0:
         stderr = (completed.stderr or b"").decode("utf-8", "replace").strip()
         log.error("关机/重启命令失败 rc=%s: %s", completed.returncode, stderr)
+        return False, f"rc={completed.returncode} {stderr}".strip()
+    return True, ""
 
 
 __all__ = [

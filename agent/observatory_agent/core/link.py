@@ -39,7 +39,7 @@ import ssl
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, ClassVar, Final
 
 import httpx
 
@@ -707,6 +707,10 @@ class Link:
         return target
 
     # -- 注册 ------------------------------------------------------------
+    #: 服务端接受的部署准入密钥字段名（二选一，见
+    #: ``server/observatory/console/enroll.py`` 的 ``_require_admission_key``）。
+    ENROLL_CODE_FIELD: ClassVar[str] = "code"
+
     async def enroll(
         self,
         *,
@@ -718,18 +722,25 @@ class Link:
         agent_version: str,
         sysinfo: Mapping[str, Any] | None,
         sessions: list[Mapping[str, Any]] | None,
+        code: str = "",
+        boot_id: str = "",
     ) -> dict[str, Any]:
         """入网注册。
 
         注册是"链路上线之前"的一次性动作，不是第二条心跳路径：拿到令牌后所有
         上行一律走 ``send``/``enqueue_frame``。
 
-        注册不需要任何凭据（0.3.7 / P4）：服务端按 ``uid`` 自动建立或复用设备
-        记录并下发新的设备令牌。``uid`` 只是标识符，**不是**秘密——请求里没有
-        任何"证明有权注册"的字段，这正是开放注册的含义。
+        注册**不需要**设备凭据（0.3.7 / P4）：服务端按 ``uid`` 自动建立或复用设备
+        记录并下发新的设备令牌。``uid`` 只是标识符，**不是**秘密。
+
+        可选的部署准入密钥（A4）：服务端配置了 ``OBS_ENROLL_KEY`` 时，创建新设备行
+        与重新准入已卸载设备会校验它；此时调用方把密钥原文经 ``code`` 传入，这里
+        放进请求体 ``code`` 字段。**未配置（空串）时绝不发送该字段**——保持旧的
+        零凭据语义，也避免服务端把空串当成"提供了错误密钥"。已有活跃设备的令牌
+        轮换本来就不校验密钥，所以换 key 不会把在跑的机器踢下线。
         """
 
-        body = {
+        body: dict[str, Any] = {
             "uid": str(device_uid),
             "hostname": str(hostname),
             "os_name": str(os_name),
@@ -739,6 +750,11 @@ class Link:
             "sysinfo": dict(sysinfo or {}),
             "sessions": [dict(item) for item in (sessions or [])],
         }
+        admission = str(code or "").strip()
+        if admission:
+            body[self.ENROLL_CODE_FIELD] = admission
+        if boot_id:
+            body["boot_id"] = str(boot_id)
         response = await self._request("POST", ENROLL_PATH, json=body, timeout=ENROLL_TIMEOUT_S)
         self._raise_for_status(response, what="enroll")
         try:

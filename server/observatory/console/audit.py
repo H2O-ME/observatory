@@ -40,6 +40,9 @@ ACTION_DEVICE_UPDATE = "device.update"
 ACTION_DEVICE_DELETE = "device.delete"
 ACTION_DEVICE_UNINSTALL = "device.uninstall"
 ACTION_COMMAND_CREATE = "command.create"
+#: S1：链路层的跨设备回执（命令不属于发送者）。常量由 ``link.journal`` 拥有
+#: （link 不能 import console，A4），这里镜像一份以便审计页/运维能直接 grep。
+ACTION_COMMAND_FOREIGN_RESULT = "command.foreign_result"
 ACTION_CONTROL_GRANT = "control.grant"
 ACTION_CONTROL_VIEW = "control.view"
 ACTION_FILE_OP = "files.op"
@@ -149,6 +152,7 @@ __all__ = [
     "ACTION_BACKUP_DELETE",
     "ACTION_BACKUP_RETRIEVE",
     "ACTION_COMMAND_CREATE",
+    "ACTION_COMMAND_FOREIGN_RESULT",
     "ACTION_CONTROL_GRANT",
     "ACTION_DEVICE_DELETE",
     "ACTION_DEVICE_UNINSTALL",

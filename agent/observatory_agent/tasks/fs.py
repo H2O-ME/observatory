@@ -39,11 +39,20 @@ log = logging.getLogger(__name__)
 
 MAX_LIST_ENTRIES = 5_000
 MAX_SEARCH_RESULTS = 500
-#: 单次 files read 的原始字节上限。base64 编码后体积 ×4/3，必须给协议的
-#: MAX_ENVELOPE_BYTES(1MiB) 留余量——1MiB 原文 ≈1.37MiB 信封会被服务端
-#: 422 且整批连坐丢弃，700KiB 编码后 ≈933KiB 安全（P1，2026-10 审查）。
+#: 单次 ``files read`` 的**原始**字节上限。base64 后体积 ×4/3，回执信封必须留在
+#: 协议上限 :data:`core.envelope.MAX_ENVELOPE_BYTES`（1 MiB）以内——超限条目会被
+#: ``link._http_round`` 就地丢弃（服务端整批 422 会连坐 64 条无关回执）。
+#: 700 KiB 原文 ≈933 KiB 信封，留约 90 KiB 余量。
+#:
+#: A1（2026-10 审查）：这个值此前**不是**瓶颈却能正常工作吗？不能——700 KiB
+#: base64 进 64 KiB 管道头会抛 ``PipeProtocolError``。真正修好的是管道
+#: （body 外置到二进制载荷，见 ``core/envelope.encode_binary``），这里保持
+#: 700 KiB 是因为**链路**上限（1 MiB 信封）依然存在，与管道能力无关。
 MAX_READ_BYTES = 700 * 1024
-MAX_WRITE_BYTES = 4 * 1024 * 1024
+#: 单次 ``files write`` 的原始字节上限。服务端 ``MAX_CHUNK_BYTES`` 就是 1 MiB
+#: （``console/files.py:37``），超过会直接 400；受控端这里与它对齐，让"太大"在
+#: 第一跳就以明确错误暴露，而不是传上去才被拒。
+MAX_WRITE_BYTES = 1024 * 1024
 #: 0.3.1（F35）：稀疏文件防护——写入 offset 最多允许超出现有大小这么多字节。
 #: NTFS 会把 offset 之前的空洞填零，没有上界时一条伪造 offset 的命令就能写爆磁盘。
 MAX_WRITE_SPAN_BYTES = 64 * 1024 * 1024

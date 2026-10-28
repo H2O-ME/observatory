@@ -350,6 +350,14 @@ async def delete_device(
         ip=client_ip(request),
     )
     if not result.get("ok"):
+        if result.get("stale"):
+            # S5 的竞态：清理期间这台机器重新注册了。记录被刻意保留，任务作废；
+            # 告诉操作者真相（重新删一次即可），而不是声称"将在后台重试"。
+            raise AppError(
+                ErrorCode.BAD_REQUEST,
+                "设备记录在清理期间被重新注册，本次删除已作废，请刷新后重试",
+                http_status=409,
+            )
         # The row is kept and flagged; say so instead of claiming a clean delete.
         raise AppError.internal(
             f"设备记录保留：画面数据清理失败，将在后台重试（{result.get('error') or '未知原因'}）"

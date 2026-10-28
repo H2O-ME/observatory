@@ -264,13 +264,21 @@ def executable_path() -> Path:
     return Path(sys.executable).resolve()
 
 
-def worker_arguments(session_id: int, *, frozen: bool | None = None) -> list[str]:
-    """worker 子进程参数；``frozen`` 可注入以便单测。"""
+def worker_arguments(session_id: int, *, frozen: bool | None = None, boot_id: str = "") -> list[str]:
+    """worker 子进程参数；``frozen``/``boot_id`` 可注入以便单测。
+
+    ``boot_id`` 经命令行传入而不是让 worker 读配置（A2）：worker 用登录用户令牌
+    运行，读不了 SYSTEM 独占的 config.json。它只是"本次服务进程启动"的随机标识，
+    不是凭据，放进命令行没有泄密面。
+    """
 
     is_frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+    arguments = ["--worker", "--session", str(session_id)]
+    if boot_id:
+        arguments += ["--boot-id", str(boot_id)]
     if is_frozen:
-        return ["--worker", "--session", str(session_id)]
-    return ["-m", "observatory_agent", "--worker", "--session", str(session_id)]
+        return arguments
+    return ["-m", "observatory_agent", *arguments]
 
 
 def build_command_line(executable: str | Path, arguments: Sequence[str]) -> str:
@@ -420,11 +428,12 @@ def launch_worker(
     executable: str | Path | None = None,
     extra_args: Sequence[str] = (),
     frozen: bool | None = None,
+    boot_id: str = "",
 ) -> int:
     """在指定会话拉起 worker，返回 PID；失败抛 :class:`SessionError`。"""
 
     exe = Path(executable) if executable is not None else executable_path()
-    arguments = [*worker_arguments(session_id, frozen=frozen), *extra_args]
+    arguments = [*worker_arguments(session_id, frozen=frozen, boot_id=boot_id), *extra_args]
     command_line = build_command_line(exe, arguments)
     return _create_process_as_user(session_id, str(exe), command_line)
 

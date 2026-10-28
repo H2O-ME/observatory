@@ -48,6 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--console", action="store_true", help="前台运行（调试用）")
     parser.add_argument("--worker", action="store_true", help="以会话工作进程身份运行")
     parser.add_argument("--session", type=int, default=0, help="工作进程所属会话 ID")
+    # A2：worker 不读 config.json（SYSTEM 独占），boot_id 由服务进程经命令行传入。
+    parser.add_argument("--boot-id", dest="boot_id", default="", help=argparse.SUPPRESS)
 
     # -- 更新/卸载助手（新形状 + 0.2.10 兼容形状）------------------------
     parser.add_argument("--update-helper", dest="update_helper", default="", help="（内部）待应用的更新目录")
@@ -69,9 +71,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stop", action="store_true", help="停止服务")
     parser.add_argument("--status", action="store_true", help="查看服务状态")
     parser.add_argument("--doctor", action="store_true", help="打印诊断信息")
-    # 兼容：旧安装脚本仍会传这两个参数。0.3.7 起注册开放，它们是空操作，
-    # 保留只为让"老脚本 + 新二进制"能装完，不再写进配置（也不打印）。
-    parser.add_argument("--enroll-code", dest="enroll_code", default="", help=argparse.SUPPRESS)
+    # A4：部署准入密钥（服务端 ``OBS_ENROLL_KEY`` 非空时才需要）。字段名沿用旧脚本
+    # 的 ``--enroll-code``，但语义**不是**旧的一次性注册票据——它是本轮部署的
+    # 服务端准入密钥原文，会随每次（重新）注册发送。未传则保持零凭据注册。
+    parser.add_argument("--enroll-code", dest="enroll_code", default="", help="部署准入密钥（可选；对应服务端 OBS_ENROLL_KEY）")
+    # 兼容：0.2.10/0.3.7 的安装脚本还会传 ``--install-token``。它的一次性票据语义
+    # 已被 schema v9 删除（服务端忽略该字段），这里只接受作为准入密钥的别名，
+    # 避免"老脚本 + 新二进制"装完却注册不上。
     parser.add_argument("--install-token", dest="install_token", default="", help=argparse.SUPPRESS)
     parser.add_argument("--base-url", dest="base_urls", action="append", default=[], help="服务器地址（可多次）")
     parser.add_argument("--exe", default="", help="注册服务时使用的可执行文件路径")
@@ -94,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         return _run_purge_helper(args)
 
     if args.worker:
-        return _run_worker(args.session)
+        return _run_worker(args.session, boot_id=args.boot_id)
 
     if args.doctor:
         return _run_doctor()
@@ -141,12 +147,12 @@ def _run_console() -> int:
     return int(run_console())
 
 
-def _run_worker(session_id: int) -> int:
+def _run_worker(session_id: int, *, boot_id: str = "") -> int:
     """用户会话内的 worker；由服务进程用 CreateProcessAsUser 拉起。"""
 
     from .core.runtime import run_worker
 
-    return int(run_worker(int(session_id)))
+    return int(run_worker(int(session_id), boot_id=boot_id))
 
 
 def _install(args: argparse.Namespace) -> int:
@@ -225,9 +231,13 @@ def _apply_cli_config(args: argparse.Namespace) -> None:
 
 def _cli_config_changes(args: argparse.Namespace) -> dict:
     changes: dict = {}
-    # --enroll-code / --install-token 已废弃：注册不需要凭据，旧脚本传了也不写配置。
     if args.base_urls:
         changes["base_urls"] = [str(url).rstrip("/") for url in args.base_urls if str(url).strip()]
+    # A4：准入密钥落盘（配置文件比环境变量更可靠——服务的环境块来自 SCM，
+    # 安装器设的 ``OBS_ENROLL_KEY`` 不一定传得进去）。空值不写，保持零凭据。
+    enroll_key = str(getattr(args, "enroll_code", "") or getattr(args, "install_token", "") or "").strip()
+    if enroll_key:
+        changes["enroll_key"] = enroll_key
     return changes
 
 
@@ -294,6 +304,8 @@ def _run_doctor() -> int:
     print(f"设备标识        : {config.device_uid}")
     print(f"本次 boot_id    : {config.boot_id}")
     print(f"已注册          : {'是' if config.token else '否'}")
+    # A4：只报"是否配置"，绝不打印密钥原文（A22 脱敏纪律）。
+    print(f"准入密钥        : {'已配置' if config.enroll_key else '未配置（服务端开放注册）'}")
     print(f"服务器地址      : {', '.join(config.base_urls)}")
     print(f"心跳间隔        : {config.setting('heartbeat_interval_s', 20)}s")
     print(f"outbox 上限     : {limits.max_items} 条 / {limits.max_bytes // (1024 * 1024)} MiB（{limits.overflow}）")

@@ -20,8 +20,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ..core.clock import now_ms
 from ..core.config import resolve_version
-from ..core.crypto import decode_session
-from .deps import get_settings
+from .deps import evaluate_session, get_settings
 
 log = logging.getLogger(__name__)
 
@@ -112,19 +111,18 @@ async def console_socket(websocket: WebSocket) -> None:
         or websocket.cookies.get("obs_session", "")
         or _bearer(websocket)
     )
-    payload = decode_session(token, secret_key=settings.secret_key)
+    payload, reason = evaluate_session(
+        token,
+        secret_key=settings.secret_key,
+        # P1（2026-10 审查）：与 require_admin 相同的 F15 凭据版本校验。此前 WS
+        # 事件流只验签名与过期——被盗会话在改密/TOTP 变更后仍能持续接收
+        # device_updated / command_created / frame_added 实时数据最长 720 分钟。
+        # S6 起三者（HTTP 依赖 / /auth/session / WS）共用同一个判定。
+        current_pwv=int(getattr(websocket.app.state, "credential_version", 0) or 0),
+    )
     if payload is None:
         await websocket.accept()
-        await websocket.close(code=CLOSE_UNAUTHORIZED, reason="unauthorized")
-        return
-
-    # P1（2026-10 审查）：与 require_admin 相同的 F15 凭据版本校验。此前 WS
-    # 事件流只验签名与过期——被盗会话在改密/TOTP 变更后仍能持续接收
-    # device_updated / command_created / frame_added 实时数据最长 720 分钟。
-    current_pwv = int(getattr(websocket.app.state, "credential_version", 0) or 0)
-    if int(payload.get("pwv", 0) or 0) != current_pwv:
-        await websocket.accept()
-        await websocket.close(code=CLOSE_UNAUTHORIZED, reason="credential-version")
+        await websocket.close(code=CLOSE_UNAUTHORIZED, reason=reason or "unauthorized")
         return
 
     await websocket.accept()

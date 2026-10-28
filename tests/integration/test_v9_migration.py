@@ -112,7 +112,8 @@ def test_v8_to_v9_archives_and_drops_legacy_tables(tmp_dir: Path) -> None:
     report = asyncio.run(run())
     assert report.from_version == 8
     assert report.to_version == SCHEMA_VERSION
-    assert report.applied == (9,)
+    # v9（本用例的主题）+ v10（清理意图，S5）在同一个事务里连续应用。
+    assert report.applied == (9, 10)
     assert report.backup_path is not None and report.backup_path.exists()
 
     connection = sqlite3.connect(database_path)
@@ -143,7 +144,7 @@ def test_v8_to_v9_archives_and_drops_legacy_tables(tmp_dir: Path) -> None:
         assert rows[2][1] == "OBS-GONE-1", "墓碑归档要把 uid 写进 audit.device_uid"
 
         # 幂等：再跑一次迁移不应重复归档、也不应报错
-        assert connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 9
+        assert connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == SCHEMA_VERSION
     finally:
         connection.close()
 

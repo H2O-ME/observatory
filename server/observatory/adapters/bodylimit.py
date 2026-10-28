@@ -8,7 +8,15 @@ app reads them:
 
 * requests with a ``Content-Length`` are rejected immediately with 413;
 * chunked requests (no ``Content-Length``) get a counting ``receive`` wrapper
-  that aborts as soon as the declared limit is exceeded.
+  that **raises at the crossing read** — the app never receives the over-limit
+  chunk and never learns the rest of the body exists.
+
+S4（2026-10 独立审计）：旧实现只在包裹层记一个 ``overflowed`` 标记，继续把
+超限数据喂给应用，直到应用准备响应时才改写成 413——业务副作用已经发生。
+现在改成"读到这里就炸"：``receive`` 一越过阈值就抛 :class:`_BodyTooLarge`，
+异常直穿上层的中间件与框架；即使某个框架把它吞掉并坚持要回自己的响应，
+``send`` 拦截也会把 ``http.response.start`` 改写成统一的 413 信封（异常路径
+与正常路径的载荷字节完全相同）。
 
 Limits are per path prefix; anything unlisted falls back to a small default
 (console JSON payloads). The agent-package upload keeps its own 256 MB check
@@ -17,9 +25,12 @@ inside the handler — the network-layer cap here just adds headroom above it.
 
 from __future__ import annotations
 
+import json
 import logging
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from ..core.errors import BAD_REQUEST, AppError, error_payload
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +51,22 @@ DEFAULT_BODY_LIMIT = 2 * MIB
 UPLOAD_LIMIT = 320 * MIB
 UPLOAD_PREFIX = "/api/v1/updates/agent"
 
-_TOO_LARGE = b'{"code":"BAD_REQUEST","message":"request body too large"}'
+#: 超限错误的 message 沿用旧实现（客户端/脚本可能按文本判断），只补上
+#: ``retryable`` 与 ``server_time_ms``，与 AppError 的错误信封保持一致。
+_TOO_LARGE_MESSAGE = "request body too large"
+
+
+def _rejection_body() -> bytes:
+    """统一的 413 载荷：{code,message,retryable,server_time_ms}。
+
+    错误码沿用既有 body-limit 约定（``BAD_REQUEST``），不新造 code——
+    413 只是 HTTP 状态，不是新的业务错误类别；具体上限值只进日志，
+    不改变对外的 message 文本。
+    """
+
+    error = AppError(BAD_REQUEST, _TOO_LARGE_MESSAGE, retryable=False, http_status=413)
+    payload = error_payload(error)
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
 def _limit_for(path: str, *, frame_limit: int) -> int:
@@ -50,6 +76,8 @@ def _limit_for(path: str, *, frame_limit: int) -> int:
     if path.startswith(UPLOAD_PREFIX):
         return UPLOAD_LIMIT
     if path.startswith("/api/v1/agent/frames"):
+        # 帧上传是原始图像字节，自己的上限由 settings.max_frame_bytes 决定；
+        # 这里只加传输层 headroom，不能套用 256 KiB 的注册上限。
         return frame_limit + 256 * KIB
     return DEFAULT_BODY_LIMIT
 
@@ -78,61 +106,93 @@ class BodyLimit:
 
         headers = dict(scope.get("headers") or [])
         declared = headers.get(b"content-length")
-        if declared:
+        if declared is not None:
             try:
-                if int(declared) > limit:
-                    await self._reject(send, limit)
-                    return
+                oversized = int(declared) > limit
             except ValueError:
-                await self._reject(send, limit)
+                oversized = True
+            if oversized:
+                # 有声明长度时在调用应用之前就拒绝：业务处理器根本不会被执行。
+                await self._reject(send, limit, path=path)
                 return
             await self.app(scope, receive, send)
             return
 
-        # No Content-Length (chunked): wrap receive and abort once the
-        # accumulated body crosses the limit.
+        # 没有 Content-Length（chunked / 分块）：接收侧累计到越限的那一次
+        # receive 立即抛异常，应用（FastAPI 的 request.body()、multipart 解析）
+        # 在当前读取点中断，既拿不到越限数据块，也读不到后续数据。
         received = 0
         overflowed = False
+        rejected = False
+        response_started = False
 
         async def counting_receive() -> Message:
             nonlocal received, overflowed
+            if overflowed:
+                # 已经判定超限：任何后续读取都立刻失败，绝不把剩余字节交给应用。
+                raise _BodyTooLarge(limit)
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b"") or b"")
                 if received > limit:
                     overflowed = True
+                    raise _BodyTooLarge(limit)
             return message
 
-        # Starlette has no clean way to stop reading mid-body from a pure ASGI
-        # wrapper, so we only enforce before the app started responding: the
-        # wrapper marks overflow and the next response message is replaced.
         async def guarded_send(message: Message) -> None:
-            if overflowed and message["type"] == "http.response.start":
-                raise _BodyTooLarge(limit)
+            """兜底：把应用自己的响应改写成统一 413。
+
+            正常路径下异常会直穿回 :meth:`__call__`，根本走不到这里；
+            只有在框架/应用吞掉 :class:`_BodyTooLarge` 并继续响应时才需要它。
+            """
+
+            nonlocal rejected, response_started
+            if message["type"] == "http.response.start":
+                if rejected:
+                    return
+                if overflowed:
+                    rejected = True
+                    await self._reject(send, limit, path=path)
+                    return
+                response_started = True
+                await send(message)
+                return
+            if rejected and message["type"] == "http.response.body":
+                # 已经用 413 回过话，应用后续的 body 全部丢弃（不能再写）。
+                return
             await send(message)
 
         try:
             await self.app(scope, counting_receive, guarded_send)
-        except _BodyTooLarge as exc:
-            log.warning("body limit exceeded (path=%s limit=%sB)", path, exc.limit)
-            # Drain-ish: the app already consumed the stream; just answer 413.
-            await self._reject(send, limit)
+        except _BodyTooLarge:
+            if rejected or response_started:
+                # 响应已经开始（流式响应）就无法再改成 413；此时唯一正确的
+                # 动作是让连接结束，日志保留证据。
+                log.warning("body limit exceeded after response started (path=%s limit=%sB)", path, limit)
+                return
+            await self._reject(send, limit, path=path)
+            return
+        # 应用把异常吞掉后一声不吭地返回了：不能把客户端晾在那里。
+        if overflowed and not rejected and not response_started:
+            await self._reject(send, limit, path=path)
 
-    async def _reject(self, send: Send, limit: int) -> None:
-        log.warning("rejecting oversized body (limit=%sB)", limit)
+    async def _reject(self, send: Send, limit: int, *, path: str) -> None:
+        log.warning("rejecting oversized body (path=%s limit=%sB)", path, limit)
+        body = _rejection_body()
         await send(
             {
                 "type": "http.response.start",
                 "status": 413,
                 "headers": [
                     (b"content-type", b"application/json"),
-                    (b"content-length", str(len(_TOO_LARGE)).encode("latin-1")),
+                    (b"content-length", str(len(body)).encode("latin-1")),
                     (b"cache-control", b"no-store"),
+                    # 请求体没读完就回话了，连接不可复用。
                     (b"connection", b"close"),
                 ],
             }
         )
-        await send({"type": "http.response.body", "body": _TOO_LARGE})
+        await send({"type": "http.response.body", "body": body})
 
 
 class _BodyTooLarge(Exception):
@@ -141,4 +201,10 @@ class _BodyTooLarge(Exception):
         self.limit = limit
 
 
-__all__ = ["AGENT_BODY_LIMITS", "BodyLimit", "DEFAULT_BODY_LIMIT"]
+__all__ = [
+    "AGENT_BODY_LIMITS",
+    "BodyLimit",
+    "DEFAULT_BODY_LIMIT",
+    "UPLOAD_LIMIT",
+    "UPLOAD_PREFIX",
+]

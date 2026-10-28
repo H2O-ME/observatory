@@ -214,7 +214,8 @@ def test_a14_archive_closure(tmp_dir: Path) -> None:
             assert row.status == archive.STATUS_DELETED
         assert service.stats()["remote_deleted"] == 5
 
-        # 4) 远端删除失败可观测：返回 0、行保留错误、不抛 500
+        # 4) 远端删除失败必须显式失败（S3）：旧实现返回 0 让上层当成"没东西可删"，
+        #    继续删归档账目与设备记录并报告成功。现在抛 ArchiveError，账目保留可重试。
         other_id = seed_device(client, uid="OBS-ARCH2", token="archive-device-2")
         other_local = storage.absolute(
             settings, archive.local_path_for(settings.archive_path_prefix, REMOTE_BLOB_A)
@@ -243,10 +244,11 @@ def test_a14_archive_closure(tmp_dir: Path) -> None:
 
         other_row = client.portal.call(insert_other)
         mock.fail_tree = True
-        failed_removed = client.portal.call(purge, "OBS-ARCH2")
-        assert failed_removed == 0
+        with pytest.raises(archive.ArchiveError):
+            client.portal.call(purge, "OBS-ARCH2")
         other = client.portal.call(load_row, other_row)
-        assert other.status == archive.STATUS_FAILED
+        assert other is not None, "失败时归档账目必须保留（否则无法定位远端副本）"
+        assert other.status == archive.STATUS_UPLOADED, "删远端失败不改变'已上传'这一事实"
         assert "远端递归删除失败" in str(other.error or "")
         assert service._last_error, "失败必须可观测（_last_error / 备份页 stats）"
 

@@ -20,11 +20,13 @@ import sys
 from pathlib import Path
 from typing import Any, Final
 
-from .config import LOG_DIR, ensure_dirs
+from .config import LOG_DIR, ensure_dirs, worker_log_dir
 
 FORMAT = "%(asctime)s %(levelname)-7s [%(process)d:%(threadName)s] %(name)s: %(message)s"
 MAX_BYTES = 2 * 1024 * 1024
 BACKUP_COUNT = 3
+#: worker 进程的日志角色前缀（``worker-3``）：这些角色写用户可写目录（A2）。
+WORKER_ROLE_PREFIX = "worker"
 #: 永远不该出现在日志里的字段名（按键名匹配）。
 SECRET_FIELD_HINTS = ("token", "secret", "password", "code", "authorization")
 #: 消息文本里疑似"敏感字段=值"的模式（F38：Filter 层兜底脱敏）。``redact``
@@ -44,6 +46,12 @@ def redact(value: Any) -> str:
     if len(text) <= 4:
         return "***"
     return f"{text[:2]}***{text[-2:]}"
+
+
+def is_worker_role(role: str) -> bool:
+    """该日志角色是否属于用户会话里的 worker（A2：决定日志目录）。"""
+
+    return str(role or "").startswith(WORKER_ROLE_PREFIX)
 
 
 def _scrub_secret_match(match: "re.Match[str]") -> str:
@@ -89,14 +97,25 @@ def setup_logging(
     （如 ``doctor`` / ``cli``），日志写到独立的 ``<role>.log``，不与服务主日志
     互相轮转争抢——这是本函数对临时场景的全部约定，调用方无需其它配置。
 
+    A2（2026-10 审查）：``role`` 以 ``worker`` 开头时日志落在
+    :func:`core.config.worker_log_dir`（用户会话可写），**不**碰数据目录——
+    数据目录已被收紧到 SYSTEM+Administrators，登录用户写那里会 PermissionError，
+    而日志建不起来 worker 就启动失败。该目录对 SYSTEM 可读，``log_tail`` 照常工作。
+
     所有 Handler 都挂 :class:`SecretScrubber`（F38）：即使某个日志点忘了先过
     ``redact``，令牌/密码值也会在落盘前被替换成短摘要。
     """
 
-    target_dir = Path(directory) if directory is not None else Path(LOG_DIR)
     if directory is not None:
+        target_dir = Path(directory)
+        target_dir.mkdir(parents=True, exist_ok=True)
+    elif is_worker_role(role):
+        # worker 进程：用户可写目录；**不**调用 ensure_dirs()（那会去动
+        # SYSTEM 独占的 %ProgramData% 目录并触发 icacls）。
+        target_dir = worker_log_dir()
         target_dir.mkdir(parents=True, exist_ok=True)
     else:
+        target_dir = Path(LOG_DIR)
         ensure_dirs()
     path = target_dir / f"{role}.log"
 
@@ -129,11 +148,20 @@ def setup_logging(
     return path
 
 
+def log_dir_for(role: str, directory: Path | None = None) -> Path:
+    """某角色的日志目录：显式 ``directory`` > worker 角色目录 > 服务数据目录。"""
+
+    if directory is not None:
+        return Path(directory)
+    if is_worker_role(role):
+        return worker_log_dir()
+    return Path(LOG_DIR)
+
+
 def read_tail(lines: int = 200, role: str = "agent", directory: Path | None = None) -> list[str]:
     """读日志尾部（供控制台 ``log_tail`` 命令使用）；失败返回空列表并记日志。"""
 
-    target_dir = Path(directory) if directory is not None else Path(LOG_DIR)
-    path = target_dir / f"{role}.log"
+    path = log_dir_for(role, directory) / f"{role}.log"
     try:
         with open(path, "rb") as handle:
             handle.seek(0, 2)
@@ -154,6 +182,9 @@ __all__ = [
     "SECRET_FIELD_HINTS",
     "SECRET_VALUE_PATTERN",
     "SecretScrubber",
+    "WORKER_ROLE_PREFIX",
+    "is_worker_role",
+    "log_dir_for",
     "read_tail",
     "redact",
     "setup_logging",

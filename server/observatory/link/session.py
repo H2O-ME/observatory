@@ -351,6 +351,7 @@ class AgentSession:
                 await self.journal.settle_status(
                     record.id,
                     "cancelled",
+                    device_id=self.device_id,
                     error=exc.message,
                     error_code=exc.code.value,
                 )
@@ -371,7 +372,7 @@ class AgentSession:
         # Budget exhausted: mark the command and stop redelivering it. If a result
         # slipped in between the wait timeout and this update, report that result
         # instead of losing it.
-        settled = await self.journal.mark_timeout(record.id)
+        settled = await self.journal.mark_timeout(record.id, device_id=self.device_id)
         self.outbox.ack(record.id)
         if settled is not None and settled.status in {"ok", "error"}:
             return Result(
@@ -684,11 +685,22 @@ class AgentSession:
         # spawned the helper — that is "accepted", not "done". The row goes to
         # ``running`` and only a persisted ACK may settle it ``ok``; otherwise the
         # console reported success while the purge could still fail.
+        #
+        # S2：这条分支同时也是卸载回执的**唯一**出口。``settle_started`` 返回
+        # ``handled`` 表示回执已被"受理"语义吸收（含重连重放：``changed=False``，
+        # 状态保持 running），此时必须 return，绝不能继续往下走普通结算——否则
+        # 一次断线重放就能让没有 ACK 的卸载变成 ok。
         if ok and isinstance(result, dict) and result.get("started"):
             ack_timeout_ms = int(getattr(self.settings, "uninstall_ack_timeout_s", 600) or 600) * 1000
-            if await self.journal.settle_started(command_id, ack_timeout_ms=ack_timeout_ms):
+            outcome = await self.journal.settle_started(
+                command_id, device_id=self.device_id, ack_timeout_ms=ack_timeout_ms
+            )
+            if outcome.handled:
                 self.outbox.ack(command_id)
-                await self._emit("command_updated", {"command_id": command_id, "ok": True, "status": "running"})
+                await self._emit(
+                    "command_updated",
+                    {"command_id": command_id, "ok": True, "status": outcome.status},
+                )
                 return
         error = str(body.get("error") or "") or None
         raw_code = body.get("error_code")
@@ -696,18 +708,36 @@ class AgentSession:
         elapsed_ms = body.get("elapsed_ms")
         if isinstance(elapsed_ms, int) and elapsed_ms >= 0:
             self._stats["last_elapsed_ms"] = elapsed_ms
-        await self.journal.settle_result(
+        # S1：结算目标绑定本会话认证到的设备行 id；别的设备 id 在这条 journal
+        # 上不可见（不存在的 id 不会被写入一行）。
+        settled_record = await self.journal.settle_result(
             command_id,
+            device_id=self.device_id,
             ok=ok,
             result=result,
             error=error,
             error_code=error_code,
         )
+        if settled_record is None:
+            # 不属于这台设备（或历史行）：不 ack、不发状态变更，留待审计/排查。
+            log_event(
+                log,
+                logging.WARNING,
+                "session.result_foreign_device",
+                device_id=self.device_id,
+                command_id=command_id,
+            )
+            return
         # A result proves delivery; stop redelivering that command. A late
         # duplicate result is idempotent in the journal (first result wins).
         self.outbox.ack(command_id)
         # F4: command status changed — tell the console hub (best-effort).
-        await self._emit("command_updated", {"command_id": command_id, "ok": ok})
+        # 以落库后的真实状态为准：卸载命令的普通 ok 回执被 journal 拒绝后仍是
+        # running，这里再报 "ok" 就等于把 P2 的假成功从事件通道补回去了。
+        await self._emit(
+            "command_updated",
+            {"command_id": command_id, "ok": settled_record.status == "ok", "status": settled_record.status},
+        )
 
     def _handle_control_envelope(self, body: dict[str, Any]) -> None:
         token = body.get("session")

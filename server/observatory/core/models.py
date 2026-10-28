@@ -52,6 +52,12 @@ class Device(Base):
     #: busy/missing). Housekeeping retries and the console shows "cleaning up"
     #: instead of claiming a clean delete that did not happen.
     purge_pending_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    #: S5 (v10): *why* that cleanup is queued and whether the remote archive is
+    #: part of it. Without these the retry pass could only guess: a failed manual
+    #: delete was indistinguishable from a post-uninstall purge, and
+    #: ``purge_remote=False`` would have been silently upgraded to a remote wipe.
+    purge_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    purge_remote: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_result_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     #: Changes across an agent reboot; A2 uses it to prove a restart happened.

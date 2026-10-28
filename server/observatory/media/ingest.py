@@ -277,6 +277,10 @@ async def delete_device_data(
     顺序刻意如此：先删本地（不可逆、无远端依赖），再删远端（失败可观测、状态行保留），
     最后删数据库行（一旦删行就无法再定位远端路径）。
 
+    远端删除失败时抛 :class:`archive.ArchiveError`（S3）：数据库行与归档账目都
+    保持原样，由调用方（``console.device_purge``）标记 ``purge_pending_at_ms``
+    并在后台重试。调用方因此绝不能把"异常"当成"清理完成"。
+
     P1（2026-10 业务审查）：``purge_remote=False`` 此前是死参数——接收、写
     审计、发事件，但这里无条件本地+远端全清。现在 False 时跳过远端删除，
     且 ``frame_archives`` 状态行**保留**（它们是远端副本仅存的账目，删了
@@ -287,6 +291,9 @@ async def delete_device_data(
     files, freed = await asyncio.to_thread(_remove_device_dirs, media_settings, str(device.uid))
 
     remote_removed = 0
+    #: 保留该键只为兼容调用方（console/devices.py 读它来决定是否告警）；
+    #: S3 起远端失败不再降级成这个字段，而是抛 ArchiveError，走到这里时
+    #: 远端删除必然已经成功（或本来就没有远端任务），所以恒为空串。
     archive_error = ""
     frames = 0
     if not purge_remote:
@@ -296,11 +303,12 @@ async def delete_device_data(
         frames = int(result.rowcount or 0)
         await session.commit()
     else:
-        try:
-            remote_removed = await archive.purge_device(session, device, settings=media_settings)
-        except (SQLAlchemyError, RuntimeError, ValueError) as exc:
-            archive_error = str(exc)[:200]
-            log.error("设备归档远端清理失败 device=%s: %s", device.uid, exc)
+        # S3（2026-10 独立审计）：这里此前把远端删除失败吞成 archive_error 后继续
+        # 删帧行/归档账目，调用方随后删掉设备记录并报告成功——远端副本还在、账目
+        # 却没了，既无法重试也无法定位。现在让 :class:`archive.ArchiveError`
+        # 直穿到 console.device_purge（它的宽捕获会标记 purge_pending_at_ms 并返回
+        # ok=False），Frame 与 FrameArchive 行都保留给下一拍重试。
+        remote_removed = await archive.purge_device(session, device, settings=media_settings)
         frames = await retention.purge_device(session, int(device.id))
     log.info(
         "设备媒体数据已删除 device=%s 文件=%d 释放=%d 帧行=%d 远端条目=%d",

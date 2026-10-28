@@ -828,6 +828,39 @@ def register_restart_task(
     return True
 
 
+def commit_restart(
+    controller: ServiceController,
+    *,
+    tmp_dir: str | Path,
+    now: Callable[[], datetime] = datetime.now,
+    delay_s: int = 10,
+    register: Callable[..., bool] = register_restart_task,
+    enable_recovery: Callable[..., bool] | None = None,
+) -> dict[str, bool]:
+    """**只做提交**：注册重启机制并返回真实结果，不退出进程（A6）。
+
+    A6 之前 ``restart_agent`` 立刻回 ``ok`` 然后后台再去申请重启——两者都失败时
+    用户已经看到"已重启"，机器其实还停在原地。把"提交"这一步拉回回执之前，
+    就能用**真实结果**回执：至少一个机制成功才报 ok。
+    """
+
+    plan = plan_restart(now=now(), delay_s=delay_s, identity=controller.identity)
+    registered = bool(register(plan, tmp_dir=tmp_dir))
+    recovery = bool((enable_recovery or controller.configure_recovery)())
+    return {"registered": registered, "recovery": recovery}
+
+
+def exit_for_restart(
+    *,
+    exit_process: Callable[[int], None] = os._exit,
+    shutdown_logging: Callable[[], None] = logging.shutdown,
+) -> None:
+    """提交成功后真正退出（不报 STOPPED，让 SCM 按失败动作重启我们）。"""
+
+    shutdown_logging()
+    exit_process(1)
+
+
 def request_restart(
     controller: ServiceController,
     *,
@@ -842,13 +875,21 @@ def request_restart(
     """A2 的唯一实现：ReloadA（SCM recovery）+ ReloadB（一次性计划任务）。
 
     只有**两个机制都不可用**时抛 :class:`ServiceError`，让上层上报 ``restart_failed``
-    并继续运行——重启失败不能变成“把服务停掉”。
+    并继续运行——重启失败不能变成"把服务停掉"。
+
+    A6 之后主体逻辑拆成 :func:`commit_restart`（可先回执）+ :func:`exit_for_restart`；
+    本函数保留为"提交并立即退出"的兼容入口。
     """
 
-    plan = plan_restart(now=now(), delay_s=delay_s, identity=controller.identity)
-    registered = register(plan, tmp_dir=tmp_dir)
-    recovery = (enable_recovery or controller.configure_recovery)()
-    if not registered and not recovery:
+    outcome = commit_restart(
+        controller,
+        tmp_dir=tmp_dir,
+        now=now,
+        delay_s=delay_s,
+        register=register,
+        enable_recovery=enable_recovery,
+    )
+    if not outcome["registered"] and not outcome["recovery"]:
         raise ServiceError(
             "无法注册任何重启机制（计划任务与 SCM recovery 都失败），拒绝停服",
             step="request_restart",
@@ -857,12 +898,14 @@ def request_restart(
         "restarting via %s; exiting without reporting STOPPED so SCM treats this as a failure",
         " ".join(
             mechanism
-            for mechanism, ok in (("scm-recovery", recovery), ("scheduled-task", registered))
+            for mechanism, ok in (
+                ("scm-recovery", outcome["recovery"]),
+                ("scheduled-task", outcome["registered"]),
+            )
             if ok
         ),
     )
-    shutdown_logging()
-    exit_process(1)
+    exit_for_restart(exit_process=exit_process, shutdown_logging=shutdown_logging)
 
 
 # ------------------------------------------------------------ uninstall svc ---
@@ -890,6 +933,8 @@ __all__ = [
     "ServiceError",
     "ServiceIdentity",
     "ServiceStatus",
+    "commit_restart",
+    "exit_for_restart",
     "install_service",
     "plan_restart",
     "register_restart_task",

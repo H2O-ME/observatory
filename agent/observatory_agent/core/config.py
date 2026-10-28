@@ -122,35 +122,102 @@ def outbox_path() -> Path:
 OUTBOX_PATH: Path = outbox_path()
 
 
+def worker_log_dir() -> Path:
+    """worker 进程的日志目录：必须**登录用户可写**（A2）。
+
+    服务数据目录被收紧到 SYSTEM+Administrators 之后，用登录用户令牌启动的
+    worker 再往 ``%ProgramData%`` 写日志就会 PermissionError（日志建不起来 →
+    worker 启动即失败）。``%LOCALAPPDATA%`` 属于该用户会话，而 SYSTEM 仍可读，
+    因此它同时满足"用户能写"与"服务端 log_tail 能读"。
+    """
+
+    base = os.environ.get("LOCALAPPDATA", "").strip() or os.environ.get("USERPROFILE", "").strip()
+    if base:
+        return Path(base) / PRODUCT / "logs"
+    # 极端兜底（会话环境块异常时）：临时目录至少可用，且同样在 ProgramData 之外。
+    return Path(os.environ.get("TEMP") or ".") / f"{PRODUCT}-logs"
+
+
+def is_production_path(path: Path) -> bool:
+    """该路径是否位于真实生产数据目录（决定要不要动 ACL）。
+
+    ACL 加固只对**真实现场**有意义：测试/便携目录（``OBS_PROGRAM_DATA`` 覆盖）
+    里收 DACL 只会把跑测试的当前用户锁在外面（``save()`` 的 ``os.replace``
+    直接 PermissionError）。这也是 ``ensure_dirs`` 一直以来的边界，A2 把它抽成
+    一个函数，让配置写入路径共用同一判据。
+    """
+
+    if os.environ.get("OBS_PROGRAM_DATA", "").strip():
+        return False
+    try:
+        return Path(path).resolve().is_relative_to(PROGRAM_DATA.resolve())
+    except OSError:  # 路径解析失败时按"非生产"处理，宁可少加固也不能锁死写者
+        return False
+
+
 def ensure_dirs() -> None:
+    """创建数据目录并收紧 ACL。**只供服务/安装器/更新助手调用**（A2）。
+
+    worker 用登录用户令牌运行，不能也不该碰 ``%ProgramData%``：它通过管道从
+    服务进程接收非敏感设置（``runtime.WorkerRuntime``），日志写
+    :func:`worker_log_dir`。
+    """
+
     for path in (PROGRAM_DATA, LOG_DIR, STAGING_DIR):
         path.mkdir(parents=True, exist_ok=True)
     _harden_acl(PROGRAM_DATA)
 
 
-def _harden_acl(path: Path) -> None:
+#: 敏感路径的 ACL 授权表：只有 SYSTEM 与 Administrators（A2）。
+#: 设备令牌、outbox、staging（更新包）都在这里，普通用户一个字节都不能读。
+SENSITIVE_ACL_GRANTS: tuple[str, ...] = (
+    "SYSTEM:(OI)(CI)F",
+    "Administrators:(OI)(CI)F",
+)
+
+
+def acl_grants(*, allow_owner: bool = False) -> list[str]:
+    """构造 ``icacls`` 授权表（纯函数，便于单测）。
+
+    默认**不**把当前用户放进 DACL——这正是 A2 的要求：令牌/outbox 由 SYSTEM
+    独占。``allow_owner=True`` 只留给"非提权的调试/诊断需要自写目录"这一种
+    情形，生产路径（服务、安装器、更新/卸载助手）一律不提权用户。
+    """
+
+    grants = list(SENSITIVE_ACL_GRANTS)
+    if allow_owner:
+        user = os.environ.get("USERNAME", "").strip()
+        if user and user.lower() != "system":
+            grants.append(f"{user}:(OI)(CI)F")
+    return grants
+
+
+def _harden_acl(path: Path, *, allow_owner: bool = False) -> None:
     """P1（2026-10 审查）：收紧数据目录/配置的 DACL 到 SYSTEM+Administrators。
 
     ProgramData 子目录继承的默认 ACL 允许本地 Users 读取；config.json 里躺着
-    设备令牌与一次性注册码——任意本地用户可窃取令牌冒充受控端。用系统自带的
+    设备令牌与准入密钥——任意本地用户可窃取令牌冒充受控端。用系统自带的
     ``icacls`` 去继承并显式授权（零新依赖；服务以 SYSTEM 运行有权限改自己目录
     的 ACL）。失败只告警：ACL 加固是纵深防御，不能阻断主流程。
+
+    A2（2026-10 审查）：**不再**默认把当前交互用户放进 DACL。旧版这么做是为了
+    让非提权 CLI 还能写配置，代价是普通用户对整棵数据目录有 F——等于把设备
+    令牌公开给本机任何登录用户。改为：
+      * 敏感路径（数据目录、config.json、outbox、staging）只有 SYSTEM+Admins；
+      * worker 不再读写这些路径（设置走管道、日志走 :func:`worker_log_dir`）；
+      * 非提权调试只能用 ``OBS_PROGRAM_DATA`` 指到自建目录。
 
     两个刻意的边界（win_smoke 的 uninstall_staging 曾被第一版锁死）：
       * 只对真实生产目录（无 OBS_PROGRAM_DATA 覆盖、位于系统 ProgramData 下）
         生效——测试/便携目录跳过；
-      * 授权表**保留当前调用者**：CLI 诊断等非提权场景下用户不是 SYSTEM，
-        把自己移出 DACL 会让后续写入全部 PermissionError。
+      * ``allow_owner`` 显式保留调用者（仅少数调试入口使用）。
     """
 
     if os.name != "nt":
         return
-    if os.environ.get("OBS_PROGRAM_DATA", "").strip():
+    if not is_production_path(path):
         return
-    grants = ["SYSTEM:(OI)(CI)F", "Administrators:(OI)(CI)F"]
-    user = os.environ.get("USERNAME", "").strip()
-    if user and user.lower() not in ("system",):
-        grants.append(f"{user}:(OI)(CI)F")
+    grants = acl_grants(allow_owner=allow_owner)
     try:
         result = subprocess.run(
             ["icacls", str(path), "/inheritance:r", "/grant:r", *grants],
@@ -423,6 +490,9 @@ class AgentConfig:
     device_time_offset_ms: int = 0
     protocol: int = 3
     boot_id: str = field(default_factory=new_boot_id)
+    #: A4：部署准入密钥（服务端 ``OBS_ENROLL_KEY``）。空 = 服务端开放注册，
+    #: 请求体里**绝不出现** ``code`` 字段（零凭据语义，不能把旧票据带回来）。
+    enroll_key: str = ""
 
     # -- persistence -----------------------------------------------------
     @classmethod
@@ -445,6 +515,7 @@ class AgentConfig:
             protocol=3,
             # boot_id 故意不从文件读：它必须每个进程不同（A2）。
             boot_id=new_boot_id(),
+            enroll_key=resolve_enroll_key(raw.get("enroll_key")),
         )
         if not config.device_uid:
             config.device_uid = new_device_uid()
@@ -465,6 +536,10 @@ class AgentConfig:
             "device_time_offset_ms": int(self.device_time_offset_ms),
             "protocol": 3,
         }
+        # A4：只有真正配置了准入密钥才写进文件；键不存在 = 零凭据注册，
+        # 不会让旧机器因为"字段存在但为空"而改变行为。
+        if self.enroll_key:
+            payload["enroll_key"] = self.enroll_key
         text = json.dumps(payload, ensure_ascii=False, indent=2)
         # F38：临时名带 pid——两个进程（服务 + CLI 诊断）同时 save 时，旧的
         # 固定名 ".part" 会互相覆盖，产生"原子替换出来却是损坏文件"的竞态。
@@ -496,22 +571,7 @@ class AgentConfig:
     def sanitized_settings(self, values: Mapping[str, Any]) -> dict[str, Any]:
         """剥掉敏感键并记日志（A4：配置 JSON 到设备侧也不许带密钥）。"""
 
-        cleaned: dict[str, Any] = {}
-        stripped: list[str] = []
-        for key, value in values.items():
-            if not isinstance(key, str):
-                log.warning("忽略非字符串配置键 %r", key)
-                continue
-            if key in SECRET_KEYS:
-                stripped.append(key)
-                continue
-            cleaned[key] = value
-        if stripped:
-            log.warning(
-                "服务端配置包含敏感键 %s，已在受控端脱落（服务端不应下发这些字段）",
-                sorted(stripped),
-            )
-        return cleaned
+        return sanitize_settings(values)
 
     def apply_server_config(
         self,
@@ -536,6 +596,49 @@ class AgentConfig:
                 device_time_ms=local_ms, server_time_ms=int(server_time_ms)
             )
         return changed
+
+
+def resolve_enroll_key(value: Any = None) -> str:
+    """解析部署准入密钥（A4）：配置文件优先，其次 ``OBS_ENROLL_KEY`` 环境变量。
+
+    服务端只在**创建新设备行 / 重新准入已卸载设备**时校验它（见
+    ``server/observatory/console/enroll.py`` 的 ``_require_admission_key``）；
+    已有活跃设备的令牌轮换不校验，所以换 key 不会把在跑的机器踢下线。
+
+    返回空串表示"没有配置"——此时注册请求体里不得出现任何凭据字段，
+    保持 0.3.7 的零凭据语义（旧的 ``install_token`` 一次性票据已彻底删除）。
+    """
+
+    text = str(value or "").strip()
+    if text:
+        return text
+    return os.environ.get("OBS_ENROLL_KEY", "").strip()
+
+
+def sanitize_settings(values: Mapping[str, Any]) -> dict[str, Any]:
+    """剥掉敏感键并记日志（A4：配置 JSON 到设备侧也不许带密钥）。
+
+    纯函数：``AgentConfig.sanitized_settings`` 与 worker（只有管道设置、没有
+    config.json 的 :class:`AgentConfig` 实例）共用同一份实现，避免两套过滤
+    规则漂移。
+    """
+
+    cleaned: dict[str, Any] = {}
+    stripped: list[str] = []
+    for key, value in values.items():
+        if not isinstance(key, str):
+            log.warning("忽略非字符串配置键 %r", key)
+            continue
+        if key in SECRET_KEYS:
+            stripped.append(key)
+            continue
+        cleaned[key] = value
+    if stripped:
+        log.warning(
+            "服务端配置包含敏感键 %s，已在受控端脱落（服务端不应下发这些字段）",
+            sorted(stripped),
+        )
+    return cleaned
 
 
 def _as_int(value: Any, default: int = 0) -> int:
@@ -653,11 +756,13 @@ __all__ = [
     "PROGRAM_DATA",
     "OUTBOX_PATH",
     "SECRET_KEYS",
+    "SENSITIVE_ACL_GRANTS",
     "SERVICE_DESCRIPTION",
     "SERVICE_DISPLAY_NAME",
     "SERVICE_NAME",
     "STAGING_DIR",
     "AgentConfig",
+    "acl_grants",
     "compute_device_time_offset",
     "default_base_urls",
     "ensure_dirs",
@@ -667,4 +772,7 @@ __all__ = [
     "outbox_limits_from_env",
     "outbox_path",
     "program_data_dir",
+    "resolve_enroll_key",
+    "sanitize_settings",
+    "worker_log_dir",
 ]

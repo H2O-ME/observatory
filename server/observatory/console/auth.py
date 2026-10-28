@@ -22,7 +22,6 @@ from ..core.crypto import (
     SESSION_COOKIE,
     RateLimiter,
     constant_time_compare,
-    decode_session,
     hash_password,
     issue_session,
     new_totp_secret,
@@ -34,7 +33,7 @@ from ..core.db import get_session
 from ..core.errors import AppError
 from ..core.models import Setting
 from . import audit
-from .deps import client_ip, extract_session_token, get_settings, require_admin
+from .deps import check_console_session, client_ip, get_settings, require_admin
 from .dto import stamp
 from .envelope import ConsoleRoute
 
@@ -205,8 +204,12 @@ async def session_state(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
+    # S6（2026-10 独立审计）：这里此前只 decode JWT，不校验凭据版本——改密或
+    # TOTP 变更后本接口仍回答 authenticated=true，而普通 API 已经 401，前端
+    # 于是在"已登录/掉登录"之间反复跳转。现在复用与 ``require_admin`` 完全相同
+    # 的判定（console.deps.check_console_session），只问结论、不另写一份逻辑。
+    payload, _reason = check_console_session(request)
     settings = get_settings(request)
-    payload = decode_session(extract_session_token(request), secret_key=settings.secret_key)
     secret = await _get_auth_setting(session, KEY_TOTP_SECRET)
     return stamp(
         {

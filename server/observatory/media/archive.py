@@ -371,7 +371,16 @@ class ArchiveService:
     async def purge_device(self, session: AsyncSession, device: Any, *, settings: Any | None = None) -> int:
         """删设备时递归删除远端归档，成功后才把状态行标记"已删除"。
 
-        返回远端删除的条目数；失败时行保持原状态并记录 ``error``（可观测、可重试）。
+        返回远端删除的条目数。**远端删除失败时抛 :class:`ArchiveError`**（S3，
+        2026-10 独立审计）：旧实现在这里把失败降级成 ``return 0``，调用方据此
+        继续删掉帧行、归档账目和设备记录，并对用户报告清理成功——可远端副本
+        仍在，且账目没了就再也定位不回来。现在失败只记录 ``error`` 并抛出，
+        状态行与设备行由调用方保留，交给 ``purge_pending_at_ms`` 重试。
+
+        注意：失败时**不改** ``status``。``status`` 描述的是"这一帧上传到哪一步"，
+        删远端失败并不改变"已上传"这一事实；改成"失败"反而会让 sweep 把已被
+        本地删除的帧重新排队上传（必然失败），并在保留期后把账目当成可清理
+        的失败行删掉。
         """
 
         media_settings = media_settings_mod.resolve(settings, base=self._settings or media_settings_mod.defaults())
@@ -382,7 +391,6 @@ class ArchiveService:
             return 0
 
         removed = 0
-        failure = ""
         if media_settings.archive_ready and media_settings.archive_remote_delete:
             base_path = posixpath.join(
                 str(media_settings.archive_path_prefix or "").strip("/"),
@@ -390,20 +398,17 @@ class ArchiveService:
             ).strip("/")
             try:
                 removed = await self._delete_remote_tree(media_settings, base_path)
-            except (httpx.HTTPError, storage.StorageError, ValueError, KeyError, TypeError) as exc:
-                # KeyError/TypeError 只在 GitHub 返回结构异常时出现，同样属于"可观测失败"，
-                # 不能让删设备请求半途抛 500。
+            except (httpx.HTTPError, storage.StorageError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+                # KeyError/TypeError 只在 GitHub 返回结构异常时出现，RuntimeError 是
+                # 树被截断等拒绝删除的信号——都属于"远端副本状态未知"，必须可观测、
+                # 可重试，而不是静默当成"没东西可删"。
                 failure = f"远端递归删除失败: {exc}"[:500]
                 log.error("归档远端递归删除失败 device=%s path=%s: %s", device.uid, base_path, exc)
-
-        if failure:
-            for row in rows:
-                row.error = failure
-                row.status = STATUS_FAILED
-            await session.commit()
-            self._last_error = failure
-            return 0
-
+                for row in rows:
+                    row.error = failure
+                await session.commit()
+                self._last_error = failure
+                raise ArchiveError(failure) from exc
         for row in rows:
             row.status = STATUS_DELETED
             row.error = ""

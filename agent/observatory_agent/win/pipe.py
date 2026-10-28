@@ -55,8 +55,10 @@ from ..core.envelope import (
     MAX_PAYLOAD_BYTES,
     Envelope,
     EnvelopeError,
+    EnvelopeTooLarge,
     decode_binary,
     encode_binary,
+    restore_spilled_body,
 )
 from . import WindowsOnlyOperation
 
@@ -80,6 +82,18 @@ class PipeProtocolError(ValueError):
     """帧格式非法/流被破坏。"""
 
 
+class PipePayloadTooLarge(PipeProtocolError, EnvelopeTooLarge):
+    """一帧装不下这条消息（A1：把"数据太大"与"流已损坏"分开）。
+
+    这是**可恢复**的错误：调用方应把它变成一条明确的失败回执（例如
+    "分片超过管道上限"），而不是当成协议崩坏去断开/重启 worker。
+
+    同时继承 :class:`core.envelope.EnvelopeTooLarge`，这样不依赖 ``win`` 包的
+    调用方（例如 ``core/runtime.py`` 里的 worker 发送路径）可以用一个与平台
+    无关的异常类判断"太大"，不必 import 管道实现。
+    """
+
+
 class PipeUnavailable(RuntimeError):
     """管道不存在、已断开或无法创建。"""
 
@@ -90,11 +104,17 @@ class PipeSecurityError(PermissionError):
 
 # ------------------------------------------------------------------ framing --
 def encode_message(message: Envelope | Mapping[str, Any], payload: bytes = b"") -> bytes:
-    """把信封/传输头与载荷封成一个管道帧（编解码复用 ``core.envelope``）。"""
+    """把信封/传输头与载荷封成一个管道帧（编解码复用 ``core.envelope``）。
+
+    A1：超限属于"这条消息装不下"，抛 :class:`PipePayloadTooLarge`（可恢复），
+    让上层回一条明确失败回执；其余格式错误仍是 :class:`PipeProtocolError`。
+    """
 
     header = message.to_dict() if isinstance(message, Envelope) else dict(message)
     try:
         return encode_binary(header, payload)
+    except EnvelopeTooLarge as exc:
+        raise PipePayloadTooLarge(f"管道帧超限: {exc}") from exc
     except EnvelopeError as exc:
         raise PipeProtocolError(f"无法编码管道帧: {exc}") from exc
 
@@ -143,7 +163,12 @@ def read_packet(
         if raw is None:
             return None
         payload = raw
-    return header, payload
+    # A1：大 body 被外置在载荷里（头只留 ``_body_bytes``），这里还原成
+    # "头里带 body、载荷为空"的常规形状——上层分发逻辑完全不需要知道外置格式。
+    try:
+        return restore_spilled_body(header, payload)
+    except EnvelopeError as exc:
+        raise PipeProtocolError(f"管道帧 body 还原失败: {exc}") from exc
 
 
 def _parse_header(raw: bytes) -> dict[str, Any]:
@@ -727,6 +752,7 @@ __all__ = [
     "PIPE_PREFIX",
     "POLL_INTERVAL_S",
     "PipeClient",
+    "PipePayloadTooLarge",
     "PipeProtocolError",
     "PipeSecurityError",
     "PipeServer",

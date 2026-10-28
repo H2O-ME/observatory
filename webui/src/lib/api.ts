@@ -806,6 +806,13 @@ export function openEventSocket(options: {
   let watchdogMs = 75_000;
   let lastMessageAt = 0;
   let originCursor = 0;
+  /**
+   * W2：连接世代。`connect()` 里有一个 await（bootstrap 域名列表），等待期间
+   * handle 可能被 close()，也可能已经排上了更新的一次重连。每次 connect 领一个
+   * 号，await 返回后只有「仍是当前世代」才允许创建 WebSocket；回调也只认自己
+   * 那条 socket——旧连接不得再发布事件、不得再安排重连。
+   */
+  let connectionGen = 0;
 
   const clearWatchdog = () => {
     if (watchdogTimer !== undefined) {
@@ -816,21 +823,39 @@ export function openEventSocket(options: {
 
   const connect = async () => {
     if (closed) return;
+    const generation = ++connectionGen;
     const origins = await fetchEventWsOrigins();
+    // 等待 bootstrap 期间被关闭：绝不能再建连接——否则 close() 之后仍有一条
+    // WS 在跑，控制台一直显示"在线"，而调用方以为已经断开。
+    if (closed) return;
+    // 等待期间已经有更新的一次 connect（旧连接的 onclose 触发重连）：本次作废。
+    if (generation !== connectionGen) return;
     const list = origins.length ? origins : [`wss://${location.host}`];
     if (originCursor >= list.length) originCursor = 0;
     const token = readToken();
     const query = token ? `?token=${encodeURIComponent(token)}` : "";
-    socket = new WebSocket(`${list[originCursor]}${API_ROOT}/ws${query}`);
+    // 回调闭包绑定这条 socket 自己的身份（ws），不再读可变的 socket 变量。
+    const ws = new WebSocket(`${list[originCursor]}${API_ROOT}/ws${query}`);
+    socket = ws;
     let opened = false;
     lastMessageAt = performance.now();
 
-    socket.onopen = () => {
+    /** 这条连接是否仍是当前连接（未被关闭、未被新一代取代）。 */
+    const isCurrent = () => !closed && socket === ws;
+
+    ws.onopen = () => {
+      if (!isCurrent()) {
+        // 已被 close() 或新一代连接取代：立刻收掉，不留后台长连。
+        ws.close();
+        return;
+      }
       opened = true;
       retry = 0;
       options.onEvent({ type: "socket_open", data: {} });
     };
-    socket.onmessage = (message) => {
+    ws.onmessage = (message) => {
+      // 关闭/换代之后迟到的帧不得再进入 clock、live store 与 React Query。
+      if (!isCurrent()) return;
       lastMessageAt = performance.now();
       try {
         const parsed = JSON.parse(String(message.data)) as LiveEvent;
@@ -841,8 +866,9 @@ export function openEventSocket(options: {
         /* ignore malformed frames: one bad event must not kill the console */
       }
     };
-    socket.onclose = (event) => {
-      if (socket === null) return;
+    ws.onclose = (event) => {
+      // 旧连接关闭不得发布事件、不得安排重连（新一代连接已经接手）。
+      if (socket !== ws) return;
       socket = null;
       clearWatchdog();
       options.onEvent({ type: "socket_closed", code: event.code, data: {} });
@@ -854,17 +880,17 @@ export function openEventSocket(options: {
       retry += 1;
       timer = window.setTimeout(() => void connect(), delay);
     };
-    socket.onerror = () => {
+    ws.onerror = () => {
       // An error is always followed by `onclose`; closing here guarantees it.
-      socket?.close();
+      ws.close();
     };
 
     // Connection watchdog: `performance.now()` is monotonic and is used only to
     // detect a silently dead socket, never to judge device freshness (spec C5).
     clearWatchdog();
     watchdogTimer = window.setInterval(() => {
-      if (closed || !socket) return;
-      if (performance.now() - lastMessageAt > watchdogMs) socket.close();
+      if (!isCurrent()) return;
+      if (performance.now() - lastMessageAt > watchdogMs) ws.close();
     }, 5_000);
   };
 
@@ -873,10 +899,15 @@ export function openEventSocket(options: {
   return {
     close() {
       closed = true;
+      // 让在途的 connect()（await bootstrap 中）返回时看到"已关闭"并作废本次
+      // 连接尝试；同时使任何已排队的重连世代过期。
+      connectionGen += 1;
       clearWatchdog();
       if (timer !== undefined) window.clearTimeout(timer);
-      socket?.close();
+      const ws = socket;
+      // 先清空引用再 close：onclose 回调靠 socket !== ws 判定自己是旧连接。
       socket = null;
+      ws?.close();
     },
     setWatchdogMs(ms: number) {
       if (Number.isFinite(ms) && ms >= 20_000) watchdogMs = ms;

@@ -37,7 +37,7 @@ from .log import log_event
 log = logging.getLogger(__name__)
 
 #: Bump this and append a migration function when the schema changes.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 #: 每个连接都执行的 PRAGMA（W7/F56：journal_mode 需要短暂拿写锁且只需设一次，
 #: 移到迁移路径；NullPool 下每会话新建连接，这里只留真正 per-connection 的项）。
@@ -617,6 +617,32 @@ async def _migration_v9_drop_tickets_and_tombstones(conn: AsyncConnection) -> No
         log.info("migrating: %s archived (%d rows) and dropped", table, len(rows))
 
 
+async def _migration_v10_purge_intent(conn: AsyncConnection) -> None:
+    """S5：把"待重试的设备记录清理"从布尔标记升级成带意图的任务。
+
+    v8 只加了 ``devices.purge_pending_at_ms``，重试通道因此只能按"已卸载 + 待清理"
+    推断语义：手动删除失败的离线设备没有 ``uninstalled_at_ms``，永远进不了重试，
+    于是"会在后台重试"是一句空话。而且重试参数（reason / purge_remote）根本没被
+    记录，``purge_remote=False`` 的手动删除一旦失败，重试会退化成连远端归档一起删。
+
+    这两列就是那个意图：``purge_reason`` 说明谁排的队（手动删除 / 卸载确认后的
+    自动清理），``purge_remote`` 记录当时选择的远端处理方式。重试只看
+    ``purge_reason``，重装路径会把三列一起清掉（转正即撤销旧任务）。
+
+    幂等：``_ensure_column`` 会跳过已存在的列，回填只处理 ``purge_reason IS NULL``
+    的行；v9 之前只有"已卸载后的自动清理"会置标记，所以回填值是可确定的。
+    """
+
+    await _ensure_column(conn, "devices", "purge_reason", "VARCHAR(32) NULL")
+    await _ensure_column(conn, "devices", "purge_remote", "INTEGER NULL")
+    await conn.execute(
+        text(
+            "UPDATE devices SET purge_reason = 'auto_after_uninstall', purge_remote = 1 "
+            "WHERE purge_pending_at_ms IS NOT NULL AND purge_reason IS NULL"
+        )
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline_0_2_10", _migration_v1_baseline),
     Migration(2, "link_v3_0_3_0", _migration_v2_link_v3),
@@ -627,6 +653,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(7, "device_token_history", _migration_v7_device_token_history),
     Migration(8, "command_history_preserved", _migration_v8_command_history),
     Migration(9, "drop_tickets_and_tombstones", _migration_v9_drop_tickets_and_tombstones),
+    Migration(10, "purge_intent", _migration_v10_purge_intent),
 )
 
 

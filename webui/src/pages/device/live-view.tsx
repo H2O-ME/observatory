@@ -162,10 +162,19 @@ export function LiveView({ device }: Props) {
   const [rttMs, setRttMs] = useState<number | null>(null);
   const [textValue, setTextValue] = useState("");
   const [isFullscreen, setIsFullscreen] = useState(false);
+  // W5: stage 节点也暴露成 state。初始不可控制（polling/offline）时 stage 根本
+  // 没渲染，滚轮监听不能只依赖稳定的 send；节点出现/消失时 effect 需要重绑。
+  const [stageNode, setStageNode] = useState<HTMLDivElement | null>(null);
 
   const socketRef = useRef<WebSocket | null>(null);
   const sessionRef = useRef<ControlSession | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
+  // W1: 异步启动世代。stop()、设备切换、卸载都会推进它；grant 返回后只要
+  // 世代对不上就说明这次启动已作废，必须撤销 grant、绝不能装回会话。
+  const lifecycleGenRef = useRef(0);
+  // W1: 卸载检查。世代号在 effect 清理里会推进，这里再保留一个显式的
+  // "已卸载" 标记，异步返回后双重确认。
+  const mountedRef = useRef(true);
   const lastUrlRef = useRef("");
   const lastMoveRef = useRef(0);
   const frameCountRef = useRef(0);
@@ -173,6 +182,11 @@ export function LiveView({ device }: Props) {
   // F41: 修饰键按下状态——keydown 对修饰键只发 down、keyup 补 up，组合键
   // （Ctrl+C / Alt+F4 / Win 组合）才可用；repeat 事件靠该集合去重。
   const heldModifiersRef = useRef<Set<number>>(new Set());
+  // W4: 已按下但可能永远收不到 pointerup 的鼠标键；失焦/停止时补发 up。
+  const heldButtonsRef = useRef<Set<number>>(new Set());
+  // W4: 最后一次归一化坐标（0..NORM）。补发鼠标 up 必须带真实坐标——agent
+  // 收到 mouse 事件会先移动光标，用 0,0 会把远端光标拖到左上角。
+  const lastPointRef = useRef({ x: NORM / 2, y: NORM / 2 });
   // 触屏手势状态：单指点按/双击/长按拖拽、双指滚轮（与 Pointer 事件互斥）。
   const touchRef = useRef({
     startX: 0,
@@ -192,6 +206,13 @@ export function LiveView({ device }: Props) {
 
   const uid = device.uid;
   const issue = controlUnavailableReason(device.presence);
+  // W1: 授权请求在途时设备可能失去实时能力。这种情况下世代号不会变（没有
+  // 调用 stop），但 start 的闭包拿到的是发起时的旧 issue，所以用 ref 读"当前"
+  // 可用性，授权返回后再判一次。在 effect 里同步，避免渲染期写 ref。
+  const issueRef = useRef(issue);
+  useEffect(() => {
+    issueRef.current = issue;
+  }, [issue]);
   const viewport = useViewport();
   const watch = viewport === "watch";
   // Subscribes to the single 1 Hz ticker so the countdown ages while visible.
@@ -224,8 +245,49 @@ export function LiveView({ device }: Props) {
     if (socket && socket.readyState <= WebSocket.OPEN) socket.close();
   }, []);
 
+  /**
+   * W4：释放所有“本地已压下、但 up 帧可能永远收不到”的输入。
+   *
+   * 浏览器失焦、页面隐藏、停止会话或通道断开时，keyup / pointerup /
+   * touchend 不会再派发到 stage；远端会把 Ctrl/Shift/Alt/Meta 或鼠标键一直
+   * 按住（下次点击变成组合键/拖拽），直到 agent 侧兜底超时。这里主动补发
+   * up 帧并清空本地状态。socket 已关时 send() 是 no-op，所以断线清理可以
+   * 复用同一函数。
+   */
+  const releaseAllInputs = useCallback(() => {
+    const point = lastPointRef.current;
+    for (const button of heldButtonsRef.current) {
+      send({ type: "input", ev: { kind: "mouse", action: "up", button, x: point.x, y: point.y, norm: true } });
+    }
+    heldButtonsRef.current.clear();
+
+    // 触屏长按拖拽同样可能收不到 touchend。
+    const touch = touchRef.current;
+    if (touch.longPress) {
+      window.clearTimeout(touch.longPress);
+      touch.longPress = 0;
+    }
+    if (touch.dragging) {
+      touch.dragging = false;
+      send({ type: "input", ev: { kind: "mouse", action: "up", button: 1, x: point.x, y: point.y, norm: true } });
+    }
+    touch.twoFinger = false;
+    touch.wheelAccum = 0;
+    touch.moved = false;
+
+    for (const code of heldModifiersRef.current) {
+      send({ type: "input", ev: { kind: "key", code, down: false } });
+    }
+    heldModifiersRef.current.clear();
+  }, [send]);
+
   const stop = useCallback(
     (nextMessage = "") => {
+      // W1：任何停止（用户点击、失能、卸载、换设备）都让在途的 start 过期；
+      // 它返回后走撤销分支，而不是把会话重新装回来。
+      lifecycleGenRef.current += 1;
+      // W4：先补发 up 帧再关 socket——停止/失焦时本地不会再产生 keyup。
+      releaseAllInputs();
       const active = sessionRef.current;
       sessionRef.current = null;
       setSession(null);
@@ -243,10 +305,33 @@ export function LiveView({ device }: Props) {
       setStatus(nextMessage ? "closed" : "idle");
       setMessage(nextMessage);
     },
-    [closeSocket, uid],
+    [closeSocket, releaseAllInputs, uid],
   );
 
-  useEffect(() => () => stop(""), [stop]);
+  // W1/W4：卸载（包括 keepMounted 下切换设备导致 stop 依赖变化）时标记
+  // 已卸载并作废在途启动；releaseAllInputs 已经在 stop 里。
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      stop("");
+    };
+  }, [stop]);
+
+  // W4：窗口失焦 / 页面隐藏时 keyup 与 pointerup 不会再来，统一补发释放帧。
+  // 控制区域自身的失焦（Tab 离开 stage、点进文本输入框）在 JSX 的 onBlur 处理。
+  useEffect(() => {
+    const onBlur = () => releaseAllInputs();
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") releaseAllInputs();
+    };
+    window.addEventListener("blur", onBlur);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("blur", onBlur);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [releaseAllInputs]);
 
   // A device that falls back to polling (or goes offline) cannot carry input:
   // revoke the grant instead of leaving a control stream running unseen.
@@ -283,10 +368,30 @@ export function LiveView({ device }: Props) {
   const start = async () => {
     if (issue) return;
     stop("");
+    // W1：stop() 已推进过一次世代，这里再领一个本次启动专属的世代号。
+    const generation = ++lifecycleGenRef.current;
     setStatus("granting");
     setMessage("正在申请控制会话…");
+    // 记录已签发的 grant：任何失败/过时分支都要把它还给服务端，否则控制流
+    // 会一直占着设备直到 TTL（600s）到期。
+    let grantedToken = "";
     try {
       const grant = await api.grantControl(uid, CONTROL_TTL_S);
+      grantedToken = grant.token;
+      // W1：授权返回得比停止/卸载/换设备更晚。此时绝不能写 sessionRef、更
+      // 不能开 WS；立即撤销 grant，避免"用户已经离开，远程控制却刚开始"。
+      if (!mountedRef.current || generation !== lifecycleGenRef.current) {
+        void api.revokeControl(uid, grantedToken).catch(() => undefined);
+        return;
+      }
+      // W1：授权等待期间设备失去实时能力（presence 变化不推进世代）：同样
+      // 撤销，绝不打开一条没人看得到的控制流。
+      if (issueRef.current) {
+        void api.revokeControl(uid, grantedToken).catch(() => undefined);
+        setStatus("idle");
+        setMessage(issueRef.current);
+        return;
+      }
       const next: ControlSession = {
         token: grant.token,
         expiresAtMs: grant.expires_at_ms,
@@ -322,6 +427,8 @@ export function LiveView({ device }: Props) {
         }, 9000);
 
         socket.onmessage = (event) => {
+          // W1：已被 stop()/新连接替换的旧 socket 迟到的帧不得再写回舞台。
+          if (socketRef.current !== socket) return;
           if (typeof event.data === "string") {
             try {
               const parsed = JSON.parse(event.data) as { type?: string };
@@ -363,7 +470,9 @@ export function LiveView({ device }: Props) {
           // F41: 远端断开（受控端重启/通道丢失）也要撤销 grant——否则控制流
           // 残留到 TTL，设备一直被独占。
           if (active) void api.revokeControl(uid, active.token).catch(() => undefined);
-          heldModifiersRef.current.clear();
+          // W4：断线后补发不了任何帧（send 是 no-op），但必须清空本地按下
+          // 状态，否则重连后第一次按键会被当成 repeat 吞掉。
+          releaseAllInputs();
           setSession(null);
           setFps(0);
           setStatus(event.code === 4409 ? "error" : "closed");
@@ -382,6 +491,11 @@ export function LiveView({ device }: Props) {
       };
       openSocket();
     } catch (failure) {
+      // 失败路径同样撤销：grant 可能已经签发，只是建 WS 时同步抛了错。
+      if (grantedToken) void api.revokeControl(uid, grantedToken).catch(() => undefined);
+      // 过时的失败不要改写当前 UI（可能已经是另一次启动/已回到 idle）。
+      if (!mountedRef.current || generation !== lifecycleGenRef.current) return;
+      closeSocket();
       sessionRef.current = null;
       setSession(null);
       setStatus("error");
@@ -406,10 +520,14 @@ export function LiveView({ device }: Props) {
     const offsetY = (rect.height - drawHeight) / 2;
     const x = (clientX - rect.left - offsetX) / drawWidth;
     const y = (clientY - rect.top - offsetY) / drawHeight;
-    return {
+    const point = {
       x: Math.round(Math.max(0, Math.min(1, x)) * NORM),
       y: Math.round(Math.max(0, Math.min(1, y)) * NORM),
     };
+    // W4：记录最后一次真实坐标。失焦补发 mouse up 时 agent 会先按这个坐标
+    // 移动光标，不能是 0,0。
+    lastPointRef.current = point;
+    return point;
   };
 
   const onPointerMove = (event: React.PointerEvent) => {
@@ -430,6 +548,8 @@ export function LiveView({ device }: Props) {
     (event.target as HTMLElement).setPointerCapture?.(event.pointerId);
     const { x, y } = normalized(event.clientX, event.clientY);
     const button = event.button === 2 ? 3 : event.button === 1 ? 2 : 1;
+    // W4：记下按下的键，失焦时补 up。
+    heldButtonsRef.current.add(button);
     send({ type: "input", ev: { kind: "mouse", action: "move", x, y, norm: true } });
     send({ type: "input", ev: { kind: "mouse", action: "down", button, x, y, norm: true } });
   };
@@ -438,7 +558,14 @@ export function LiveView({ device }: Props) {
     if (event.pointerType === "touch") return;
     const { x, y } = normalized(event.clientX, event.clientY);
     const button = event.button === 2 ? 3 : event.button === 1 ? 2 : 1;
+    heldButtonsRef.current.delete(button);
     send({ type: "input", ev: { kind: "mouse", action: "up", button, x, y, norm: true } });
+  };
+
+  const onPointerCancel = () => {
+    // W4：指针被系统取消（触摸转滚动、窗口失焦等）时收不到 pointerup，
+    // 统一走一次释放，避免远端鼠标键卡在按下状态。
+    releaseAllInputs();
   };
 
   // -- 触屏手势（移动端远程桌面惯例）--------------------------------------
@@ -578,15 +705,9 @@ export function LiveView({ device }: Props) {
   };
 
   const onTouchCancel = () => {
-    const touch = touchRef.current;
-    cancelLongPress();
-    if (touch.dragging) {
-      touch.dragging = false;
-      sendMouseAt("up", touch.lastX, touch.lastY);
-    }
-    touch.twoFinger = false;
-    touch.wheelAccum = 0;
-    touch.moved = false;
+    // W4：触摸被系统取消（来电、通知、手势冲突）时 touchend 不会再来，
+    // 用统一释放清掉长按拖拽与双指状态。
+    releaseAllInputs();
   };
 
   // F41: 滚轮只走下面的原生非 passive 监听。React 根节点的 wheel 是
@@ -595,8 +716,15 @@ export function LiveView({ device }: Props) {
 
   // F41: 原生非 passive wheel 监听——preventDefault 真正生效，控制画面
   // 滚轮不再同时滚动控制台页面。
+  //
+  // W5：effect 依赖 stageNode 而不是在挂载时读 stageRef.current。设备处于
+  // offline/polling 时 stage 根本不渲染（上面的早期 return），此时读到的
+  // 是 null；设备恢复实时能力后 stage 才出现，旧的 effect 已经结束，监听
+  // 永远装不上——滚轮失效。反过来 WS→polling 时 stage 被移除，监听会留在
+  // 已移除的节点上。做成 callback ref + effect 依赖节点本身，节点出现即
+  // 绑定、消失即解绑。
   useEffect(() => {
-    const stage = stageRef.current;
+    const stage = stageNode;
     if (!stage) return;
     const handler = (event: WheelEvent) => {
       if (!sessionRef.current) return;
@@ -605,7 +733,7 @@ export function LiveView({ device }: Props) {
     };
     stage.addEventListener("wheel", handler, { passive: false });
     return () => stage.removeEventListener("wheel", handler);
-  }, [send]);
+  }, [send, stageNode]);
 
   const MODIFIER_KEYS: Record<string, number> = {
     Control: 0x11,
@@ -663,6 +791,13 @@ export function LiveView({ device }: Props) {
     const element = stageRef.current?.parentElement ?? stageRef.current;
     void element?.requestFullscreen?.();
   };
+
+  // W5：callback ref。stage 只在设备具备实时能力时渲染，用 state 记录节点，
+  // 让 wheel effect 随节点出现/消失重新绑定；stageRef 仍然保留给坐标换算。
+  const attachStage = useCallback((node: HTMLDivElement | null) => {
+    stageRef.current = node;
+    setStageNode(node);
+  }, []);
 
   if (issue) {
     const pollMode = isPollMode(device.presence);
@@ -768,7 +903,7 @@ export function LiveView({ device }: Props) {
           style={isFullscreen ? { width: "100%", height: "100%" } : undefined}
         >
           <div
-            ref={stageRef}
+            ref={attachStage}
             tabIndex={0}
             className={cn(
               "ratio-16-9 relative mx-auto block w-full touch-none select-none overflow-hidden bg-muted outline-none",
@@ -781,12 +916,16 @@ export function LiveView({ device }: Props) {
             onPointerMove={onPointerMove}
             onPointerDown={onPointerDown}
             onPointerUp={onPointerUp}
+            onPointerCancel={onPointerCancel}
             onTouchStart={onTouchStart}
             onTouchMove={onTouchMove}
             onTouchEnd={onTouchEnd}
             onTouchCancel={onTouchCancel}
             onKeyDown={onKeyDown}
             onKeyUp={onKeyUp}
+            // W4：控制区域失去焦点（Tab 移走、点进下方文本框、窗口切走）时
+            // keyup 会落在别的元素上，必须主动释放已按下的键与鼠标键。
+            onBlur={releaseAllInputs}
             onContextMenu={(event) => event.preventDefault()}
             aria-label="实时画面与输入区域"
           >

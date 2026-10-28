@@ -32,6 +32,10 @@ log = logging.getLogger(__name__)
 ERROR_UNSUPPORTED: Final[str] = "UNSUPPORTED"
 ERROR_BAD_REQUEST: Final[str] = "BAD_REQUEST"
 ERROR_INTERNAL: Final[str] = "INTERNAL"
+#: A6：命令在**执行前**就已超出预算（服务端 ``deadline_ms``）。服务端把
+#: ``error_code == "TIMEOUT"`` 映射成 504（见 ``console/files.py`` 的
+#: ``_result_to_error``），所以超时必须是明确的 TIMEOUT，而不是"执行成功"。
+ERROR_TIMEOUT: Final[str] = "TIMEOUT"
 #: F38：同 id 命令仍在执行中（并发重投）时的占位回执错误码。它**不会**进
 #: 回执缓存——服务端稍后重投时仍能拿到正式回执。
 ERROR_IN_FLIGHT: Final[str] = "IN_FLIGHT"
@@ -41,7 +45,14 @@ DEFAULT_RECEIPT_CACHE: Final[int] = 1024
 
 @dataclass(frozen=True, slots=True)
 class Command:
-    """一条下行命令（``command`` 信封的 body）。"""
+    """一条下行命令（``command`` 信封的 body）。
+
+    ``deadline_ms`` 是服务端给的**执行预算**（相对毫秒数），不是绝对时间戳；
+    ``ts_ms`` 必须是**同一进程内与判断时钟同源**的接收时刻。0.3.x 之前
+    ``deadline_ms`` 只被保存、从不检查：命令在 worker 线程池里排队几十秒后
+    照样执行，而用户早已收到超时，于是"删除/写入/重启"这类破坏性动作会在
+    后台悄悄发生（A6）。
+    """
 
     id: str
     type: str
@@ -75,6 +86,51 @@ class Command:
             deadline_ms=deadline,
             ts_ms=int(ts_ms),
         )
+
+    # -- 预算（A6） ------------------------------------------------------
+    @property
+    def deadline_at_ms(self) -> int | None:
+        """绝对截止时刻；没有预算或没有接收时刻时返回 ``None``（不限制）。"""
+
+        if not self.deadline_ms or self.ts_ms <= 0:
+            return None
+        return int(self.ts_ms) + int(self.deadline_ms)
+
+    def remaining_ms(self, now_ms: int) -> int | None:
+        deadline_at = self.deadline_at_ms
+        if deadline_at is None:
+            return None
+        return max(0, deadline_at - int(now_ms))
+
+    def is_expired(self, now_ms: int) -> bool:
+        """是否已超出执行预算（纯函数，时间由调用方注入）。"""
+
+        deadline_at = self.deadline_at_ms
+        return deadline_at is not None and int(now_ms) > deadline_at
+
+    def with_receipt(self, *, ts_ms: int) -> "Command":
+        """换一个接收时刻（同一命令跨进程转发时用：每个进程用自己的时钟起算）。"""
+
+        return Command(
+            id=self.id,
+            type=self.type,
+            payload=self.payload,
+            deadline_ms=self.deadline_ms,
+            ts_ms=int(ts_ms),
+        )
+
+
+def expired_result(command: "Command") -> CommandResult:
+    """预算已耗尽的回执（A6）：明确的 TIMEOUT，绝不执行动作。"""
+
+    return CommandResult(
+        ok=False,
+        error=(
+            f"命令超出执行预算（deadline_ms={command.deadline_ms}），未执行；"
+            "如仍需执行请重新下发命令"
+        ),
+        error_code=ERROR_TIMEOUT,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,9 +307,11 @@ __all__ = [
     "ERROR_BAD_REQUEST",
     "ERROR_IN_FLIGHT",
     "ERROR_INTERNAL",
+    "ERROR_TIMEOUT",
     "ERROR_UNSUPPORTED",
     "Command",
     "CommandDispatcher",
     "CommandHandler",
     "CommandResult",
+    "expired_result",
 ]

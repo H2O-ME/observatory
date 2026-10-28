@@ -16,7 +16,9 @@ from ..core.crypto import SESSION_COOKIE, decode_session
 from ..core.errors import AppError
 
 __all__ = [
+    "check_console_session",
     "client_ip",
+    "evaluate_session",
     "extract_session_token",
     "get_journal",
     "get_links",
@@ -82,14 +84,40 @@ def extract_session_token(request: Request) -> str:
     return request.cookies.get(SESSION_COOKIE, "")
 
 
-async def require_admin(request: Request) -> dict:
-    settings = get_settings(request)
-    payload = decode_session(extract_session_token(request), secret_key=settings.secret_key)
+def evaluate_session(token: str, *, secret_key: str, current_pwv: int) -> tuple[dict | None, str]:
+    """唯一的"这个会话现在还算不算登录"判定（S6，2026-10 独立审计）。
+
+    JWT 签名与过期只是必要条件：密码/TOTP 变更会 bump 凭据版本（F15），
+    旧令牌的 ``pwv`` 与进程内当前值不一致时必须视为已撤销。此前只有
+    ``require_admin`` 做这一步，``/auth/session`` 只 decode，于是改密后
+    session 接口说"已登录"、普通 API 却回 401，前端在两个状态之间反复
+    跳转刷新。现在 decode + 版本校验只在这里实现一次。
+
+    返回 ``(payload, 失败原因)``：payload 非空表示会话当前有效。
+    """
+
+    payload = decode_session(token, secret_key=secret_key)
     if payload is None:
-        raise AppError.auth("未登录或会话已过期")
-    # F15: a password/TOTP change bumps the credential version; sessions issued
-    # before that are revoked even though their JWT signature is still valid.
-    current_pwv = int(getattr(request.app.state, "credential_version", 0) or 0)
-    if int(payload.get("pwv", 0) or 0) != current_pwv:
-        raise AppError.auth("凭据已变更，请重新登录")
+        return None, "未登录或会话已过期"
+    if int(payload.get("pwv", 0) or 0) != int(current_pwv or 0):
+        return None, "凭据已变更，请重新登录"
+    return payload, ""
+
+
+def check_console_session(request: Request) -> tuple[dict | None, str]:
+    """:func:`evaluate_session` 的 HTTP 入口：从 cookie/bearer 取令牌。"""
+
+    settings = get_settings(request)
+    return evaluate_session(
+        extract_session_token(request),
+        secret_key=settings.secret_key,
+        current_pwv=int(getattr(request.app.state, "credential_version", 0) or 0),
+    )
+
+
+async def require_admin(request: Request) -> dict:
+    payload, reason = check_console_session(request)
+    if payload is None:
+        # F15: 密码/TOTP 变更后签名仍有效的旧令牌也必须当作未登录。
+        raise AppError.auth(reason)
     return payload

@@ -37,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.clock import now_ms
 from ..core.crypto import DEVICE_TOKEN_HEADER
 from ..core.db import get_session
-from ..core.errors import AppError
+from ..core.errors import AppError, ErrorCode
 from ..core.log import log_event
 from ..core.models import Device
 from . import audit
@@ -65,25 +65,62 @@ async def confirm_uninstall(
     ``command_id`` is the exact command (new agents). Legacy agents cannot supply
     one, so the single outstanding uninstall is used — and if there is more than
     one, nothing is settled (the ambiguity is audited instead of guessed).
+
+    两条入口（v3 链路信封、``POST /agent/uninstall/ack``）都走这里，所以设备绑定
+    只写一遍：任何被接受的确认都必须属于 ``device`` 自己（S1）。不属于时返回
+    ``refused=True`` 且**不改任何行**——调用方据此拒绝请求。
     """
 
     journal = getattr(app.state, "journal", None)
     resolved_id = command_id
     ambiguous = False
     settled = False
+    refused = False
 
     if journal is not None:
         if resolved_id:
-            record, settled = await journal.settle_ack(resolved_id, result={"acked": True, "source": source})
+            # S1：结算绑定认证设备。command_id 来自设备自报的载荷，只有 commands
+            # 行的 device_id 同时等于这台设备时才算数；``refused`` 说明该命令属于
+            # 别的设备（或已失去归属），那不是本机的卸载证据。
+            outcome = await journal.settle_ack(
+                resolved_id, device_id=int(device.id), result={"acked": True, "source": source}
+            )
+            settled = outcome.changed
+            refused = outcome.refused
         else:
             open_command = await journal.open_uninstall(int(device.id))
             if open_command is not None:
-                record, settled = await journal.settle_ack(
-                    open_command.id, result={"acked": True, "source": source}
+                outcome = await journal.settle_ack(
+                    open_command.id, device_id=int(device.id), result={"acked": True, "source": source}
                 )
+                settled = outcome.changed
+                refused = outcome.refused
                 resolved_id = open_command.id
             else:
                 ambiguous = True
+
+    if refused:
+        # 一行都不改：不标 uninstalled、不删记录、不撤授权。JSON 日志之外还要一条
+        # 审计（journal 已写 command.foreign_result），HTTP 入口据此回 403。
+        log_event(
+            log,
+            logging.WARNING,
+            "uninstall.ack_foreign_command",
+            device_id=int(device.id),
+            device_uid=str(device.uid or ""),
+            command_id=resolved_id or "",
+            source=source,
+            ip=ip,
+        )
+        return {
+            "command_id": resolved_id or "",
+            "settled": False,
+            "uninstalled": False,
+            "ambiguous": False,
+            "refused": True,
+            "record_removed": False,
+            "purge_pending": False,
+        }
 
     if not settled and not ambiguous and resolved_id:
         # The row exists but was already terminal in a way settle_ack refuses
@@ -149,7 +186,13 @@ async def confirm_uninstall(
     # keeps "retry the ACK" answerable while the row still exists.
     marked = False
     if settled and _auto_purge_enabled(app) and not device.purge_pending_at_ms:
+        # S5: 盖章时连"意图"一起写（v10），重试通道才知道这是一次卸载后的自动
+        # 清理、远端归档仍然要删；只写时间戳会让重试只能猜。
+        from .device_purge import PURGE_REASON_AFTER_UNINSTALL
+
         device.purge_pending_at_ms = now_ms()
+        device.purge_reason = PURGE_REASON_AFTER_UNINSTALL
+        device.purge_remote = 1
         await session.commit()
         marked = True
         log_event(
@@ -176,6 +219,7 @@ async def confirm_uninstall(
         "settled": settled,
         "uninstalled": True,
         "ambiguous": ambiguous,
+        "refused": False,
         # The record is removed by the cleanup pass, not by this call.
         "record_removed": False,
         "purge_pending": marked or bool(device.purge_pending_at_ms),
@@ -230,6 +274,13 @@ async def uninstall_ack(
         helper_pid=helper_pid,
         ip=client_ip(request),
     )
+    if result.get("refused"):
+        # 认证通过但命令不属于本机：这是跨设备伪造（S1），必须明确拒绝且零副作用。
+        raise AppError(
+            ErrorCode.AUTH,
+            "命令不属于此设备（uninstall.command_foreign）",
+            http_status=403,
+        )
     return stamp(result)
 
 

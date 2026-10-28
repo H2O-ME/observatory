@@ -23,6 +23,7 @@ import ctypes
 import logging
 import math
 import sys
+import threading
 from collections.abc import Mapping, Sequence
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -479,6 +480,120 @@ def type_text(text: str) -> bool:
 
 
 # ---------------------------------------------------------------- dispatch ---
+class InputState:
+    """已按下键/鼠标按钮的账本（A3，线程安全）。
+
+    为什么必须有它：``SendInput`` 的 keydown 是**系统全局状态**，没有任何
+    "会话结束就自动抬起"的机制。控制会话被 stop / TTL 到期 / 链路断开时如果不
+    显式发 keyup，远端机器就会一直保持按住（实测：Ctrl 键卡住、鼠标左键卡住，
+    用户只能重启）。旧实现（``tasks/input.py`` 与 ``runtime._stop_control``）
+    完全没有这份状态，所以永远不知道要抬哪些键。
+
+    ``release_all`` 是唯一的释放入口：stop、TTL 到期、管道断开、worker 退出
+    全部走它，保证"无论从哪条路径结束控制，按键都被抬起"。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._keys: set[int] = set()
+        self._buttons: set[int] = set()
+
+    # -- 记账 ------------------------------------------------------------
+    def key_down(self, vk: int) -> None:
+        if vk:
+            with self._lock:
+                self._keys.add(int(vk))
+
+    def key_up(self, vk: int) -> None:
+        with self._lock:
+            self._keys.discard(int(vk))
+
+    def button_down(self, button: int) -> None:
+        with self._lock:
+            self._buttons.add(int(button) or 1)
+
+    def button_up(self, button: int) -> None:
+        with self._lock:
+            self._buttons.discard(int(button) or 1)
+
+    # -- 只读 ------------------------------------------------------------
+    def snapshot(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        """当前按住的 ``(键, 鼠标按钮)``；调用方可用于日志/断言。"""
+
+        with self._lock:
+            return tuple(sorted(self._keys)), tuple(sorted(self._buttons))
+
+    def pending_count(self) -> int:
+        with self._lock:
+            return len(self._keys) + len(self._buttons)
+
+    def clear(self) -> None:
+        """只清账本、不注入（测试/异常兜底用；正常路径用 ``release_all``）。"""
+
+        with self._lock:
+            self._keys.clear()
+            self._buttons.clear()
+
+    # -- 释放 ------------------------------------------------------------
+    def release_all(self, *, sender: Callable[[tuple[INPUT, ...]], bool] | None = None) -> int:
+        """抬起所有按住的键与鼠标按钮，返回释放成功的数量。
+
+        先发 up 再清账本：注入失败时**保留**记录，下次 cleanup 还会重试——
+        宁可重复发一次 keyup（幂等，无副作用），也不能漏掉一个还按着的键。
+        """
+
+        send = sender if sender is not None else _send
+        with self._lock:
+            keys = sorted(self._keys)
+            buttons = sorted(self._buttons)
+        released = 0
+        failed_keys: set[int] = set()
+        failed_buttons: set[int] = set()
+        for vk in keys:
+            try:
+                ok = bool(send((_key_input(vk, down=False),)))
+            except Exception:  # noqa: BLE001 - 注入不可用（非 Windows）时仍要清账本
+                log.warning("释放按键 %s 时注入失败", vk, exc_info=True)
+                ok = True  # 环境不支持注入：不保留，避免每次 cleanup 重复刷日志
+            if ok:
+                released += 1
+            else:
+                failed_keys.add(vk)
+        for button in buttons:
+            flags = BUTTON_FLAGS.get(button)
+            try:
+                ok = bool(flags) and bool(send((_mouse_input(flags[1]),)))
+            except Exception:  # noqa: BLE001 - 同上
+                log.warning("释放鼠标按钮 %s 时注入失败", button, exc_info=True)
+                ok = True
+            if ok:
+                released += 1
+            else:
+                failed_buttons.add(button)
+        with self._lock:
+            self._keys = failed_keys
+            self._buttons = failed_buttons
+        if keys or buttons:
+            log.info(
+                "控制结束：释放按住的 %s 个键、%s 个鼠标按钮（失败保留 %s/%s）",
+                len(keys),
+                len(buttons),
+                len(failed_keys),
+                len(failed_buttons),
+            )
+        return released
+
+
+#: 进程级默认账本（``handle_event`` 的默认 ``state``；worker 也可以注入自己的）。
+DEFAULT_INPUT_STATE = InputState()
+
+
+def release_all_inputs(*, state: InputState | None = None) -> int:
+    """抬起所有按住的键/按钮（A3 的统一出口，供 runtime 调用）。"""
+
+    return (state if state is not None else DEFAULT_INPUT_STATE).release_all()
+
+
 def event_target(
     event: dict[str, Any],
     *,
@@ -509,9 +624,17 @@ def handle_event(
     *,
     desktop: VirtualDesktop | None = None,
     desktop_provider: Callable[[], VirtualDesktop] = virtual_desktop,
+    state: "InputState | None" = None,
 ) -> bool:
-    """执行一条控制台事件；返回是否被理解并成功注入。"""
+    """执行一条控制台事件；返回是否被理解并成功注入。
 
+    ``state`` 用于记录"当前按住了哪些键/鼠标按钮"（A3）。``down`` 事件注入成功
+    后记账、``up`` 事件注入成功后销账；控制结束/租约到期/断链时由
+    :meth:`InputState.release_all` 统一抬起——否则远端会永久保持按下（实测
+    卡键：前端在鼠标离开控制区时收不到 keyup）。
+    """
+
+    ledger = state if state is not None else DEFAULT_INPUT_STATE
     kind = event.get("kind")
     if kind == "mouse":
         x, y = event_target(event, desktop=desktop, desktop_provider=desktop_provider)
@@ -523,16 +646,28 @@ def handle_event(
         button = int(event.get("button", 1))
         if action == "click":
             pressed = mouse_button(button, True)
+            if pressed:
+                ledger.button_down(button)
             released = mouse_button(button, False)
+            if released:
+                ledger.button_up(button)
             return pressed and released
         if action in {"down", "up"}:
-            return mouse_button(button, action == "down")
+            ok = mouse_button(button, action == "down")
+            if ok:
+                ledger.button_down(button) if action == "down" else ledger.button_up(button)
+            return ok
         log.warning("unsupported mouse action: %s", action)
         return False
     if kind == "wheel":
         return mouse_wheel(int(event.get("delta", 0)), horizontal=bool(event.get("horizontal")))
     if kind == "key":
-        return key_event(int(event.get("code", 0)), bool(event.get("down", True)))
+        code = int(event.get("code", 0))
+        down = bool(event.get("down", True))
+        ok = key_event(code, down)
+        if ok:
+            ledger.key_down(code) if down else ledger.key_up(code)
+        return ok
     if kind == "text":
         return type_text(str(event.get("text", "")))
     log.warning("unsupported input event kind: %s", kind)
@@ -542,9 +677,11 @@ def handle_event(
 __all__ = [
     "ABSOLUTE_MAX",
     "BUTTON_FLAGS",
+    "DEFAULT_INPUT_STATE",
     "DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2",
     "EXTENDED_KEYS",
     "INPUT",
+    "InputState",
     "MAX_BATCH",
     "Monitor",
     "NORMALIZED_MAX",
@@ -563,6 +700,7 @@ __all__ = [
     "normalized_10000_to_virtual",
     "normalized_to_absolute",
     "normalized_to_virtual",
+    "release_all_inputs",
     "text_to_utf16_units",
     "to_absolute",
     "to_normalized",

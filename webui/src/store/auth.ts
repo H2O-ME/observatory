@@ -52,6 +52,16 @@ function clearSession(): void {
   useLive.getState().reset();
 }
 
+/**
+ * W3: 刷新序号。仅本模块使用。
+ *
+ * `sessionEpoch`（api.ts）能识别"跨会话"的过期结果（登录/登出/401 之间），但
+ * 识别不了同一会话内并发 refresh 的乱序：两个匿名 refresh 同时发出、后发的
+ * 先回、先发的后回，后回来的旧结果会把状态覆盖回去。每发起一次 refresh 领一个
+ * 递增序号，只有序号仍是最新的那次才允许写状态。
+ */
+let refreshSeq = 0;
+
 export const useAuth = create<AuthState>((set, get) => ({
   status: "boot",
   version: "",
@@ -70,15 +80,27 @@ export const useAuth = create<AuthState>((set, get) => ({
   },
 
   async refresh() {
+    // W3: 捕获"这次请求属于哪个会话"以及"是不是最新的一次刷新"。匿名登录页
+    // 启动时发出的 /session 请求可能比登录响应还慢——它返回的
+    // `authenticated:false` 不能把刚登录的会话打回匿名、更不能清掉新 token。
+    const requestEpoch = currentSessionEpoch();
+    const seq = ++refreshSeq;
+    const stale = () => requestEpoch !== currentSessionEpoch() || seq !== refreshSeq;
     try {
       const session = await api.session();
+      // 过时的成功结果直接丢弃（成功和失败都要丢：旧请求的失败同样不能把
+      // 新会话打成 error）。
+      if (stale()) return;
       set({
         status: session.authenticated ? "authed" : "anonymous",
         ...sessionFields(session),
         error: "",
       });
+      // 过时的 `authenticated:false` 会清掉刚写入的 token，所以这一步必须在
+      // stale 检查之后。
       if (!session.authenticated) writeToken("");
     } catch (error) {
+      if (stale()) return;
       set({
         status: "error",
         error: isApiError(error) ? error.message : "无法连接服务器",
@@ -101,6 +123,10 @@ export const useAuth = create<AuthState>((set, get) => ({
       /* the local session is cleared below regardless of the server's answer */
     }
     clearSession();
+    // W3: 显式登出同样推进会话世代——登出前发出、登出后才返回的 refresh
+    // （成功或失败）都不得再把状态写回来。401 处理器也会 bump，这里不能省：
+    // 正常登出根本没有 401。
+    bumpSessionEpoch();
     set({ status: "anonymous", error: "" });
   },
 }));

@@ -13,6 +13,10 @@ param(
     [string[]]$BaseUrls = @(@@BASE_URLS@@),
     # 本地安装包（U 盘离线安装）：给了就完全不下载，直接用它。
     [string]$Package = '',
+    # 部署准入密钥（可选）：仅当服务端开启了 OBS_ENROLL_KEY 时需要。
+    # 刻意**不**由服务端渲染进脚本——本脚本是公开端点，内嵌密钥等于公开密钥。
+    # 由运维/控制台按机器传入，或改用环境变量 OBS_ENROLL_KEY。
+    [string]$EnrollCode = '',
     [switch]$Uninstall,
     [switch]$Insecure,
     [switch]$Quiet,
@@ -133,6 +137,20 @@ function Request-Elevation {
         if ($Insecure) { $arguments += '-Insecure' }
         if ($Quiet) { $arguments += '-Quiet' }
         if ($NoStart) { $arguments += '-NoStart' }
+        # A5：操作参数必须原样传递，否则提权后行为被改写。
+        #   * -Uninstall 丢失 → 普通用户请求卸载会掉进安装分支（重装一台本想卸掉的机器）；
+        #   * 显式 -BaseUrls 丢失 → 自定义/内网地址被脚本内置地址覆盖。
+        if ($Uninstall) { $arguments += '-Uninstall' }
+        # 只在这个参数是被显式传入时才转发（否则保留脚本内置默认地址）。
+        # PowerShell 的 argument-mode 逗号语法把 `-BaseUrls a,b` 绑定成 [string[]]，
+        # 所以多线路用逗号拼成一个参数；重复出现 `-BaseUrls` 会报"指定了多次"。
+        if ($PSBoundParameters.ContainsKey('BaseUrls') -and $BaseUrls.Count -gt 0) {
+            $arguments += @('-BaseUrls', ($BaseUrls -join ','))
+        }
+        # A4：准入密钥同样要跨过提权边界（提权子进程不继承调用者的环境变量）。
+        if ($PSBoundParameters.ContainsKey('EnrollCode') -and $EnrollCode) {
+            $arguments += @('-EnrollCode', ("`"{0}`"" -f $EnrollCode))
+        }
         Write-Step '需要一次管理员授权来安装服务（整个生命周期中只有这一次）'
         try {
             $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -Verb RunAs -Wait -PassThru
@@ -233,9 +251,11 @@ function Install-Service {
     if (-not (Test-Path $exe)) { throw "找不到 $exe" }
 
     Write-Step '注册并启动服务'
-    # 注册不需要任何凭据：受控端自己用 MachineGuid 生成设备标识，服务端自动建记录。
+    # 注册不需要设备凭据：受控端自己用 MachineGuid 生成设备标识，服务端自动建记录。
+    # 只有开启了部署准入（服务端 OBS_ENROLL_KEY）时才需要 --enroll-code。
     $arguments = @('--install', '--exe', "`"$exe`"")
     foreach ($url in $BaseUrls) { $arguments += @('--base-url', $url) }
+    if ($EnrollCode) { $arguments += @('--enroll-code', ("`"{0}`"" -f $EnrollCode)) }
 
     $output = & $exe @arguments 2>&1
     if (-not $Quiet) { $output | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray } }
@@ -299,9 +319,9 @@ if (-not $BaseUrls -or $BaseUrls.Count -eq 0) {
 }
 
 try {
-    $primary = Resolve-BaseUrl
-    if (-not $primary) { throw '两个域名都不可达' }
-
+    # A5：探测在线服务只属于**下载**路径。使用本地 ``-Package``（U 盘/离线安装）
+    # 时绝不能先要求联网——真正断网的机器会因此直接失败。此前这里无条件
+    # ``Resolve-BaseUrl``，把"离线安装"变成了"必须先能连上服务器"。
     $downloaded = $false
     $localPackage = ''
     if ($Package) {
@@ -312,6 +332,12 @@ try {
         }
         if (-not (Test-Path -LiteralPath $candidate)) { throw "找不到本地安装包: $Package" }
         $localPackage = (Resolve-Path -LiteralPath $candidate).Path
+    }
+
+    $primary = $null
+    if (-not $localPackage) {
+        $primary = Resolve-BaseUrl
+        if (-not $primary) { throw '两个域名都不可达' }
     }
 
     if ($localPackage) {

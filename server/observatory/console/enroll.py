@@ -279,9 +279,12 @@ async def _rotate_and_activate(
     )
     if clear_uninstalled:
         values["uninstalled_at_ms"] = None
-        # P3: a reinstall must also cancel a queued cleanup, otherwise the next
-        # housekeeping pass would delete this brand-new live record.
-        values["purge_pending_at_ms"] = None
+    # S5/P3：**任何**成功轮换都撤销排队中的清理任务。手动删除失败的设备没有
+    # ``uninstalled_at_ms``，重装走的是普通轮换分支（clear_uninstalled=False）；
+    # 只在重入分支清标记会让旧任务在下一次 housekeeping 删掉这台刚回来的活设备。
+    values["purge_pending_at_ms"] = None
+    values["purge_reason"] = None
+    values["purge_remote"] = None
     if not device.name:
         values["name"] = _clean(payload.get("hostname") or device.uid, 120)
 

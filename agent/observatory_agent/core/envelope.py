@@ -66,10 +66,24 @@ MAX_ENVELOPE_BYTES: Final[int] = 1024 * 1024
 HEADER_STRUCT: Final[struct.Struct] = struct.Struct(">I")
 MAX_HEADER_BYTES: Final[int] = 64 * 1024
 MAX_PAYLOAD_BYTES: Final[int] = 16 * 1024 * 1024
+#: 帧头的**安全水位**：留 16 KiB 余量，避免把 header 顶到硬上限才失败。
+MAX_INLINE_HEADER_BYTES: Final[int] = MAX_HEADER_BYTES - 16 * 1024
+#: 大 body 外置标记（A1）：头里出现这个键时，body 的 JSON 在二进制载荷里，
+#: 键值是 body JSON 的字节数。没有这个键 = 旧的内联格式（向后兼容）。
+BODY_IN_PAYLOAD: Final[str] = "_body_bytes"
 
 
 class EnvelopeError(ValueError):
     """信封不合法（缺字段、版本不符、类型错误、超限）。"""
+
+
+class EnvelopeTooLarge(EnvelopeError):
+    """一帧装不下这条消息（A1）。
+
+    与"格式非法"刻意分开：超限是**可恢复**的输入问题，调用方应当回一条明确的
+    失败回执（"分片超过上限，请减小后重试"）并继续运行，而不是把它当成协议
+    崩坏去断开管道/重启 worker。
+    """
 
 
 # --------------------------------------------------------------- 信封对象 ---
@@ -285,24 +299,71 @@ def encode_binary(header: Mapping[str, Any], payload: bytes = b"") -> bytes:
 
     管道（服务↔worker）和 WS 实时控制帧共用这份实现；载荷长度写进头里的
     ``len`` 是 0.2.10 管道读端的既有约定，保留它可以让流式读端知道边界。
+
+    **A1（2026-10 审查）**：头部上限只有 64 KiB，而文件分片是 base64 后进
+    body 的（前端 1 MiB，受控端读 700 KiB → 信封 ~0.9 MiB），旧实现直接抛
+    ``PipeProtocolError``，**正常文件既传不上去也传不下来**。现在超过安全水位
+    时把整个 body 挪到二进制载荷里（头里只留 ``_body_bytes`` 标记），载荷上限
+    16 MiB 足以容纳一个分片。小消息仍走内联格式，所以旧读端能继续工作
+    （向后兼容：新格式只出现在旧实现必然失败的场景）。
     """
 
     if not isinstance(payload, (bytes, bytearray)):
         raise EnvelopeError(f"payload 必须是 bytes，收到 {type(payload).__name__}")
     body = bytes(payload)
     if len(body) > MAX_PAYLOAD_BYTES:
-        raise EnvelopeError(f"载荷过大：{len(body)} > {MAX_PAYLOAD_BYTES}")
+        raise EnvelopeTooLarge(f"载荷过大：{len(body)} > {MAX_PAYLOAD_BYTES}")
     enriched = dict(header)
     if body:
         enriched["len"] = len(body)
     raw = json.dumps(enriched, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(raw) > MAX_INLINE_HEADER_BYTES:
+        raw, body, enriched = _spill_body(enriched, body)
     if not raw or len(raw) > MAX_HEADER_BYTES:
-        raise EnvelopeError(f"二进制帧头长度非法：{len(raw)}")
+        raise EnvelopeTooLarge(f"二进制帧头长度非法：{len(raw)}")
     return HEADER_STRUCT.pack(len(raw)) + raw + body
 
 
+def _spill_body(header: dict[str, Any], payload: bytes) -> tuple[bytes, bytes, dict[str, Any]]:
+    """把超大 body 挪进二进制载荷（A1），返回新的 ``(头 JSON, 载荷, 头 dict)``。
+
+    只有"带 body 且没有其它载荷"的帧能外置；画面帧/控制帧的头本来很小，
+    不需要也不允许走这条路径（它们的 payload 是 JPEG，不能和 body JSON 混在
+    一起）。无法外置时抛 :class:`EnvelopeError`，消息里给出实际大小与上限，
+    让调用方能把它变成一条明确失败回执而不是崩溃。
+    """
+
+    inner = header.get("body")
+    if not isinstance(inner, Mapping):
+        raise EnvelopeTooLarge(
+            f"帧头 {len(json.dumps(header, ensure_ascii=False).encode('utf-8'))} 字节超过安全水位 "
+            f"{MAX_INLINE_HEADER_BYTES}，且没有可外置的 body"
+        )
+    if payload:
+        raise EnvelopeTooLarge(
+            f"帧头超过安全水位 {MAX_INLINE_HEADER_BYTES} 且已携带 {len(payload)} 字节载荷，"
+            "无法把 body 外置到同一个帧里"
+        )
+    body_bytes = json.dumps(dict(inner), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(body_bytes) > MAX_PAYLOAD_BYTES:
+        raise EnvelopeTooLarge(f"帧 body 过大：{len(body_bytes)} > {MAX_PAYLOAD_BYTES}")
+    spilled = {key: value for key, value in header.items() if key != "body"}
+    spilled[BODY_IN_PAYLOAD] = len(body_bytes)
+    spilled["len"] = len(body_bytes)
+    raw = json.dumps(spilled, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(raw) > MAX_HEADER_BYTES:
+        raise EnvelopeTooLarge(
+            f"帧头在 body 外置后仍有 {len(raw)} 字节（上限 {MAX_HEADER_BYTES}）：body 之外的字段太多"
+        )
+    return raw, body_bytes, spilled
+
+
 def decode_binary(blob: bytes | bytearray) -> tuple[dict[str, Any], bytes]:
-    """解析二进制帧；格式错误抛 ``EnvelopeError``（不静默吞掉）。"""
+    """解析二进制帧；格式错误抛 ``EnvelopeError``（不静默吞掉）。
+
+    ``_body_bytes`` 标记存在时把载荷里的 body JSON 还原回头里并返回空载荷
+    （A1 的外置格式）；没有标记就是旧的内联格式，行为完全不变。
+    """
 
     data = bytes(blob)
     if len(data) < HEADER_STRUCT.size:
@@ -320,19 +381,53 @@ def decode_binary(blob: bytes | bytearray) -> tuple[dict[str, Any], bytes]:
         raise EnvelopeError(f"二进制帧头不是合法 JSON: {exc}") from exc
     if not isinstance(header, dict):
         raise EnvelopeError("二进制帧头必须是对象")
-    return header, data[end:]
+    return restore_spilled_body(header, data[end:])
+
+
+def restore_spilled_body(header: dict[str, Any], payload: bytes) -> tuple[dict[str, Any], bytes]:
+    """把 ``_body_bytes`` 外置的 body 还原回头里（A1）；无标记时原样返回。
+
+    ``win.pipe.read_packet`` 直接解析头、按 ``len`` 读载荷，不走
+    :func:`decode_binary`，所以它必须自己调用本函数——两条解码路径共用一份
+    还原逻辑，避免只修好其中一条。
+    """
+
+    raw_len = header.pop(BODY_IN_PAYLOAD, None)
+    if raw_len is None:
+        return header, payload
+    if not isinstance(raw_len, int) or isinstance(raw_len, bool) or raw_len < 0:
+        raise EnvelopeError(f"二进制帧 body 长度非法：{raw_len!r}")
+    if raw_len > len(payload):
+        raise EnvelopeError(f"二进制帧截断：body 声明 {raw_len} 字节，实际载荷 {len(payload)} 字节")
+    try:
+        body = json.loads(payload[:raw_len].decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise EnvelopeError(f"二进制帧外置 body 不是合法 JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise EnvelopeError("二进制帧外置 body 必须是对象")
+    header["body"] = body
+    # 头里的 len 描述的是整个帧的载荷长度；body 被还原后剩余载荷才是调用方的 payload。
+    remaining = payload[raw_len:]
+    if not remaining:
+        header.pop("len", None)
+    else:
+        header["len"] = len(remaining)
+    return header, remaining
 
 
 __all__ = [
     "BATCH_MAX_ITEMS",
+    "BODY_IN_PAYLOAD",
     "DOWNLINK_TYPES",
     "DownlinkBatch",
     "Envelope",
     "EnvelopeError",
+    "EnvelopeTooLarge",
     "HEADER_STRUCT",
     "KNOWN_TYPES",
     "MAX_ENVELOPE_BYTES",
     "MAX_HEADER_BYTES",
+    "MAX_INLINE_HEADER_BYTES",
     "MAX_PAYLOAD_BYTES",
     "PROTOCOL_VERSION",
     "UPLINK_TYPES",
@@ -349,5 +444,6 @@ __all__ = [
     "new_envelope",
     "new_id",
     "parse_downlink_batch",
+    "restore_spilled_body",
     "validate_direction",
 ]

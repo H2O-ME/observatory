@@ -51,6 +51,11 @@ ACK_TIMEOUT = "ACK_TIMEOUT"
 #: Why a command failed after the agent did report a failure.
 UNINSTALL_FAILED = "UNINSTALL_FAILED"
 
+#: S1: audit action for a result/started/ACK whose ``command_id`` belongs to a
+#: *different* device than the authenticated one. link cannot import console
+#: (A4), so the action name is owned here and mirrored in ``console.audit``.
+AUDIT_COMMAND_FOREIGN_RESULT = "command.foreign_result"
+
 #: Replay budget: initial delivery + up to 5 reconnect attempts, then give up.
 MAX_REPLAY_ATTEMPTS = 5
 #: expire_stale handles at most this many rows per UPDATE (F59: bound one tick).
@@ -66,6 +71,46 @@ def replay_backoff_ms(attempts: int) -> int:
     if attempts <= 0:
         return 0
     return min(REPLAY_BACKOFF_BASE_MS * (2 ** (attempts - 1)), REPLAY_BACKOFF_MAX_MS)
+
+
+def _owned_by(row: Command, device_id: int) -> bool:
+    """命令是否属于这台**已认证**设备（S1）。
+
+    判定只看 ``commands.device_id``（在线设备当前行）。P3 起该列可空——设备行被
+    删除后历史行保留 ``device_id = NULL``——历史行不属于任何在线设备，因此不能
+    作为结算目标；``device_uid`` 是字符串且历史/客户端可见，绝不能当授权依据。
+    """
+
+    return row.device_id is not None and int(row.device_id) == int(device_id)
+
+
+@dataclass(frozen=True, slots=True)
+class StartedOutcome:
+    """``{started: true}`` 回执的处置结果（S2）。
+
+    ``handled`` 为真表示这条回执已被"受理"语义吸收（命令现在/曾经是 running，
+    或者已经终结），调用方**不得**再走普通结算；``changed`` 只表示本次是否真的
+    写入了 running，重复回执（重连重放）必须 ``handled=True, changed=False``。
+    """
+
+    handled: bool
+    changed: bool = False
+    status: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class AckOutcome:
+    """ACK 结算结果（S1）：区分"不是你的命令"与"这条命令已经不存在"。
+
+    ``refused=True`` 是安全结论——命令行存在但属于别的设备（或已随设备行失去
+    device_id），调用方必须整笔拒绝且不改任何行。``record=None, refused=False``
+    只说明命令行已经不存在（历史清理），那不是跨设备行为，按原来的
+    "未结算"路径处理即可。
+    """
+
+    record: CommandRecord | None = None
+    changed: bool = False
+    refused: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -408,6 +453,7 @@ class CommandJournal:
         self,
         command_id: str,
         *,
+        device_id: int,
         ok: bool,
         result: dict[str, Any] | None = None,
         error: str | None = None,
@@ -415,7 +461,7 @@ class CommandJournal:
     ) -> CommandRecord | None:
         status = "ok" if ok else "error"
         return await self.settle_status(
-            command_id, status, result=result, error=error, error_code=error_code
+            command_id, status, device_id=device_id, result=result, error=error, error_code=error_code
         )
 
     async def settle_status(
@@ -423,23 +469,66 @@ class CommandJournal:
         command_id: str,
         status: str,
         *,
+        device_id: int,
         result: dict[str, Any] | None = None,
         error: str | None = None,
         error_code: str | None = None,
     ) -> CommandRecord | None:
-        """Settle with a **conditional** UPDATE (F20/C10).
+        """Settle with a **conditional** UPDATE (F20/C10), scoped to the caller.
 
         ``WHERE status NOT IN (terminal)`` + rowcount decides the winner, so a
         concurrent ``mark_timeout``/``expire_stale`` and a late agent result can
         never interleave into a lost update: first writer wins, the loser reads
         the winner's row back.
+
+        S1: ``device_id`` 是**已认证**的设备，参与每一条 WHERE。0.3.1 之前只按
+        ``command_id`` 匹配，任何一台在网设备都能用别人的命令 id 结算，包括把它没
+        收到过的卸载命令结算成 ok。返回 ``None`` 表示"这台设备名下没有这条命令"
+        （不存在 / 历史行 / 属于别的设备），调用方不得据此改任何状态。
+
+        S2: 卸载命令的普通回执**永远**不能结算成 ``ok``——只有落盘 ACK
+        (:meth:`settle_ack`) 才是完成证据；这里拒绝时不写任何行。
         """
 
+        command_id = str(command_id)
         now = self._clock.now_ms()
         async with self._sessionmaker() as session:
+            row = (await session.execute(select(Command).where(Command.id == command_id))).scalars().first()
+            if row is None:
+                log_event(
+                    log, logging.WARNING, "journal.settle_missing", command_id=command_id, device_id=device_id
+                )
+                return None
+            if not _owned_by(row, device_id):
+                await self._reject_foreign_settlement(
+                    session, command_id=command_id, device_id=device_id, phase="result"
+                )
+                return None
+            if row.status in TERMINAL_COMMAND_STATUSES:
+                # 重复回执 / 迟到的结果：首次结果胜出，不得翻转。
+                return await self._settle_loser(CommandRecord.from_model(row), str(status), result, error)
+            if str(row.type) == "uninstall" and str(status) == "ok":
+                # S2：卸载回执只能是 {started:true} 或落盘 ACK；普通 ok 结果既不结算
+                # 也不覆盖，状态留在 running，等 ACK 或超时。放在终结检查之后，
+                # 是为了让"超时后迟到的真结果"仍能走 F6 通知。
+                log_event(
+                    log,
+                    logging.WARNING,
+                    "journal.uninstall_result_ignored",
+                    command_id=command_id,
+                    device_id=device_id,
+                    status=row.status,
+                )
+                return CommandRecord.from_model(row)
             outcome = await session.execute(
                 update(Command)
-                .where(Command.id == str(command_id), Command.status.not_in(TERMINAL_COMMAND_STATUSES))
+                .where(
+                    Command.id == command_id,
+                    # S1：结算目标必须同时是这台设备；它同时防住"设备行已删除、
+                    # device_id 变成 NULL 的历史行"被迟到回执改写。
+                    Command.device_id == int(device_id),
+                    Command.status.not_in(TERMINAL_COMMAND_STATUSES),
+                )
                 .values(
                     status=str(status),
                     result=dict(result) if isinstance(result, dict) else None,
@@ -449,26 +538,11 @@ class CommandJournal:
                 )
             )
             await session.commit()
-            row = (await session.execute(select(Command).where(Command.id == str(command_id)))).scalars().first()
-            if row is None:
-                log_event(log, logging.WARNING, "journal.settle_missing", command_id=command_id)
-                return None
+            # 条件 UPDATE 绕过了 ORM，必须显式刷新才能读到真实值。
+            await session.refresh(row)
             record = CommandRecord.from_model(row)
             if outcome.rowcount != 1:
-                # First result wins: a late duplicate must not flip an outcome.
-                log_event(
-                    log,
-                    logging.DEBUG,
-                    "journal.settle_duplicate",
-                    command_id=command_id,
-                    status=record.status,
-                )
-                if record.status == "timeout" and status in {"ok", "error"} and self._late_result_listener:
-                    try:
-                        await self._late_result_listener(record, status, result, error)
-                    except Exception as exc:  # noqa: BLE001 - observability must not fail settlement
-                        log_event(log, logging.WARNING, "journal.late_result_listener_failed", error=str(exc))
-                return record
+                return await self._settle_loser(record, str(status), result, error)
 
         settle_ms = now
         result_value = Result(
@@ -488,16 +562,90 @@ class CommandJournal:
             slot.settle(result_value)
         return record
 
-    async def mark_timeout(self, command_id: str, message: str = "受控端在规定时间内未响应") -> CommandRecord | None:
+    async def mark_timeout(
+        self,
+        command_id: str,
+        *,
+        device_id: int,
+        message: str = "受控端在规定时间内未响应",
+    ) -> CommandRecord | None:
         return await self.settle_status(
             command_id,
             "timeout",
+            device_id=device_id,
             error=message,
             error_code="TIMEOUT",
         )
 
+    async def _settle_loser(
+        self,
+        record: CommandRecord,
+        wanted_status: str,
+        result: dict[str, Any] | None,
+        error: str | None,
+    ) -> CommandRecord:
+        """A concurrent writer already settled the row: read-back, never overwrite.
+
+        F20/C10 的"先手胜出"落点；F6 迟到结果（console 已看到 timeout）在这里通知。
+        """
+
+        if record.status in TERMINAL_COMMAND_STATUSES:
+            log_event(
+                log,
+                logging.DEBUG,
+                "journal.settle_duplicate",
+                command_id=record.id,
+                status=record.status,
+            )
+        if record.status == "timeout" and wanted_status in {"ok", "error"} and self._late_result_listener:
+            try:
+                await self._late_result_listener(record, wanted_status, result, error)
+            except Exception as exc:  # noqa: BLE001 - observability must not fail settlement
+                log_event(log, logging.WARNING, "journal.late_result_listener_failed", error=str(exc))
+        return record
+
+    async def _reject_foreign_settlement(
+        self,
+        session: AsyncSession,
+        *,
+        command_id: str,
+        device_id: int,
+        phase: str,
+    ) -> None:
+        """S1：跨设备回执——一行都不改，但必须留下可查的证据。
+
+        攻击/错配不改变任何状态（这是安全要求），而"什么都没发生"在运维上等于
+        "什么都没记录"，所以写一条 audit（actor=agent）而不是只打一行 WARNING。
+        """
+
+        log_event(
+            log,
+            logging.WARNING,
+            "journal.settle_foreign_device",
+            command_id=command_id,
+            authenticated_device_id=int(device_id),
+            phase=phase,
+        )
+        device = await session.get(Device, int(device_id))
+        session.add(
+            AuditEntry(
+                ts_ms=self._clock.now_ms(),
+                actor="agent",
+                action=AUDIT_COMMAND_FOREIGN_RESULT,
+                device_uid=(device.uid if device is not None else ""),
+                device_name=(device.display_name if device is not None else ""),
+                detail={
+                    "command_id": command_id,
+                    "authenticated_device_id": int(device_id),
+                    "phase": phase,
+                    "reason": "command belongs to another device or no longer live",
+                },
+            )
+        )
+        await session.commit()
+
     # -- uninstall: accepted ≠ finished (P2) --------------------------------
-    async def settle_started(self, command_id: str, *, ack_timeout_ms: int) -> bool:
+    async def settle_started(self, command_id: str, *, device_id: int, ack_timeout_ms: int) -> StartedOutcome:
         """Move an **uninstall** command to ``running`` (accepted, not finished).
 
         Before P2 the handler's ``{started: true}`` result went through the normal
@@ -507,35 +655,59 @@ class CommandJournal:
         it also sets ``expires_at_ms`` to the ACK deadline so housekeeping can
         flag a missing confirmation later.
 
-        Returns ``True`` when this call performed the transition; ``False`` means
-        the row is not an open uninstall (caller settles it normally).
+        S1：只认这台设备自己的命令。S2：**重复 started 幂等**。第一次进入 running
+        后，重连重放的同一信封必须原样停在 running（``handled=True,
+        changed=False``），绝不能掉进普通结算变成 ok——那会让没有 ACK 的卸载被
+        报告成成功。已终结的卸载同样被吸收（``handled=True, changed=False``）。
         """
 
+        command_id = str(command_id)
         now = self._clock.now_ms()
         async with self._sessionmaker() as session:
-            outcome = await session.execute(
-                update(Command)
-                .where(
-                    Command.id == str(command_id),
-                    Command.type == "uninstall",
-                    Command.status.in_(("pending", "dispatched")),
+            row = (await session.execute(select(Command).where(Command.id == command_id))).scalars().first()
+            if row is None or str(row.type) != "uninstall":
+                return StartedOutcome(handled=False)
+            if not _owned_by(row, device_id):
+                await self._reject_foreign_settlement(
+                    session, command_id=command_id, device_id=device_id, phase="started"
                 )
-                .values(status="running", expires_at_ms=now + max(int(ack_timeout_ms), 1_000))
+                # 已被消费：调用方不能再拿这条回执去结算任何东西。
+                return StartedOutcome(handled=True, status=str(row.status))
+            if row.status in ("pending", "dispatched"):
+                outcome = await session.execute(
+                    update(Command)
+                    .where(
+                        Command.id == command_id,
+                        Command.device_id == int(device_id),
+                        Command.status.in_(("pending", "dispatched")),
+                    )
+                    .values(status="running", expires_at_ms=now + max(int(ack_timeout_ms), 1_000))
+                )
+                await session.commit()
+                if outcome.rowcount == 1:
+                    log_event(log, logging.INFO, "journal.started", command_id=command_id, device_id=device_id)
+                    return StartedOutcome(handled=True, changed=True, status="running")
+                await session.refresh(row)
+            log_event(
+                log,
+                logging.INFO,
+                "journal.started_replay",
+                command_id=command_id,
+                device_id=device_id,
+                status=row.status,
             )
-            await session.commit()
-            changed = outcome.rowcount == 1
-        if changed:
-            log_event(log, logging.INFO, "journal.started", command_id=command_id)
-        return changed
+            return StartedOutcome(handled=True, status=str(row.status))
 
     async def settle_ack(
-        self, command_id: str, *, result: dict[str, Any] | None = None
-    ) -> tuple[CommandRecord | None, bool]:
+        self, command_id: str, *, device_id: int, result: dict[str, Any] | None = None
+    ) -> AckOutcome:
         """Settle an uninstall command from a **persisted ACK** (the only proof).
 
-        Returns ``(record, changed)``. ``changed`` is ``True`` only when *this*
-        call performed the transition, so an idempotent retry can answer "already
-        confirmed" instead of claiming a second success.
+        ``changed`` is ``True`` only when *this* call performed the transition, so
+        an idempotent retry can answer "already confirmed" instead of claiming a
+        second success. ``refused`` means the ACK named a command that exists but
+        is **not this device's**: the caller must reject the whole confirmation
+        and leave every row untouched (S1).
 
         Accepts ``running`` (normal), ``unconfirmed`` (the ACK arrived after the
         deadline — new evidence, so it upgrades the row and is logged), and the
@@ -545,16 +717,23 @@ class CommandJournal:
 
         now = self._clock.now_ms()
         async with self._sessionmaker() as session:
-            previous = (
-                await session.execute(select(Command.status).where(Command.id == str(command_id)))
-            ).scalar()
-            if previous is None:
+            row = (await session.execute(select(Command).where(Command.id == str(command_id)))).scalars().first()
+            if row is None:
                 log_event(log, logging.WARNING, "journal.ack_missing", command_id=command_id)
-                return None, False
+                return AckOutcome()
+            # S1：ACK 必须来自命令所属设备。否则 A 的令牌可以把 B 的卸载确认掉，
+            # 并把 A 自己标成已卸载（confirm_uninstall 会写 devices.uninstalled_at_ms）。
+            if not _owned_by(row, device_id):
+                await self._reject_foreign_settlement(
+                    session, command_id=command_id, device_id=device_id, phase="ack"
+                )
+                return AckOutcome(refused=True)
+            previous = str(row.status)
             outcome = await session.execute(
                 update(Command)
                 .where(
                     Command.id == str(command_id),
+                    Command.device_id == int(device_id),
                     Command.type == "uninstall",
                     Command.status.in_(("pending", "dispatched", "running", "unconfirmed")),
                 )
@@ -567,9 +746,7 @@ class CommandJournal:
                 )
             )
             await session.commit()
-            row = (await session.execute(select(Command).where(Command.id == str(command_id)))).scalars().first()
-            if row is None:
-                return None, False
+            await session.refresh(row)
             record = CommandRecord.from_model(row)
             changed = outcome.rowcount == 1
             if not changed:
@@ -580,7 +757,7 @@ class CommandJournal:
                     command_id=command_id,
                     status=record.status,
                 )
-                return record, False
+                return AckOutcome(record=record)
         if previous == "unconfirmed":
             log_event(log, logging.WARNING, "journal.ack_after_deadline", command_id=command_id)
         slot = self._waiters.get(command_id)
@@ -599,7 +776,7 @@ class CommandJournal:
                     latency_ms=max(0, now - record.created_at_ms),
                 )
             )
-        return record, True
+        return AckOutcome(record=record, changed=True)
 
     async def open_uninstall(self, device_id: int) -> CommandRecord | None:
         """The single outstanding uninstall command for *device*, if any.
@@ -739,6 +916,8 @@ class CommandJournal:
 
 __all__ = [
     "ACK_TIMEOUT",
+    "AUDIT_COMMAND_FOREIGN_RESULT",
+    "AckOutcome",
     "CommandJournal",
     "CommandRecord",
     "MAX_REPLAY_ATTEMPTS",
@@ -746,6 +925,7 @@ __all__ = [
     "REPLAY_BACKOFF_BASE_MS",
     "REPLAY_BACKOFF_MAX_MS",
     "REPLAY_EXHAUSTED",
+    "StartedOutcome",
     "TERMINAL_COMMAND_STATUSES",
     "UNINSTALL_FAILED",
     "WaiterSlot",
