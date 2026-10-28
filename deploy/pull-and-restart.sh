@@ -37,7 +37,9 @@ fi
 
 # 2) 记录旧镜像（秒级回滚锚点）+ 换库前 DB 快照（在线 SQLite backup，秒级）
 OLD_IMAGE="$(docker inspect --format '{{.Config.Image}}' observatory-api 2>/dev/null || true)"
-docker exec observatory-api python - <<'PY' >/dev/null 2>&1 || true
+# `docker exec -i` 是必需的：没有 -i 时 stdin 不接管道，heredoc 根本进不去，
+# 快照会静默失败（0.3.7 P4 部署时实际踩到，被下面的 || 吞掉）。
+if ! docker exec -i observatory-api python - <<'PY'
 import pathlib, sqlite3
 src = pathlib.Path('/data/observatory.db'); dst = pathlib.Path('/data/.pre-deploy.db')
 if src.exists():
@@ -45,6 +47,12 @@ if src.exists():
     with sqlite3.connect(src) as a, sqlite3.connect(dst) as b:
         a.backup(b)
 PY
+then
+  echo "WARN: 换库前快照失败；应用自身的 pre-migrate 备份仍在 /data/backups/ 下" >&2
+fi
+if ! docker exec observatory-api test -s /data/.pre-deploy.db; then
+  echo "WARN: /data/.pre-deploy.db 不存在或为空（回滚时请改用 /data/backups/pre-migrate-*.db）" >&2
+fi
 
 # 3) 拉镜像 + 切换（香港→ghcr 满速；构建不发生在本机）
 export OBS_IMAGE_TAG="ghcr.io/h2o-me/observatory:${SHA}"
