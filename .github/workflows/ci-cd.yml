@@ -15,7 +15,12 @@ on:
   push:
     branches: [main]
     tags: ["v*.*.*"]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force_agent:
+        description: "强制构建受控端 exe（本次提交没有 agent/** 变更时用）"
+        type: boolean
+        default: false
 
 concurrency:
   group: ci-cd-main
@@ -30,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      agent: ${{ steps.filter.outputs.agent }}
+      agent: ${{ steps.decide.outputs.agent }}
       webui: ${{ steps.filter.outputs.webui }}
     steps:
       - uses: actions/checkout@v4
@@ -43,6 +48,22 @@ jobs:
               - 'VERSION'
             webui:
               - 'webui/**'
+      # paths-filter 对 push 事件只比较"本次提交 vs 上一个提交"。于是有两种会漏掉
+      # 受控端构建的真实情况：
+      #   1. 某次提交改了 agent/** 但门禁失败 → 修复提交只动测试 → 过滤判定
+      #      "没有 agent 变更" → 新二进制永远不会被构建（0.3.8 就这样漏过一次）；
+      #   2. 需要重建上一次的产物（runner 缓存异常、包上传失败）。
+      # 手动触发时必须能强制构建，否则只能靠"往 agent/ 里塞一句注释"这种脏手段。
+      - id: decide
+        run: |
+          set -euo pipefail
+          agent="${{ steps.filter.outputs.agent }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_agent }}" = "true" ]; then
+            agent="true"
+            echo "手动触发：强制构建受控端 exe"
+          fi
+          echo "agent=$agent" >> "$GITHUB_OUTPUT"
+          echo "受控端需要构建: $agent"
 
   gate:
     name: 质量门禁（测试通过才允许部署）
