@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="VERSION"><img src="https://img.shields.io/badge/version-0.3.7-111111?style=flat-square" alt="version"></a>
+  <a href="VERSION"><img src="https://img.shields.io/badge/version-0.3.8-111111?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.12">
   <img src="https://img.shields.io/badge/React-18-61DAFB?style=flat-square&amp;logo=react&amp;logoColor=06181f" alt="React 18">
   <img src="https://img.shields.io/badge/Docker-GHCR-2496ED?style=flat-square&amp;logo=docker&amp;logoColor=white" alt="Docker / GHCR">
@@ -26,7 +26,7 @@ Observatory 是一套自托管的设备观测与远程管理系统。控制服�
 
 ## 先看真实状态
 
-- 当前版本：**0.3.7**，根目录 [`VERSION`](VERSION) 是唯一来源。
+- 当前版本：**0.3.8**，根目录 [`VERSION`](VERSION) 是唯一来源。
 - 只读健康检查（部署后自检用，域名换成你自己的控制台域名）：
 
 ```bash

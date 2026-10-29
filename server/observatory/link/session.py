@@ -25,7 +25,7 @@ from .envelope import (
     Result,
     new_envelope,
 )
-from .journal import CommandJournal
+from .journal import UNINSTALL_FAILED, CommandJournal
 from .outbox import Outbox
 
 log = logging.getLogger(__name__)
@@ -455,14 +455,7 @@ class AgentSession:
             return []
 
         if kind == "event":
-            log_event(
-                log,
-                logging.INFO,
-                "session.agent_event",
-                device_id=self.device_id,
-                payload=redact({str(envelope.body.get("event") or "agent_event"): envelope.body}),
-            )
-            await self._emit("agent_event", envelope.body)
+            await self._handle_agent_event(envelope.body)
             return []
 
         if kind == "control_frame":
@@ -737,6 +730,63 @@ class AgentSession:
         await self._emit(
             "command_updated",
             {"command_id": command_id, "ok": settled_record.status == "ok", "status": settled_record.status},
+        )
+
+    async def _handle_agent_event(self, body: dict[str, Any]) -> None:
+        """Log an uplink event, and settle the command an explicit failure names.
+
+        P2 真机复测（2026-10-30）：``uninstall_failed`` 以前只写日志。设备已经明确
+        报告"卸载 helper 在确认前退出"，命令行却停在 ``running``，控制台一直显示
+        "正在执行远程卸载"，直到 ``uninstall_ack_timeout_s``（默认 600s）才变成
+        "未确认"。失败事件同样是**这台已认证设备**给出的证据，所以它可以把自己
+        名下未完成的卸载结算成 ``error``；成功仍然只能由落盘 ACK 结算（S2 不放宽）。
+        """
+
+        name = str(body.get("event") or "agent_event")
+        log_event(
+            log,
+            logging.INFO,
+            "session.agent_event",
+            device_id=self.device_id,
+            payload=redact({name: body}),
+        )
+        if name == "uninstall_failed":
+            await self._settle_reported_uninstall_failure(body)
+        await self._emit("agent_event", body)
+
+    async def _settle_reported_uninstall_failure(self, body: dict[str, Any]) -> None:
+        """``uninstall_failed`` → the device's own open uninstall becomes ``error``."""
+
+        open_command = await self.journal.open_uninstall(self.device_id)
+        if open_command is None:
+            # 没有待确认的卸载：可能是重复上报，或者设备根本没收到这条命令。
+            log_event(log, logging.INFO, "session.uninstall_failed_without_command", device_id=self.device_id)
+            return
+        data = body.get("data")
+        payload = data if isinstance(data, dict) else {}
+        reason = str(payload.get("reason") or "").strip() or "受控端报告卸载失败"
+        # S1：结算目标按本会话认证到的 device_id 匹配；别的设备的命令在这里不可见。
+        settled = await self.journal.settle_result(
+            open_command.id,
+            device_id=self.device_id,
+            ok=False,
+            error=reason[:500],
+            error_code=UNINSTALL_FAILED,
+        )
+        if settled is None:
+            return
+        self.outbox.ack(settled.id)
+        log_event(
+            log,
+            logging.WARNING,
+            "session.uninstall_failed",
+            device_id=self.device_id,
+            command_id=settled.id,
+            reason=reason[:200],
+        )
+        await self._emit(
+            "command_updated",
+            {"command_id": settled.id, "ok": False, "status": settled.status, "error_code": UNINSTALL_FAILED},
         )
 
     def _handle_control_envelope(self, body: dict[str, Any]) -> None:

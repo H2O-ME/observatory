@@ -6,13 +6,20 @@
 # 用法一（推荐，双击）：下载 Observatory-Install-<版本>.cmd，双击运行。
 # 用法二（命令行）：
 #   powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://<控制台域名>/api/v1/public/install.ps1' | iex"
-# 用法三（离线/U 盘）：把这个脚本与安装包放在同一目录，用 -Package 指定。
+# 用法三（U 盘离线）：把本脚本与安装包 zip 放在同一个文件夹（或 .\package\ 里），
+#   直接运行本脚本 —— 会自动发现本地安装包，完全不下载。用 -Offline 可以强制
+#   离线（找不到本地包就直接报错，绝不偷偷联网）。
+#   离线安装省掉的是"下载安装包"，注册/心跳仍然需要能连到服务器。
 
 [CmdletBinding()]
 param(
     [string[]]$BaseUrls = @(@@BASE_URLS@@),
     # 本地安装包（U 盘离线安装）：给了就完全不下载，直接用它。
     [string]$Package = '',
+    # 强制离线：只用本地安装包；找不到就报错，绝不尝试联网（真断网机器用）。
+    [switch]$Offline,
+    # 强制在线：忽略同目录的本地安装包，从服务器下载（怀疑 U 盘里的包过期时用）。
+    [switch]$Online,
     # 部署准入密钥（可选）：仅当服务端开启了 OBS_ENROLL_KEY 时需要。
     # 刻意**不**由服务端渲染进脚本——本脚本是公开端点，内嵌密钥等于公开密钥。
     # 由运维/控制台按机器传入，或改用环境变量 OBS_ENROLL_KEY。
@@ -44,6 +51,15 @@ if ($Insecure) {
 }
 
 $script:LogPath = Join-Path $env:TEMP 'observatory-install.log'
+# 进度条只在"有人看着的控制台"里画：-Quiet、或输出被重定向（计划任务/日志采集）
+# 时改成每 10% 一行，否则 `\r` 刷屏会把日志文件写成一堆半截行。
+$script:ProgressInteractive = $false
+try {
+    $script:ProgressInteractive = (-not $Quiet) -and (-not [Console]::IsOutputRedirected)
+} catch {
+    $script:ProgressInteractive = $false
+}
+$script:ProgressBarWidth = 0
 
 function Write-Step {
     param([string]$Message)
@@ -57,6 +73,319 @@ function Write-Fail {
     $line = "[$(Get-Date -Format 'HH:mm:ss')] 错误: $Message"
     Write-Host $line -ForegroundColor Red
     try { Add-Content -LiteralPath $script:LogPath -Value $line -Encoding UTF8 } catch { }
+}
+
+# ------------------------------------------------------- 下载进度可视化 -------
+function Format-Bytes {
+    <# 把字节数变成 1.4 MB / 980 KB 这种人类可读形式。 #>
+    param([double]$Bytes)
+    if ($Bytes -ge 1GB) { return ('{0:N2} GB' -f ($Bytes / 1GB)) }
+    if ($Bytes -ge 1MB) { return ('{0:N1} MB' -f ($Bytes / 1MB)) }
+    if ($Bytes -ge 1KB) { return ('{0:N0} KB' -f ($Bytes / 1KB)) }
+    return ('{0:N0} B' -f [math]::Max(0, $Bytes))
+}
+
+function Format-Duration {
+    <# 剩余时间；拿不到或长得离谱时给 --:--，不猜。 #>
+    param([double]$Seconds)
+    if ($Seconds -lt 0 -or $Seconds -ge 360000 -or [double]::IsNaN($Seconds)) { return '--:--' }
+    $span = [TimeSpan]::FromSeconds([math]::Round($Seconds))
+    if ($span.TotalHours -ge 1) {
+        return ('{0}:{1:00}:{2:00}' -f [int][math]::Floor($span.TotalHours), $span.Minutes, $span.Seconds)
+    }
+    return ('{0:00}:{1:00}' -f $span.Minutes, $span.Seconds)
+}
+
+function Write-DownloadProgress {
+    <# 画一行进度：百分比 + 进度条 + 已下载/总量 + 速度 + 剩余时间。
+
+    非交互终端（-Quiet / 输出重定向）改成每 10% 一行；进度本身不进日志文件，
+    只把"开始/完成"这类结论写日志，避免日志被刷爆。
+    #>
+    param(
+        [string]$Label = '安装包',
+        [long]$Received = 0,
+        [long]$Total = 0,
+        [double]$BytesPerSecond = 0,
+        [double]$ElapsedSeconds = 0,
+        [switch]$Final
+    )
+    if ($Quiet) { return }
+    $percent = -1
+    if ($Total -gt 0) {
+        # decimal 而不是 double：27682406*35/100 这类运算在 double 下会把 35% 算成
+        # 34.99999…，floor 之后用户看到 34% —— 进度条越往后差得越明显。
+        $ratio = [decimal]$Received * 100 / [decimal]$Total
+        $percent = [int][math]::Min(100, [math]::Round($ratio, 0, [System.MidpointRounding]::AwayFromZero))
+        if ($percent -lt 0) { $percent = 0 }
+    }
+    $eta = -1.0
+    if ($Total -gt 0 -and $BytesPerSecond -gt 1024) { $eta = [math]::Max(0, ($Total - $Received) / $BytesPerSecond) }
+
+    if (-not $script:ProgressInteractive) {
+        # 每 10% 一行（多了没意义，少了看不出"卡住了"还是"在跑"）。
+        $bucket = if ($percent -ge 0) { [int][math]::Floor($percent / 10) } else { [int][math]::Floor($Received / (8MB)) }
+        if (-not $Final) {
+            if ($script:LastQuietBucket -eq $bucket) { return }
+            $script:LastQuietBucket = $bucket
+        }
+        $parts = @()
+        if ($percent -ge 0) { $parts += ('{0}%' -f $percent) }
+        $parts += if ($Total -gt 0) { '{0} / {1}' -f (Format-Bytes $Received), (Format-Bytes $Total) } else { Format-Bytes $Received }
+        if ($BytesPerSecond -gt 0) { $parts += '{0}/s' -f (Format-Bytes $BytesPerSecond) }
+        if (-not $Final) { Write-Step ('{0} 下载中 {1}' -f $Label, ($parts -join '  ')) }
+        return
+    }
+
+    if ($script:ProgressBarWidth -le 0) {
+        $width = 28
+        try {
+            $available = [Console]::WindowWidth
+            if ($available -gt 40) { $width = [math]::Max(16, [math]::Min(40, $available - 64)) }
+        } catch { }
+        $script:ProgressBarWidth = $width
+    }
+    $width = $script:ProgressBarWidth
+    if ($percent -ge 0) {
+        $filled = [int][math]::Floor($width * $percent / 100)
+        $bar = ('#' * $filled) + ('-' * ($width - $filled))
+        $line = '  {0} [{1}] {2,3}%  {3} / {4}  {5}/s  剩余 {6}' -f `
+            $Label, $bar, $percent, (Format-Bytes $Received), (Format-Bytes $Total), `
+            (Format-Bytes $BytesPerSecond), (Format-Duration $eta)
+    } else {
+        # 服务端没给 Content-Length（分块传输）：只能报"已经收了多少"。
+        $spin = @('-', '\', '|', '/')[[int]([math]::Floor($ElapsedSeconds * 4)) % 4]
+        $line = '  {0} [{1}] {2} 已下载  {3}/s' -f $Label, $spin, (Format-Bytes $Received), (Format-Bytes $BytesPerSecond)
+    }
+    if ($Final) {
+        $line = '  {0} [{1}] {2,3}%  {3} / {4}  用时 {5}' -f `
+            $Label, ('#' * $width), 100, (Format-Bytes $Received), (Format-Bytes $Total), (Format-Duration $ElapsedSeconds)
+        if ($Total -le 0) { $line = '  {0} 下载完成  {1}  用时 {2}' -f $Label, (Format-Bytes $Received), (Format-Duration $ElapsedSeconds) }
+    }
+    $pad = ''
+    if ($script:LastProgressLength -gt $line.Length) { $pad = ' ' * ($script:LastProgressLength - $line.Length) }
+    $script:LastProgressLength = $line.Length
+    try {
+        if ($Final) {
+            # 收尾只写一次并换行，否则最后一行会被打印两遍。
+            [Console]::Out.Write("`r" + $line + $pad + "`n")
+            $script:LastProgressLength = 0
+        } else {
+            [Console]::Out.Write("`r" + $line + $pad)
+        }
+        [Console]::Out.Flush()
+    } catch {
+        # 完全没有控制台（某些远程会话）：退回普通输出，不再画条。
+        $script:ProgressInteractive = $false
+        Write-Host $line
+    }
+}
+
+function Get-RemoteFile {
+    <# 流式下载到本地文件，边下边显示进度；不完整就报错（绝不静默截断）。
+
+    先写 ``<file>.part`` 再原子改名：半截文件永远不会被当成"下载好了"。
+    不用 ``Invoke-WebRequest``——它不能报告进度（旧实现把 -ProgressPreference
+    设成 SilentlyContinue 后，26 MB 的包下载期间界面完全静止）。
+    #>
+    param(
+        [string]$Url,
+        [string]$OutFile,
+        [long]$ExpectedSize = 0,
+        [string]$Label = '安装包'
+    )
+    $part = "$OutFile.part"
+    if (Test-Path -LiteralPath $part) { Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue }
+    if (Test-Path -LiteralPath $OutFile) { Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue }
+
+    $request = [System.Net.HttpWebRequest]::Create($Url)
+    $request.Method = 'GET'
+    $request.Timeout = 60000
+    $request.ReadWriteTimeout = 120000
+    $request.UserAgent = "ObservatoryInstaller/$AgentVersion"
+    $script:LastQuietBucket = -1
+    $script:LastProgressLength = 0
+
+    $response = $null
+    try {
+        $response = $request.GetResponse()
+    } catch {
+        throw "下载 $Url 失败: $($_.Exception.Message)"
+    }
+    try {
+        $total = [long]$response.ContentLength
+        if ($total -le 0 -and $ExpectedSize -gt 0) { $total = [long]$ExpectedSize }
+        $stream = $response.GetResponseStream()
+        $buffer = New-Object byte[] (256 * 1024)
+        $received = [long]0
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $lastTime = 0.0
+        $lastBytes = [long]0
+        $speed = 0.0
+        $handle = [System.IO.File]::Open($part, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
+        try {
+            while ($true) {
+                $read = $stream.Read($buffer, 0, $buffer.Length)
+                if ($read -le 0) { break }
+                $handle.Write($buffer, 0, $read)
+                $received += $read
+                $now = $watch.Elapsed.TotalSeconds
+                if (($now - $lastTime) -ge 0.2) {
+                    $delta = $now - $lastTime
+                    if ($delta -gt 0) {
+                        $sample = ($received - $lastBytes) / $delta
+                        # 指数平滑：单次采样的速度抖动很大（TCP 起步/重传），不平滑的话
+                        # "剩余时间"会在 00:12 和 37:58 之间乱跳，看起来像坏了。
+                        if ($speed -le 0) { $speed = $sample } else { $speed = 0.75 * $speed + 0.25 * $sample }
+                    }
+                    $lastTime = $now
+                    $lastBytes = $received
+                    Write-DownloadProgress -Label $Label -Received $received -Total $total -BytesPerSecond $speed -ElapsedSeconds $now
+                }
+            }
+        } finally {
+            $handle.Close()
+            $handle.Dispose()
+            $stream.Close()
+            $stream.Dispose()
+        }
+        $elapsed = $watch.Elapsed.TotalSeconds
+        Write-DownloadProgress -Label $Label -Received $received -Total $total -BytesPerSecond $speed -ElapsedSeconds $elapsed -Final
+        if ($total -gt 0 -and $received -ne $total) {
+            Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue
+            throw ("下载不完整：期望 {0} 字节，实际只收到 {1} 字节" -f $total, $received)
+        }
+        Move-Item -LiteralPath $part -Destination $OutFile -Force
+        Write-Step ("下载完成 {0}（{1}，用时 {2}）" -f (Split-Path -Leaf $OutFile), (Format-Bytes $received), (Format-Duration $elapsed))
+        return $received
+    } finally {
+        $response.Close()
+    }
+}
+
+function Get-PackageWithFailover {
+    <# 依次尝试 BaseUrls 下载同一个路径；每条线路都显示进度。 #>
+    param(
+        [string]$Path,
+        [string]$OutFile,
+        [long]$ExpectedSize = 0
+    )
+    $errors = @()
+    foreach ($url in $BaseUrls) {
+        $candidate = $url.TrimEnd('/')
+        try {
+            Write-Step "从 $candidate 下载 $Path"
+            return (Get-RemoteFile -Url "$candidate$Path" -OutFile $OutFile -ExpectedSize $ExpectedSize -Label '安装包')
+        } catch {
+            $errors += "$candidate -> $($_.Exception.Message)"
+            Write-Step "这条线路失败：$($_.Exception.Message)"
+        }
+    }
+    throw ("所有服务器地址都无法下载安装包:`n  " + ($errors -join "`n  "))
+}
+
+# ------------------------------------------------------- U 盘离线包发现 -------
+function Get-VersionFromName {
+    param([string]$Name)
+    $matched = [regex]::Match([string]$Name, '(\d+\.\d+\.\d+)')
+    if ($matched.Success) { return $matched.Groups[1].Value }
+    return ''
+}
+
+function Get-PackageSearchDirs {
+    <# 找安装包的目录顺序：脚本所在目录（U 盘根）、其 package 子目录、当前目录。 #>
+    $dirs = New-Object System.Collections.Generic.List[string]
+    $bases = @()
+    if ($PSCommandPath) { $bases += (Split-Path -Parent $PSCommandPath) }
+    $bases += (Get-Location).Path
+    if ($PSScriptRoot) { $bases += $PSScriptRoot }
+    foreach ($base in $bases) {
+        if (-not $base) { continue }
+        if (-not $dirs.Contains($base)) { $dirs.Add($base) }
+        $nested = Join-Path $base 'package'
+        if ((Test-Path -LiteralPath $nested) -and -not $dirs.Contains($nested)) { $dirs.Add($nested) }
+    }
+    return $dirs.ToArray()
+}
+
+function Test-AgentPackageZip {
+    <# 这个 zip 到底是不是受控端安装包（根目录/子目录里有 observatory-agent.exe）。 #>
+    param([string]$Path)
+    $zip = $null
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+        foreach ($entry in $zip.Entries) {
+            if ($entry.FullName -match '(^|/)observatory-agent\.exe$') { return $true }
+        }
+        return $false
+    } catch {
+        return $false
+    } finally {
+        if ($zip) { $zip.Dispose() }
+    }
+}
+
+function Expand-NestedAgentPackage {
+    <# bundle（例如旧的 Observatory-Setup.zip）里套着一个 agent zip：抽出来用。 #>
+    param([string]$Path)
+    $zip = $null
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+        $inner = $zip.Entries |
+            Where-Object { $_.FullName -match '(^|/)(observatory-agent|agent)-\d+\.\d+\.\d+\.zip$' } |
+            Sort-Object { (Get-VersionFromName $_.Name) } -Descending |
+            Select-Object -First 1
+        if (-not $inner) { return $null }
+        $target = Join-Path $env:TEMP ("observatory-usb-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $target -Force | Out-Null
+        $out = Join-Path $target (Split-Path -Leaf $inner.FullName)
+        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($inner, $out, $true)
+        Write-Step "已从 $([System.IO.Path]::GetFileName($Path)) 里取出内层安装包 $(Split-Path -Leaf $out)"
+        return [pscustomobject]@{ Path = $out; TempDir = $target }
+    } catch {
+        Write-Step "解析内层安装包失败：$($_.Exception.Message)"
+        return $null
+    } finally {
+        if ($zip) { $zip.Dispose() }
+    }
+}
+
+function Find-LocalPackage {
+    <# 在 U 盘/当前目录里找最新的受控端安装包；找不到返回 $null。 #>
+    $patterns = @('observatory-agent-*.zip', 'Observatory-Agent-*.zip', 'agent-*.zip', 'Observatory-Setup*.zip', 'Observatory*.zip')
+    $candidates = @()
+    foreach ($dir in (Get-PackageSearchDirs)) {
+        foreach ($pattern in $patterns) {
+            $items = @()
+            try { $items = @(Get-ChildItem -LiteralPath $dir -Filter $pattern -File -ErrorAction SilentlyContinue) } catch { $items = @() }
+            foreach ($item in $items) {
+                if ($candidates | Where-Object { $_.Path -eq $item.FullName }) { continue }
+                $candidates += [pscustomobject]@{
+                    Path    = $item.FullName
+                    Version = (Get-VersionFromName $item.Name)
+                    Size    = [long]$item.Length
+                }
+            }
+        }
+    }
+    if ($candidates.Count -eq 0) { return $null }
+    # 版本高的优先；同版本按文件更大的（完整的包）。认不出高低的（bundle）排最后。
+    $ordered = $candidates | Sort-Object `
+        @{ Expression = { if ($_.Version) { [version]$_.Version } else { [version]'0.0.0' } }; Descending = $true }, `
+        @{ Expression = { $_.Size }; Descending = $true }
+    foreach ($candidate in $ordered) {
+        if (Test-AgentPackageZip $candidate.Path) {
+            Write-Step "发现本地安装包：$($candidate.Path)（版本 $(if ($candidate.Version) { $candidate.Version } else { '未知' })，不再下载）"
+            return [pscustomobject]@{ Path = $candidate.Path; Version = $candidate.Version; TempDir = '' }
+        }
+        $nested = Expand-NestedAgentPackage $candidate.Path
+        if ($nested) {
+            return [pscustomobject]@{ Path = $nested.Path; Version = (Get-VersionFromName (Split-Path -Leaf $nested.Path)); TempDir = $nested.TempDir }
+        }
+    }
+    return $null
 }
 
 function Show-Banner {
@@ -126,9 +455,13 @@ function Request-Elevation {
             '-ExecutionPolicy', 'Bypass',
             '-File', ("`"{0}`"" -f $PSCommandPath)
         )
-        if ($Package) {
+        # U 盘离线：自动发现的本地包也要跨过提权边界，否则提权子进程会重新发现
+        # 失败（它可能换了工作目录），退回联网下载 —— 断网机器就装不上了。
+        $effectivePackage = $Package
+        if (-not $effectivePackage -and $script:LocalPackage) { $effectivePackage = $script:LocalPackage.Path }
+        if ($effectivePackage) {
             # 提权子进程的工作目录会变，先把本地包路径钉成绝对路径。
-            $packageArg = $Package
+            $packageArg = $effectivePackage
             if (-not [System.IO.Path]::IsPathRooted($packageArg)) {
                 $packageArg = Join-Path (Get-Location).Path $packageArg
             }
@@ -137,6 +470,9 @@ function Request-Elevation {
         if ($Insecure) { $arguments += '-Insecure' }
         if ($Quiet) { $arguments += '-Quiet' }
         if ($NoStart) { $arguments += '-NoStart' }
+        # 离线/在线意图同样要保留：提权后偷偷联网或偷偷用旧包都是行为改写。
+        if ($Offline) { $arguments += '-Offline' }
+        if ($Online) { $arguments += '-Online' }
         # A5：操作参数必须原样传递，否则提权后行为被改写。
         #   * -Uninstall 丢失 → 普通用户请求卸载会掉进安装分支（重装一台本想卸掉的机器）；
         #   * 显式 -BaseUrls 丢失 → 自定义/内网地址被脚本内置地址覆盖。
@@ -297,7 +633,37 @@ function Uninstall-Agent {
 }
 
 # -------------------------------------------------------------------- main --
+# U 盘离线包发现：必须在**提权之前**做完。提权子进程的工作目录会变，重新发现
+# 可能失败（尤其从资源管理器双击 .cmd 时），于是"离线安装"会悄悄退回联网下载，
+# 断网机器直接装不上。这里发现的绝对路径会通过 -Package 传给自己。
+$script:LocalPackage = $null
+$script:LocalPackageError = ''
+if (-not $Uninstall -and -not $Package -and -not $Online) {
+    try {
+        $script:LocalPackage = Find-LocalPackage
+    } catch {
+        $script:LocalPackageError = $_.Exception.Message
+        Write-Step "查找本地安装包时出错（继续按在线安装处理）：$($_.Exception.Message)"
+    }
+}
+
 Show-Banner
+
+# -Offline 但没包：**必须在弹 UAC 之前**就失败。否则现场技术员点完"是"、
+# 授权对话框消失之后才看到错误，会以为已经装上了。
+if ($Offline -and -not $Package -and -not $script:LocalPackage) {
+    Write-Fail '指定了离线安装，但没找到安装包。请确认 install.ps1 与 observatory-agent-*.zip 在同一个文件夹里。'
+    Write-Fail "查找过的位置：$((Get-PackageSearchDirs) -join ' ; ')"
+    if ($script:LocalPackageError) { Write-Fail "查找过程报错：$($script:LocalPackageError)" }
+    exit 5
+}
+
+if ($script:LocalPackage) {
+    $localVersion = if ($script:LocalPackage.Version) { $script:LocalPackage.Version } else { '未知' }
+    Write-Host "     离线包 : $($script:LocalPackage.Path)" -ForegroundColor Yellow
+    Write-Host "     包版本 : $localVersion（本次不下载）" -ForegroundColor Yellow
+    Write-Host ''
+}
 
 if (-not (Test-Admin)) {
     if ($Uninstall) {
@@ -319,11 +685,13 @@ if (-not $BaseUrls -or $BaseUrls.Count -eq 0) {
 }
 
 try {
-    # A5：探测在线服务只属于**下载**路径。使用本地 ``-Package``（U 盘/离线安装）
-    # 时绝不能先要求联网——真正断网的机器会因此直接失败。此前这里无条件
-    # ``Resolve-BaseUrl``，把"离线安装"变成了"必须先能连上服务器"。
+    # A5：探测在线服务只属于**下载**路径。使用本地包（U 盘/离线安装）时绝不能先
+    # 要求联网——真正断网的机器会因此直接失败。此前这里无条件 ``Resolve-BaseUrl``，
+    # 把"离线安装"变成了"必须先能连上服务器"。
     $downloaded = $false
     $localPackage = ''
+    $tempPackageDir = ''
+
     if ($Package) {
         # 相对路径按"当前工作目录"解析后转成绝对路径：提权子进程会换工作目录。
         $candidate = $Package
@@ -332,6 +700,15 @@ try {
         }
         if (-not (Test-Path -LiteralPath $candidate)) { throw "找不到本地安装包: $Package" }
         $localPackage = (Resolve-Path -LiteralPath $candidate).Path
+    } elseif ($script:LocalPackage) {
+        # 自动发现的 U 盘离线包（提权前已定位，路径是绝对的）。
+        $localPackage = $script:LocalPackage.Path
+        $tempPackageDir = $script:LocalPackage.TempDir
+    } elseif ($Offline) {
+        Write-Fail '指定了 -Offline，但在本目录及其 package\ 子目录里没有找到安装包（observatory-agent-*.zip / agent-*.zip）。'
+        Write-Fail "当前查找的位置：$((Get-PackageSearchDirs) -join ' ; ')"
+        if ($script:LocalPackageError) { Write-Fail "查找过程报错：$($script:LocalPackageError)" }
+        exit 5
     }
 
     $primary = $null
@@ -354,28 +731,33 @@ try {
             }
             Write-Step "本地安装包校验通过 sha256=$($actual.Substring(0,16))..."
         } else {
-            Write-Step '使用本地安装包（同目录没有 .sha256，跳过校验）'
+            Write-Step '使用本地安装包（没有 .sha256，跳过完整性校验）'
         }
-        Write-Step "本地安装包: $packagePath (版本 $targetVersion)"
+        Write-Step "本地安装包: $packagePath (版本 $targetVersion)，不下载"
     } else {
         Write-Step '查询服务器上的受控端版本'
         $package = Invoke-WithFailover -Path '/api/v1/public/agent/latest'
         $targetVersion = $AgentVersion
         $expectedSha = ''
+        $expectedSize = [long]0
         if ($package -and $package.available) {
             $targetVersion = $package.version
             $expectedSha = [string]$package.sha256
-            Write-Step "服务器提供版本: $targetVersion"
+            if ($package.size_bytes) { $expectedSize = [long]$package.size_bytes }
+            Write-Step "服务器提供版本: $targetVersion（$([string](Format-Bytes $expectedSize))）"
         } else {
             Write-Step "服务器没有上传安装包，使用脚本内置版本 $AgentVersion"
         }
 
         $packagePath = Join-Path $env:TEMP "observatory-agent-$targetVersion.zip"
         Write-Step "下载安装包 (版本 $targetVersion)"
-        Invoke-WithFailover -Path "/api/v1/public/agent/$targetVersion/package" -OutFile $packagePath | Out-Null
+        # 流式下载 + 可视化进度（百分比/已下载/速度/剩余时间）；不是
+        # Invoke-WebRequest——它无法报告进度，26 MB 下载期间界面完全静止。
+        Get-PackageWithFailover -Path "/api/v1/public/agent/$targetVersion/package" -OutFile $packagePath -ExpectedSize $expectedSize | Out-Null
         $downloaded = $true
 
         if ($expectedSha) {
+            Write-Step '校验安装包完整性 (sha256)'
             $actual = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLower()
             if ($actual -ne $expectedSha.ToLower()) {
                 Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
@@ -392,6 +774,10 @@ try {
     # 下载到临时目录的那份才删；U 盘上的本地包留给下一台机器。
     if ($downloaded) {
         Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
+    }
+    # 从 bundle 里解出来的内层包也一并清掉（U 盘原件不动）。
+    if ($tempPackageDir) {
+        Remove-Item -LiteralPath $tempPackageDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 
     $deviceUid = ''

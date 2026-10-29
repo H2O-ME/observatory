@@ -58,5 +58,5 @@
   <line x1="48" y1="352" x2="1152" y2="352" stroke="#27272a"/>
   <text x="48" y="382" fill="#71717a" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16">POST /api/v1/agent/link · WS /api/v1/agent/link · POST /api/v1/agent/frames</text>
   <text x="48" y="406" fill="#3f3f46" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" letter-spacing="1.2">AUTHORIZED DEVICES ONLY</text>
-  <text x="1152" y="406" text-anchor="end" fill="#3f3f46" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" letter-spacing="0.8">OBSERVATORY 0.3.7</text>
+  <text x="1152" y="406" text-anchor="end" fill="#3f3f46" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" letter-spacing="0.8">OBSERVATORY 0.3.8</text>
 </svg>

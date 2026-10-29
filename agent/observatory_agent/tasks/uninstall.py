@@ -156,6 +156,10 @@ class PurgeTicket:
     staged_dir: Path
     confirm_file: Path
     log_path: Path
+    #: 0.3.8 真机修复：helper 是否还活着必须问**自己的子进程句柄**
+    #: （``Popen.poll()``），不要用 PID 去猜。0.3.7 因为拿 PID 猜错，把每一次
+    #: 成功的卸载都报成了 ``uninstall_failed``（见 :func:`_process_alive`）。
+    child_poll: Callable[[], int | None] | None = None
 
 
 def spawn_purge_helper(
@@ -203,6 +207,7 @@ def spawn_purge_helper(
         staged_dir=staged,
         confirm_file=confirmation,
         log_path=log_path,
+        child_poll=getattr(process, "poll", None),
     )
 
 
@@ -273,6 +278,7 @@ def wait_for_ready_status(
     expected_pid: int | None = None,
     timeout_s: float = CONFIRMATION_TIMEOUT_S,
     process_alive: Callable[[int], bool] | None = None,
+    child_poll: Callable[[], int | None] | None = None,
     log_path: Path | None = None,
     now: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
@@ -280,7 +286,6 @@ def wait_for_ready_status(
 ) -> dict[str, Any]:
     """等待 helper 报告 ``ok=true``；helper 提前退出/报告失败/超时都抛异常。"""
 
-    check = process_alive or _process_alive
     deadline = now() + max(0.0, timeout_s)
     tail = f"，日志尾部：{_read_log_tail(log_path)}" if log_path is not None else ""
     while now() < deadline:
@@ -295,9 +300,9 @@ def wait_for_ready_status(
             raise UninstallError(
                 document["error"] or "卸载 helper 报告失败", step="wait_for_ready_status"
             )
-        if expected_pid is not None and not check(expected_pid):
+        if expected_pid is not None and not _alive(expected_pid, process_alive, child_poll):
             raise UninstallError(
-                f"卸载 helper 在确认前退出（pid={expected_pid}{tail}）",
+                f"卸载 helper 在确认前退出（pid={expected_pid}{_peek_exit(child_poll)}{tail}）",
                 step="wait_for_ready_status",
             )
         sleep(poll_s)
@@ -305,6 +310,30 @@ def wait_for_ready_status(
         f"卸载 helper 在 {timeout_s:.0f}s 内未确认（status={path}{tail}）",
         step="wait_for_ready_status",
     )
+
+
+def _alive(
+    pid: int,
+    process_alive: Callable[[int], bool] | None,
+    child_poll: Callable[[], int | None] | None,
+) -> bool:
+    """存活判定入口：显式注入的回调优先，其次自己的孩子句柄，最后 PID 探测。"""
+
+    if process_alive is not None:
+        return bool(process_alive(pid))
+    return _process_alive(pid, child_poll=child_poll)
+
+
+def _peek_exit(child_poll: Callable[[], int | None] | None) -> str:
+    """失败信息里带上 helper 的退出码（有的话），便于现场定位。"""
+
+    if child_poll is None:
+        return ""
+    try:
+        code = child_poll()
+    except Exception:  # noqa: BLE001 - 拿不到退出码不影响报错
+        return ""
+    return "" if code is None else f"，退出码={code}"
 
 
 def verify_helper_alive(
@@ -318,12 +347,12 @@ def verify_helper_alive(
 ) -> dict[str, Any]:
     """A1 断言入口：helper 在 ``grace_s`` 内一直存活，且已回写 ``ok=true``。"""
 
-    check = process_alive or _process_alive
     deadline = now() + max(0.0, grace_s)
     while now() < deadline:
-        if not check(ticket.pid):
+        if not _alive(ticket.pid, process_alive, ticket.child_poll):
             raise UninstallError(
-                f"卸载 helper 启动即退出（pid={ticket.pid}，日志尾部：{_read_log_tail(ticket.log_path)}）",
+                f"卸载 helper 启动即退出（pid={ticket.pid}{_peek_exit(ticket.child_poll)}，"
+                f"日志尾部：{_read_log_tail(ticket.log_path)}）",
                 step="verify_helper_alive",
             )
         sleep(poll_s)
@@ -362,6 +391,7 @@ def await_confirmation(
         expected_pid=ticket.pid,
         timeout_s=timeout_s,
         process_alive=process_alive,
+        child_poll=ticket.child_poll,
         log_path=ticket.log_path,
         now=now,
         sleep=sleep,
@@ -369,27 +399,72 @@ def await_confirmation(
     )
 
 
-def _process_alive(pid: int) -> bool:
+#: ``SYNCHRONIZE`` 访问掩码（0x00100000）。**不要**写 ``win32process.SYNCHRONIZE``：
+#: pywin32 的 ``win32process`` 并不导出这个名字，0.3.7 真机实测因此抛
+#: ``AttributeError``，被下面的 ``except Exception`` 吞成“进程已退出”——每一次远程
+#: 卸载在 helper 刚起来（甚至还来不及写状态文件）时就被判定“确认前退出”。
+_SYNCHRONIZE = 0x00100000
+#: ``OpenProcess`` 在“该 PID 不存在”时返回的错误码。
+_ERROR_INVALID_PARAMETER = 87
+
+
+def _process_alive(
+    pid: int,
+    *,
+    child_poll: Callable[[], int | None] | None = None,
+) -> bool:
+    """子进程是否仍在运行。**拿不准时返回 True**（不确定 ≠ 已退出）。
+
+    ``child_poll`` 是 ``Popen.poll``：有自己的句柄时它是唯一权威答案（没有 PID
+    复用问题）。没有句柄才退回 ``OpenProcess``/``os.kill`` 探测，且只有明确
+    "不存在"才判死——权限不足、pywin32 缺失都按“还活着”处理，因为把这个不确定
+    判成“已退出”的代价是：一次真实成功的卸载被上报为失败，而 helper 仍会继续
+    删掉整台机器的文件（0.3.7 的真实故障）。
+    """
+
+    if child_poll is not None:
+        try:
+            if child_poll() is None:
+                return True
+        except Exception:  # noqa: BLE001 - 句柄不可用时退回 PID 探测
+            log.debug("helper 句柄不可用，退回 PID 探测", exc_info=True)
+        else:
+            return False
     if pid <= 0:
         return False
     if os.name != "nt":
         try:
-            os.kill(pid, 0)
+            os.kill(int(pid), 0)
         except OSError:
             return False
         return True
     try:
         import win32api
+        import win32con
         import win32event
-        import win32process
-
-        handle = win32api.OpenProcess(win32process.SYNCHRONIZE, False, pid)
-    except Exception:  # noqa: BLE001 - 进程已退出/无权限均视为不存活
-        return False
+    except Exception:  # noqa: BLE001 - 没有 pywin32 时无法断言“已退出”
+        log.warning("pywin32 不可用，跳过 helper 存活探测（按存活处理）")
+        return True
+    access = int(getattr(win32con, "SYNCHRONIZE", _SYNCHRONIZE))
+    try:
+        handle = win32api.OpenProcess(access, False, int(pid))
+    except Exception as exc:  # noqa: BLE001 - 只有“不存在”才算退出
+        return not _process_missing(exc)
     try:
         return win32event.WaitForSingleObject(handle, 0) != win32event.WAIT_OBJECT_0
     finally:
-        win32api.CloseHandle(handle)
+        with contextlib.suppress(Exception):  # 关闭句柄失败不影响判定
+            win32api.CloseHandle(handle)
+
+
+def _process_missing(exc: BaseException) -> bool:
+    """``OpenProcess`` 抛的异常是不是“这个 PID 不存在”（而不是没权限）。"""
+
+    code = getattr(exc, "winerror", None)
+    if code is None:
+        args = getattr(exc, "args", ())
+        code = args[0] if args and isinstance(args[0], int) else None
+    return code == _ERROR_INVALID_PARAMETER
 
 
 def _read_log_tail(path: Path, *, limit: int = 800) -> str:
@@ -485,11 +560,14 @@ def run_purge_helper(
     data = Path(data_dir)
     status_path = Path(confirm_file)
     service = controller or ServiceController(DEFAULT_IDENTITY)
+    _say(f"start install_dir={install} data_dir={data} status={status_path} wait_pid={wait_pid}")
     try:
         write_status(status_path, status_document(ok=True, pid=os.getpid(), ts_ms=now_ms()))
     except OSError as exc:
         log.error("could not write uninstall status file: %s", exc)
+        _say(f"写状态文件失败：{exc}")
         return RC_CONFIRM_FAILED
+    _say("status ok=true 已写入")
 
     steps: list[tuple[str, Callable[[], Any]]] = [
         ("stop service", lambda: _clean_service_step(service)),
@@ -518,9 +596,23 @@ def run_purge_helper(
         # 数据目录里可能残留 helper 自己的 staging（正在使用无法立即删），登记重启时删除。
         _schedule_self_delete(data)
     log.info("uninstall finished (status=%s)", status)
+    _say(f"finished status={status}")
     if exit_process is not None:
         exit_process(status)
     return status
+
+
+def _say(message: str) -> None:
+    """helper 也往 stdout 说一句。
+
+    父进程把 helper 的 stdout/stderr 重定向进 ``staging/purge-*.log``，而 helper
+    自己的 logging 写的是 ``%ProgramData%\\Observatory\\logs\\uninstall*.log``。
+    0.3.7 真机现场失败信息只剩 ``日志尾部：<空>``，因为日志文件里本来就没有内容；
+    关键节点在 stdout 重复一遍，失败原因才查得到。
+    """
+
+    with contextlib.suppress(Exception):  # 控制台可能已关闭/管道已断开
+        print(f"[purge-helper pid={os.getpid()}] {message}", flush=True)
 
 
 def _clean_service_step(service: ServiceController) -> bool:
