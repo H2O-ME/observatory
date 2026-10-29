@@ -59,6 +59,22 @@ def test_alive_probe_sees_its_own_process() -> None:
     assert _process_alive(os.getpid()) is True
 
 
+def _force_windows(monkeypatch) -> None:
+    """让被测函数走进 Windows 分支。
+
+    必须伪造 ``os.name`` 而不是 ``sys.platform``：``_process_alive`` 判的是
+    ``os.name``（CI 跑在 Linux 上，``os.name`` 恒为 ``posix``，只改
+    ``sys.platform`` 会让这三条用例悄悄走 ``os.kill`` 分支——其中两条期望
+    ``True`` 的会失败，期望 ``False`` 的那条更是"假通过"）。
+
+    只替换模块内引用的 ``os``，不动全局 ``os.name``。
+    """
+
+    import observatory_agent.tasks.uninstall as module  # noqa: PLC0415
+
+    monkeypatch.setattr(module, "os", types.SimpleNamespace(name="nt"))
+
+
 def _fake_win32(monkeypatch, *, open_error: BaseException | None = None, wait_result: int = 0x102):
     """装一套假的 win32 模块；``win32process`` **故意不提供**（旧实现依赖它）。"""
 
@@ -82,6 +98,7 @@ def _fake_win32(monkeypatch, *, open_error: BaseException | None = None, wait_re
     monkeypatch.setitem(sys.modules, "win32event", win32event)
     monkeypatch.setitem(sys.modules, "win32con", win32con)
     monkeypatch.setitem(sys.modules, "win32process", types.SimpleNamespace())
+    _force_windows(monkeypatch)
     return calls
 
 
@@ -95,7 +112,6 @@ def test_alive_probe_does_not_need_win32process_synchronize(monkeypatch) -> None
     """不依赖 ``win32process.SYNCHRONIZE``：掩码来自 win32con 或内置常量。"""
 
     calls = _fake_win32(monkeypatch, wait_result=0x102)  # WAIT_TIMEOUT → 仍活着
-    monkeypatch.setattr(sys, "platform", "win32")
     assert _process_alive(4868) is True
     assert calls["access"] == 0x00100000
     assert calls["closed"] == "HANDLE"
@@ -105,7 +121,6 @@ def test_alive_probe_treats_access_denied_as_alive(monkeypatch) -> None:
     """没权限看 ≠ 已退出（宁可不报错，也不能把成功当失败）。"""
 
     _fake_win32(monkeypatch, open_error=_WinError(5))
-    monkeypatch.setattr(sys, "platform", "win32")
     assert _process_alive(4868) is True
 
 
@@ -113,7 +128,6 @@ def test_alive_probe_reports_missing_process_as_dead(monkeypatch) -> None:
     """PID 不存在（87）才是真的退出了。"""
 
     _fake_win32(monkeypatch, open_error=_WinError(87))
-    monkeypatch.setattr(sys, "platform", "win32")
     assert _process_alive(4868) is False
 
 
