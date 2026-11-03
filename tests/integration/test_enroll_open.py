@@ -148,7 +148,10 @@ def test_rotation_grace_then_expiry(client) -> None:
     # 用旧 token 再轮换一次也是合法重试路径
     assert _enroll(client, "OBS-P1-GRACE", prev_token=old).status_code == 200
 
-    _sql(client, "UPDATE device_token_history SET superseded_at_ms = ?", (int(time.time() * 1000) - 3_600_000,))
+    # 过期线按 settings 推算（宽限期默认 7200s，硬编码 1h 会在调大宽限时失真）
+    grace_s = client.app.state.settings.token_rotate_grace_s
+    expired_ms = int(time.time() * 1000) - (grace_s + 600) * 1000
+    _sql(client, "UPDATE device_token_history SET superseded_at_ms = ?", (expired_ms,))
     assert _link(client, old).status_code == 401
 
 

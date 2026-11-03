@@ -51,8 +51,10 @@ _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 #: 解压上限：防止 zip 炸弹把磁盘写满（A1 的“可观测失败”）。
 MAX_ARCHIVE_ENTRIES = 50_000
 MAX_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024
-#: helper 秒退判定的观察窗口。
-HELPER_GRACE_S = 2.5
+#: helper 秒退判定的观察窗口。2.5s 太短：AV/MOTW 扫描、慢盘首次加载都可能
+#: 让正常的 helper 在窗口内还没写出第一行日志，被误报"启动即退出"；而真正的
+#: 预检失败（RC_PRECHECK_FAILED 等）会先写日志再退出，日志尾部能区分。
+HELPER_GRACE_S = 6.0
 #: 安装根目录必须包含的 exe（防止把 ``_internal`` 当安装目录换掉——0.2.10 的事故）。
 INSTALL_ROOT_MARKER = EXE_NAME
 
@@ -65,6 +67,7 @@ RC_ROLLED_BACK = 5
 RC_ROLLBACK_FAILED = 6
 RC_TARGET_INVALID = 7
 RC_INTERRUPTED = 8
+RC_OLD_PID_ALIVE = 9
 
 
 class UpdateError(RuntimeError):
@@ -220,6 +223,13 @@ def cleanup_staging(staging_dir: Path, *, keep_archive: bool = False) -> None:
             "staging 仍有存活的 update helper（pid=%s），本次跳过 payload/apply 目录清理",
             live_pids,
         )
+    # 0.3.8：helper 日志只保留最近一份——helper 秒退的根因排查全靠它
+    # （2026-11-03 事故里现场日志被下一次尝试清掉，只能靠猜）。
+    log_files = sorted(
+        (p for p in directory.iterdir() if p.name.startswith("apply-") and p.name.endswith(".log")),
+        key=lambda p: p.stat().st_mtime if p.is_file() else 0,
+    )
+    stale_logs = set(log_files[:-1])
     for path in directory.iterdir():
         try:
             if path.is_dir() and path.name.startswith(("payload-", "apply-")):
@@ -230,7 +240,7 @@ def cleanup_staging(staging_dir: Path, *, keep_archive: bool = False) -> None:
                 path.unlink(missing_ok=True)
             elif path.suffix == ".zip" and not keep_archive:
                 path.unlink(missing_ok=True)
-            elif path.name.endswith(".log") and path.name.startswith("apply-"):
+            elif path in stale_logs:
                 path.unlink(missing_ok=True)
             elif path.suffix == ".pid" and path.name.startswith("apply-") and not live_pids:
                 path.unlink(missing_ok=True)
@@ -564,8 +574,25 @@ def verify_helper_alive(
 
 
 def _process_alive(pid: int) -> bool:
+    """helper 判活：psutil 优先，ctypes 有限权限查询兜底。
+
+    旧实现只用 ``win32api.OpenProcess(SYNCHRONIZE)`` 一条腿——打包漏掉
+    win32api 或句柄权限异常时一律判死，把活着的 helper 误报成"启动即退出"
+    （2026-11-03 生产事故的第一症状）。这里与 ``_pid_alive`` 同一套多级
+    兜底：psutil → ctypes ``PROCESS_QUERY_LIMITED_INFORMATION``。
+    """
+
     if pid <= 0:
         return False
+    try:
+        import psutil  # noqa: PLC0415 - 按需导入，缺依赖走 ctypes 路径
+    except ImportError:
+        pass
+    else:
+        try:
+            return bool(psutil.pid_exists(int(pid)))
+        except Exception:  # noqa: BLE001 - psutil 查询失败落到 ctypes 路径
+            pass
     if os.name != "nt":
         try:
             os.kill(pid, 0)
@@ -573,17 +600,23 @@ def _process_alive(pid: int) -> bool:
             return False
         return True
     try:
-        import win32api
-        import win32event
-        import win32process
+        import ctypes  # noqa: PLC0415
 
-        handle = win32api.OpenProcess(win32process.SYNCHRONIZE, False, pid)
-    except Exception:  # noqa: BLE001 - 进程已退出/无权限都视为不存活
+        process_query_limited_information = 0x1000
+        still_active = 259
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(process_query_limited_information, False, int(pid))
+        if not handle:
+            return False
+        exit_code = ctypes.c_ulong()
+        try:
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return int(exit_code.value) == still_active
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:  # noqa: BLE001 - 探测失败按不存活处理（宁误报失败不断链路）
         return False
-    try:
-        return win32event.WaitForSingleObject(handle, 0) != win32event.WAIT_OBJECT_0
-    finally:
-        win32api.CloseHandle(handle)
 
 
 def _read_log_tail(path: Path, *, limit: int = 800) -> str:
@@ -682,7 +715,16 @@ def apply_now(
         return RC_PRECHECK_FAILED
 
     if not service.wait_for_process_exit(wait_pid, timeout_s=swap_wait_s):
-        log.warning("old service pid %s still alive after %.0fs", wait_pid, swap_wait_s)
+        # 旧进程没退出就**中止**而不是强停服务：agent 侧可能已判定本次更新失败
+        # 并继续正常运行（verify_helper_alive 误判/重试竞态），此时强停等于把
+        # 一台"自以为更新失败"的活设备杀掉（2026-11-03 事故的掉线机理）。
+        # 放弃 swap 是安全的：旧构建原样在跑，服务端下轮可重新下发更新。
+        log.error(
+            "old service pid %s still alive after %.0fs; aborting without stopping the service",
+            wait_pid,
+            swap_wait_s,
+        )
+        return RC_OLD_PID_ALIVE
     try:
         if not service.stop():
             log.error("could not stop the service before swapping")

@@ -255,7 +255,20 @@ async def link_ws(websocket: WebSocket) -> None:
         link_ready.set()
 
     pump = asyncio.create_task(pump_downlink(), name=f"link-ws-pump-{identity.device_id}")
-    idle_s = max(5.0, settings.ws_stale_ms / 1000.0)
+    # 空闲窗口必须覆盖设备**实际**的心跳间隔：ws_stale_ms 派生自 env 的
+    # heartbeat，而设备生效值来自控制台 per-device 设置（上限 300s）。只看 env
+    # 时，把心跳调大就会让全队 WS 在 60s 被空闲踢掉、无限重连。
+    effective_heartbeat_s = session.agent_config.get(
+        "heartbeat_interval_s", settings.heartbeat_interval_s
+    )
+    try:
+        effective_heartbeat_s = float(effective_heartbeat_s)
+    except (TypeError, ValueError):
+        effective_heartbeat_s = float(settings.heartbeat_interval_s)
+    idle_s = max(
+        max(5.0, settings.ws_stale_ms / 1000.0),
+        effective_heartbeat_s * 3.0,
+    )
     try:
         while True:
             try:

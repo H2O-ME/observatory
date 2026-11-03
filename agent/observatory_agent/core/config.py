@@ -420,8 +420,23 @@ def _load_config_json(target: Path) -> dict[str, Any]:
     except FileNotFoundError:
         return {}
     except (OSError, ValueError) as exc:
-        log.error("读取配置失败（使用默认值）%s: %s", target, exc)
-        return {}
+        # OSError（文件被锁/ACL/瞬时 IO）不能静默清零：清零会丢 device token，
+        # 把设备打进 proof_required 死循环（2026-11-03 事故的候选根因之一）。
+        # 也不走 ``_restore_config_backup``（那会用 .bak 覆盖原文件——原文件可能
+        # 只是暂时读不了，覆盖会把最新一代配置降级回上一代）；这里只**读取**
+        # 备份内容作为本次的配置，原文件保持原样。
+        backup = target.with_name(target.name + ".bak")
+        log.error("读取配置失败（尝试直接读取备份，不覆盖原文件）%s: %s", target, exc)
+        try:
+            raw_bak: Any = json.loads(backup.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc_bak:
+            log.error("备份配置 %s 也不可用（%s），只能使用默认值（token 会丢失）", backup, exc_bak)
+            return {}
+        if not isinstance(raw_bak, dict):
+            log.error("备份配置 %s 不是 JSON 对象，只能使用默认值（token 会丢失）", backup)
+            return {}
+        log.warning("本次使用备份配置 %s 的内容（原文件未改动）", backup)
+        return raw_bak
     try:
         raw: Any = json.loads(text)
     except ValueError as exc:

@@ -109,7 +109,10 @@ class Settings(BaseSettings):
     #: How long a *superseded* device token stays accepted (0 disables it). The
     #: window exists so an enrolment whose response was lost can be retried with
     #: the old token instead of locking the device out; it is not a ban either.
-    token_rotate_grace_s: int = Field(default=600, ge=0, le=86_400)
+    #: Must comfortably exceed the agent's re-auth backoff ceiling (~1h): if the
+    #: server is unreachable for a publish window right after a rotation, a 600s
+    #: grace locked rotated devices out permanently (proof_required death loop).
+    token_rotate_grace_s: int = Field(default=7200, ge=0, le=86_400)
     #: P2: how long an accepted uninstall command may stay unconfirmed. On expiry
     #: the command becomes ``unconfirmed`` ("outcome unknown") and the device
     #: record is kept — a silent network is not evidence that the purge ran.

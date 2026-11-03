@@ -301,12 +301,51 @@ def _make_update_offer_provider(app: FastAPI) -> Any | None:
     return provider
 
 
+#: update_failed 熔断时长（毫秒）：失败版本在冷却期内不再向该设备 offer。
+#: 2026-11-03 事故：offer 无失败记忆，坏包被反复下发（每分钟 + 每次重连），
+#: 设备在"更新失败 → 重启丢令牌 → 重注册 → 再收同一坏包"里打转。
+UPDATE_FAILURE_COOLDOWN_MS = 6 * 60 * 60 * 1000
+
+
+def _record_update_failure(app: FastAPI, device_id: int, version: str) -> None:
+    """agent 上报 update_failed 后，把该版本拉黑一段时间（进程内，重启即清）。"""
+
+    cooldowns = getattr(app.state, "update_failure_cooldowns", None)
+    if cooldowns is None:
+        return
+    if version:
+        cooldowns[int(device_id)] = (str(version)[:32], time.time() * 1000.0 + UPDATE_FAILURE_COOLDOWN_MS)
+        log_event(
+            log,
+            logging.WARNING,
+            "update.offer_cooldown",
+            device_id=int(device_id),
+            version=str(version)[:32],
+        )
+
+
+def _update_in_cooldown(app: FastAPI, device_id: int) -> bool:
+    cooldowns = getattr(app.state, "update_failure_cooldowns", None)
+    if not cooldowns:
+        return False
+    entry = cooldowns.get(int(device_id))
+    if entry is None:
+        return False
+    _version, until_ms = entry
+    if time.time() * 1000.0 >= until_ms:
+        cooldowns.pop(int(device_id), None)
+        return False
+    return True
+
+
 async def _update_offer(app: FastAPI, device_id: int, agent_version: str) -> dict[str, Any] | None:
     from .console.updates import PackageService
     from .core.config import can_self_update, is_newer
     from .core.models import Device
 
     if not can_self_update(agent_version):
+        return None
+    if _update_in_cooldown(app, device_id):
         return None
     database = getattr(app.state, "db", None)
     if database is None:
@@ -340,6 +379,8 @@ def _make_agent_event_sink(app: FastAPI) -> Any:
 
             name = str(body.get("event") or "agent_event")[:64]
             data = body.get("data") if isinstance(body.get("data"), dict) else {}
+            if name == "update_failed":
+                _record_update_failure(app, int(device_id), str(data.get("version") or ""))
             async with database.sessionmaker() as session:
                 await console_audit.record(
                     session,
@@ -515,6 +556,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.runtime_settings_provider = _load_runtime_settings_provider()
     app.state.update_offer_provider = _make_update_offer_provider(app)
     app.state.agent_event_sink = _make_agent_event_sink(app)
+    app.state.update_failure_cooldowns = {}
     async with database.sessionmaker() as session:
         from .console.auth import load_credential_version
 
