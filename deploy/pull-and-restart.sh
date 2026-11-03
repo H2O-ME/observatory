@@ -12,6 +12,14 @@ AGENT_CHANGED="${2:-false}"
 compose() { docker compose -f deploy/docker-compose.yml --env-file server/.env "$@"; }
 
 # 1) 受控端有更新：从固定 Release（latest-agent）拉 zip 并登记（服务器→GitHub 满速）
+# 更新冻结开关：/opt/observatory/.update-freeze 存在时跳过登记。用于"受控端
+# 新版本已知有问题"时止血——否则 CI 只要动了 agent/** 就会把 Release 上的
+# 坏包重新推给全量设备（2026-11-04 实测：坏 0.3.8 被这样重新上架，在线设备
+# 秒被 offer 打死）。解冻：删掉该文件后手动 force_agent 重建。
+if [[ -f /opt/observatory/.update-freeze ]]; then
+  echo "WARN: 存在 /opt/observatory/.update-freeze，跳过受控端包登记（AGENT_CHANGED=$AGENT_CHANGED）"
+  AGENT_CHANGED="false"
+fi
 if [[ "$AGENT_CHANGED" == "true" ]]; then
   tok="$(cat /opt/observatory/.gh_read_token)"
   rel="$(curl -fsSL --max-time 30 -H "Authorization: Bearer $tok" \
