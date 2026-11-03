@@ -21,9 +21,13 @@ Order of decisions (each step short-circuits the next)
 8. row exists and the request proves a *superseded* token still inside
    ``token_rotate_grace_s`` → CAS rotation (covers a lost enrolment response)
 9. no proof, but a live session exists → 401 ``device_online`` (takeover guard)
-10. no proof, no live session → 401 ``proof_required`` (someone knows a UID but
+10. no proof, no live session, and the optional deployment key is presented and
+   valid → CAS rotation (``readmit_key``): a reinstalling agent may only have
+   the key plus its UID (its token died with a botched update), and refusing it
+   turned one failed update into a permanent offline (2026-11-03 incident)
+11. no proof, no live session → 401 ``proof_required`` (someone knows a UID but
     owns nothing; this branch is the credential-less takeover signal)
-11. concurrent insert on the same UID → rollback, re-read, re-decide (≤2 retries)
+12. concurrent insert on the same UID → rollback, re-read, re-decide (≤2 retries)
 
 Two invariants this ordering exists to protect
 ----------------------------------------------
@@ -136,14 +140,25 @@ def _require_admission_key(settings: Any, payload: dict[str, Any]) -> None:
     """
 
     expected = str(getattr(settings, "enroll_key", "") or "")
-    if not expected:
-        return
-    provided = str(payload.get("code") or payload.get("enroll_code") or "").strip()
-    if provided and _constant_time_equals(provided, expected):
+    if not expected or _admission_ok(settings, payload):
         return
     raise AppError.auth(
         "新设备准入密钥无效或缺失（enroll.key_required）；请使用控制台下发的安装脚本"
     )
+
+
+def _admission_ok(settings: Any, payload: dict[str, Any]) -> bool:
+    """True when the deployment key is configured and the request carries it.
+
+    未配置密钥（开放注册）时返回 False 而不是 True：开放注册下的新行创建
+    本来就无需密钥，调用方各自处理；这里的 False 不等于"拒绝"。
+    """
+
+    expected = str(getattr(settings, "enroll_key", "") or "")
+    if not expected:
+        return False
+    provided = str(payload.get("code") or payload.get("enroll_code") or "").strip()
+    return bool(provided) and _constant_time_equals(provided, expected)
 
 
 def _live_session(request: Request, device: Device) -> bool:
@@ -474,6 +489,22 @@ async def _enroll_once(
             ip=ip,
             reason="device_online",
             message="设备在线中，拒绝接管（enroll.device_online）；如需重装请先远程卸载",
+        )
+    # 10b. 离线记录 + 有效的部署准入密钥 → 允许接管。重装 agent 只剩"uid +
+    # 安装时下发的准入密钥"（原设备令牌已丢，例如更新失败后进程重启）；
+    # 拒绝它会把一次失败的更新变成永久下线（2026-11-03 生产事故）。密钥是
+    # 部署期秘密：持有它说明请求来自真实装机流程，而不是猜 UID 的第三方。
+    if _admission_ok(settings, payload):
+        return await _rotate_and_activate(
+            request,
+            session,
+            device,
+            payload,
+            ip=ip,
+            now=now,
+            mode="readmit_key",
+            clear_uninstalled=False,
+            matched="",
         )
     await _reject(
         session,

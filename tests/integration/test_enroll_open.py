@@ -263,3 +263,47 @@ def test_concurrent_enrol_single_row_no_5xx(client) -> None:
     assert statuses.count(200) == 1, f"只应有一个请求建行: {statuses}"
     assert set(statuses) <= {200, 401}, f"不应出现 5xx: {statuses}"
     assert len(_sql(client, "SELECT id FROM devices WHERE uid='OBS-P1-RACE'")) == 1
+
+
+def test_admission_key_takes_over_offline_record(client) -> None:
+    """10b 分支：离线记录 + 有效部署密钥 → 接管成功；无效密钥仍 proof_required。
+
+    2026-11-03 生产事故：更新失败让 agent 丢了设备令牌，只剩 uid + 安装时的
+    准入密钥；旧实现一律 proof_required，设备永久下线。锁定：密钥可接管、
+    错密钥不可接管、在线守卫不受密钥影响。
+    """
+
+    settings = client.app.state.settings
+    saved_key = settings.enroll_key
+    try:
+        settings.enroll_key = "s3cret-deployment-key"
+        first = _enroll(client, "OBS-P1-KEY-TAKEOVER", code="s3cret-deployment-key")
+        assert first.status_code == 200, first.text
+        old_token = first.json()["token"]
+
+        # 离线 + 错密钥 → 仍是 proof_required（接管信号不消失）
+        wrong = _enroll(client, "OBS-P1-KEY-TAKEOVER", code="not-the-key")
+        assert wrong.status_code == 401
+        assert "proof_required" in wrong.text
+
+        # 离线 + 有效密钥 → 接管并轮换
+        takeover = _enroll(client, "OBS-P1-KEY-TAKEOVER", code="s3cret-deployment-key")
+        assert takeover.status_code == 200, takeover.text
+        new_token = takeover.json()["token"]
+        assert new_token != old_token
+        # mode 落在 audit，不在 HTTP 响应里
+        audit_mode = _sql(
+            client,
+            "SELECT detail FROM audit WHERE action='device.enroll' AND detail LIKE '%readmit_key%'"
+            " ORDER BY id DESC LIMIT 1",
+        )
+        assert audit_mode, "接管必须以 readmit_key 模式记入 audit"
+        assert new_token != old_token
+        assert _link(client, new_token).status_code == 200
+
+        # 在线守卫不受密钥影响：新令牌在线时，持密钥的第三方仍被拒
+        online = _enroll(client, "OBS-P1-KEY-TAKEOVER", code="s3cret-deployment-key")
+        assert online.status_code == 401
+        assert "device_online" in online.text
+    finally:
+        settings.enroll_key = saved_key
