@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Mapping
 from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
 
@@ -172,6 +172,11 @@ class AgentSession:
         self.boot_id = ""
         self.last_uplink_id = ""
         self.outbox = Outbox(maxsize=settings.outbox_max_messages)
+        #: HTTP 载体已投递的下行 id（FIFO，封顶 512）：watermark ack 只能确认
+        #: 真正投递过的消息。旧实现直接 ``ack_up_to(last_ack_id)``——载体切换或
+        #: 响应包丢失后，队列里更早但从未到达 agent 的消息会被水位一起弹出，
+        #: 下行命令静默丢失（只能等 journal 过期兜底）。
+        self.http_delivered: deque[str] = deque(maxlen=512)
         self.closed = False
 
         self._send_lock = asyncio.Lock()
@@ -657,6 +662,28 @@ class AgentSession:
             {"ack_id": self.last_uplink_id, "server_time_ms": self.clock.now_ms()},
             clock=self.clock,
         )
+
+    def ack_http_delivery(self, message_id: str) -> int:
+        """HTTP watermark ack，但只确认**本会话真正投递过**的消息。
+
+        从投递记录（FIFO）里逐个弹出并 ``outbox.ack``，直到命中 ``message_id``；
+        记录里没有它（服务器重启过 / 该 id 从未投递）就一个都不确认——多投一次
+        会被 agent 按信封 id 去重，是安全的；少投才是事故。
+        """
+
+        if not message_id:
+            return 0
+        if message_id not in self.http_delivered:
+            return 0
+        removed = 0
+        while self.http_delivered:
+            delivered_id = self.http_delivered.popleft()
+            hit = delivered_id == message_id
+            if self.outbox.ack(delivered_id):
+                removed += 1
+            if hit:
+                return removed
+        return removed
 
     async def _handle_result(self, body: dict[str, Any]) -> None:
         command_id = body.get("command_id") or body.get("id")

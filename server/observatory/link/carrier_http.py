@@ -136,7 +136,9 @@ async def link_http(
     session.touch()
 
     if batch.last_ack_id:
-        session.outbox.ack_up_to(batch.last_ack_id)
+        # 只确认本会话真正投递过的下行（见 AgentSession.ack_http_delivery）：
+        # 直接水位 ack 会把载体切换/丢包期间从未到达 agent 的更早消息一并弹出。
+        session.ack_http_delivery(batch.last_ack_id)
 
     replies = []
     for envelope in batch.items:
@@ -161,6 +163,9 @@ async def link_http(
     downlink = replies + session.outbox.pending(limit=settings.outbox_max_messages)
     if not downlink and hold_s:
         downlink = await session.outbox.wait_for_messages(hold_s)
+    # 记录投递：下一轮的 watermark ack 只允许确认这些 id。
+    for envelope in downlink:
+        session.http_delivered.append(envelope.id)
 
     # §5.6 / Lead ruling: `ack_id` is the **uplink** cursor — the last uplink id
     # the server has processed. The client advances its outbox with it. With no

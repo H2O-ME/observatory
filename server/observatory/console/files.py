@@ -173,6 +173,12 @@ async def file_op(
         raise AppError.bad_request("读写请使用 /files/raw 分片接口")
     if op not in ALLOWED_OPS:
         raise AppError.bad_request(f"不允许的文件操作: {op}")
+    if op in MUTATING_OPS:
+        # 写入闸门服务端也要把关：只靠 agent 自觉，旧版/异常 agent 即绕过
+        # 设备设置里的 file_write_enabled（服务端声明了却从未读）。
+        effective = await store().effective(session, device.settings or {})
+        if not effective.get("file_write_enabled", True):
+            raise AppError.bad_request("该设备已关闭「允许写入文件」（file_write_enabled=false）")
     result = await run_file_op(request, session, device, payload)
     result["data"] = _normalise_op_data(op, result["data"])
     if op in MUTATING_OPS:
@@ -245,13 +251,17 @@ async def write_raw(
 ) -> dict[str, Any]:
     device = await load_device(session, uid)
     body = await request.body()
+    # 写入闸门同 /files/op：file_write_enabled 服务端必须把关
+    effective_w = await store().effective(session, device.settings or {})
+    if not effective_w.get("file_write_enabled", True):
+        raise AppError.bad_request("该设备已关闭「允许写入文件」（file_write_enabled=false）")
     if not body and not truncate:
         # A 0-byte first chunk cannot create anything meaningful. Clearing or
         # creating an empty file is expressed explicitly with truncate=true.
         raise AppError.bad_request("空数据；清空或创建空文件请带 truncate=true")
     if len(body) > MAX_CHUNK_BYTES:
         raise AppError.bad_request("分片超过 1MiB")
-    effective = await store().effective(session, device.settings or {})
+    effective = effective_w
     max_bytes = int(effective.get("file_upload_max_mb", 512)) * 1024 * 1024
     if offset + len(body) > max_bytes:
         raise AppError.bad_request("文件超过该设备允许的上传上限")

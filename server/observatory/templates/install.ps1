@@ -458,7 +458,7 @@ function Request-Elevation {
         # U 盘离线：自动发现的本地包也要跨过提权边界，否则提权子进程会重新发现
         # 失败（它可能换了工作目录），退回联网下载 —— 断网机器就装不上了。
         $effectivePackage = $Package
-        if (-not $effectivePackage -and $script:LocalPackage) { $effectivePackage = $script:LocalPackage.Path }
+        if (-not $effectivePackage -and $script:DetectedPackage) { $effectivePackage = $script:DetectedPackage.Path }
         if ($effectivePackage) {
             # 提权子进程的工作目录会变，先把本地包路径钉成绝对路径。
             $packageArg = $effectivePackage
@@ -570,6 +570,11 @@ function Install-Files {
         if (Test-Path $InstallDir) {
             Write-Step "清理旧安装目录 $InstallDir"
             Remove-Item -LiteralPath $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
+            if (Test-Path $InstallDir) {
+                # 删除失败（旧 exe 被占用/杀软扫描中）就继续覆盖会得到新旧混杂的
+                # onedir，PyInstaller 启动即崩——必须失败而不是静默半成品。
+                throw "旧安装目录删除失败（旧进程占用或杀软拦截）：$InstallDir —— 重启机器后重试"
+            }
         }
         New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
         Copy-Item -Path (Join-Path $staging '*') -Destination $InstallDir -Recurse -Force
@@ -595,6 +600,11 @@ function Install-Service {
 
     $output = & $exe @arguments 2>&1
     if (-not $Quiet) { $output | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray } }
+    if ($LASTEXITCODE -ne 0) {
+        # agent --install 失败（CreateService 权限/杀软/参数问题）必须让安装失败，
+        # 不能落进"安装完成"横幅把故障盖住。
+        throw "受控端 --install 失败（退出码 $LASTEXITCODE）"
+    }
 
     if (-not $NoStart) {
         try {
@@ -602,14 +612,20 @@ function Install-Service {
         } catch {
             & $exe --start | Out-Null
         }
-        Start-Sleep -Seconds 2
-        $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        # 轮询到 Running（SCM 慢启动是正常的），超时仍非 Running 就失败——
+        # "稍后会自动重试启动"曾被用来掩盖起不来的安装。
+        $deadline = (Get-Date).AddSeconds(30)
+        $service = $null
+        while ((Get-Date) -lt $deadline) {
+            $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+            if ($service -and $service.Status -eq 'Running') { break }
+            Start-Sleep -Milliseconds 500
+        }
         if (-not $service) { throw '服务未注册成功' }
         if ($service.Status -ne 'Running') {
-            Write-Step "服务状态: $($service.Status)（稍后会自动重试启动）"
-        } else {
-            Write-Step "服务已启动: $ServiceName"
+            throw "服务未能启动（状态 $($service.Status)）——查看 $LogPath 与 Windows 事件日志"
         }
+        Write-Step "服务已启动: $ServiceName"
     }
 }
 
@@ -618,7 +634,23 @@ function Uninstall-Agent {
     if (Test-Path $exe) {
         Write-Step '调用受控端卸载程序'
         & $exe --uninstall | Out-Null
-        Start-Sleep -Seconds 4
+        if ($LASTEXITCODE -ne 0) {
+            Write-Step "受控端卸载程序返回非零（$LASTEXITCODE），继续清理（footprint 可能残留）"
+        }
+        # agent 的 --uninstall 会拉起一份 staged 的卸载 helper（与 agent 同名
+        # observatory-agent.exe）后立即返回，helper 在后台清服务/防火墙/Defender
+        # 排除项/注册表/重启计划任务。这里**等它自己结束**，绝不能调 Stop-Existing
+        # ——同名匹配会把 helper 清理到一半杀掉，footprint 全部残留（0.3.8 实测）。
+        $deadline = (Get-Date).AddSeconds(90)
+        while ((Get-Date) -lt $deadline) {
+            $left = Get-Process -Name 'observatory-agent' -ErrorAction SilentlyContinue
+            if (-not $left) { break }
+            Start-Sleep -Milliseconds 500
+        }
+        $left = Get-Process -Name 'observatory-agent' -ErrorAction SilentlyContinue
+        if ($left) {
+            Write-Step "卸载 helper 超过 90s 仍未结束（pid: $($left.Id -join ', ')），交由下方兜底清理"
+        }
     }
     Stop-Existing
     foreach ($path in @($InstallDir, $DataDir)) {
@@ -636,13 +668,13 @@ function Uninstall-Agent {
 # U 盘离线包发现：必须在**提权之前**做完。提权子进程的工作目录会变，重新发现
 # 可能失败（尤其从资源管理器双击 .cmd 时），于是"离线安装"会悄悄退回联网下载，
 # 断网机器直接装不上。这里发现的绝对路径会通过 -Package 传给自己。
-$script:LocalPackage = $null
-$script:LocalPackageError = ''
+$script:DetectedPackage = $null
+$script:DetectedPackageError = ''
 if (-not $Uninstall -and -not $Package -and -not $Online) {
     try {
-        $script:LocalPackage = Find-LocalPackage
+        $script:DetectedPackage = Find-LocalPackage
     } catch {
-        $script:LocalPackageError = $_.Exception.Message
+        $script:DetectedPackageError = $_.Exception.Message
         Write-Step "查找本地安装包时出错（继续按在线安装处理）：$($_.Exception.Message)"
     }
 }
@@ -651,16 +683,16 @@ Show-Banner
 
 # -Offline 但没包：**必须在弹 UAC 之前**就失败。否则现场技术员点完"是"、
 # 授权对话框消失之后才看到错误，会以为已经装上了。
-if ($Offline -and -not $Package -and -not $script:LocalPackage) {
+if ($Offline -and -not $Package -and -not $script:DetectedPackage) {
     Write-Fail '指定了离线安装，但没找到安装包。请确认 install.ps1 与 observatory-agent-*.zip 在同一个文件夹里。'
     Write-Fail "查找过的位置：$((Get-PackageSearchDirs) -join ' ; ')"
-    if ($script:LocalPackageError) { Write-Fail "查找过程报错：$($script:LocalPackageError)" }
+    if ($script:DetectedPackageError) { Write-Fail "查找过程报错：$($script:DetectedPackageError)" }
     exit 5
 }
 
-if ($script:LocalPackage) {
-    $localVersion = if ($script:LocalPackage.Version) { $script:LocalPackage.Version } else { '未知' }
-    Write-Host "     离线包 : $($script:LocalPackage.Path)" -ForegroundColor Yellow
+if ($script:DetectedPackage) {
+    $localVersion = if ($script:DetectedPackage.Version) { $script:DetectedPackage.Version } else { '未知' }
+    Write-Host "     离线包 : $($script:DetectedPackage.Path)" -ForegroundColor Yellow
     Write-Host "     包版本 : $localVersion（本次不下载）" -ForegroundColor Yellow
     Write-Host ''
 }
@@ -700,14 +732,14 @@ try {
         }
         if (-not (Test-Path -LiteralPath $candidate)) { throw "找不到本地安装包: $Package" }
         $localPackage = (Resolve-Path -LiteralPath $candidate).Path
-    } elseif ($script:LocalPackage) {
+    } elseif ($script:DetectedPackage) {
         # 自动发现的 U 盘离线包（提权前已定位，路径是绝对的）。
-        $localPackage = $script:LocalPackage.Path
-        $tempPackageDir = $script:LocalPackage.TempDir
+        $localPackage = $script:DetectedPackage.Path
+        $tempPackageDir = $script:DetectedPackage.TempDir
     } elseif ($Offline) {
         Write-Fail '指定了 -Offline，但在本目录及其 package\ 子目录里没有找到安装包（observatory-agent-*.zip / agent-*.zip）。'
         Write-Fail "当前查找的位置：$((Get-PackageSearchDirs) -join ' ; ')"
-        if ($script:LocalPackageError) { Write-Fail "查找过程报错：$($script:LocalPackageError)" }
+        if ($script:DetectedPackageError) { Write-Fail "查找过程报错：$($script:DetectedPackageError)" }
         exit 5
     }
 

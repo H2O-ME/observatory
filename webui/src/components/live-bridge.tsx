@@ -117,17 +117,22 @@ export function LiveBridge() {
       }
     };
 
-    const opened = openEventSocket({
+    let opened: ReturnType<typeof openEventSocket> | null = null;
+    opened = openEventSocket({
       onEvent: handle,
       onAuthFailure: () => {
         // Session expired while the socket was open: asking the server for a
         // session turns this into an anonymous state and shows the login page.
-        void useAuth.getState().refresh();
+        // 刷新后仍是匿名（真的过期/登出）就必须停掉重连：否则每 ≤15s 建一条
+        // 注定 4401 的连接并再刷一次 /auth/session，无限循环。
+        void useAuth.getState().refresh().then(() => {
+          if (useAuth.getState().status === "anonymous") opened?.close();
+        });
       },
     });
     socket = opened;
 
-    return () => opened.close();
+    return () => opened?.close();
   }, [queryClient]);
 
   return null;

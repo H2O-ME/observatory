@@ -124,3 +124,39 @@ def test_config_oserror_without_bak_falls_to_defaults(tmp_path, monkeypatch) -> 
     target = tmp_path / "config.json"
     monkeypatch.setattr(Path, "read_text", lambda self, *a, **k: (_ for _ in ()).throw(OSError("locked")))
     assert cfg._load_config_json(target) == {}
+
+
+def test_ack_http_delivery_only_acks_delivered() -> None:
+    """HTTP watermark ack 只确认真正投递过的消息（F22 载体一致性回归）。"""
+
+    from observatory.link.envelope import new_envelope
+    from observatory.link.outbox import Outbox
+
+    class _Settings:
+        outbox_max_messages = 16
+
+    from observatory.link.session import AgentSession
+
+    session = AgentSession.__new__(AgentSession)
+    from collections import deque
+
+    session.http_delivered = deque(maxlen=512)
+    session.outbox = Outbox(maxsize=16)
+    e1 = new_envelope("ping", {"n": 1}, msg_id="m1", clock=None)
+    e2 = new_envelope("ping", {"n": 2}, msg_id="m2", clock=None)
+    e3 = new_envelope("ping", {"n": 3}, msg_id="m3", clock=None)
+    session.outbox.put(e1)
+    session.outbox.put(e2)
+    session.outbox.put(e3)
+
+    # 只投递了 m1/m2（m3 还没发出去），agent 对 m2 ack
+    session.http_delivered.extend(["m1", "m2"])
+    removed = session.ack_http_delivery("m2")
+    assert removed == 2
+    assert session.outbox.pending_count() == 1, "未投递的 m3 不得被水位弹出"
+
+    # ack 一个从未投递的 id：什么都不确认（多投安全，少投才是事故）
+    session.http_delivered.extend(["m3"])
+    assert session.ack_http_delivery("nope") == 0
+    assert session.outbox.pending_count() == 1
+    assert session.ack_http_delivery("m3") == 1

@@ -127,10 +127,11 @@ export function DevicePage() {
           <TimelineView device={device} />
         </TabsContent>
         <TabsContent value="files" keepMounted>
-          <FilesView device={device} />
+          {/* key=uid：/device/:uid/* 切设备不重挂载，路径/搜索/页码等本地状态会串设备 */}
+          <FilesView key={device.uid} device={device} />
         </TabsContent>
         <TabsContent value="commands" keepMounted>
-          <CommandsView device={device} />
+          <CommandsView key={device.uid} device={device} />
         </TabsContent>
         <TabsContent value="settings">
           <DeviceSettingsView device={device} />

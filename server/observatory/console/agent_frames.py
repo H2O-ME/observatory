@@ -78,6 +78,16 @@ async def upload_frame(
     device: Device = Depends(require_device_token),
 ) -> dict[str, Any]:
     settings = request.app.state.settings
+    # 先看 Content-Length 再读 body：旧实现无条件 await request.body()，把整个
+    # 请求读进内存之后才比大小——应用层没有 body 上限，防线只剩 nginx 600m，
+    # 一个已认证设备单请求就能顶出内存尖峰。
+    declared = request.headers.get("content-length")
+    if declared:
+        try:
+            if int(declared) > int(settings.max_frame_bytes):
+                raise AppError.bad_request("图像过大")
+        except ValueError:
+            raise AppError.bad_request("Content-Length 无效") from None
     body = await request.body()
     if not body:
         raise AppError.bad_request("空图像")

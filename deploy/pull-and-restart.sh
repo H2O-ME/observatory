@@ -25,9 +25,32 @@ print(a['name'], a['url'])
   name="${asset%% *}"
   url="${asset##* }"
   echo "pulling agent package: $name"
-  mkdir -p agent/dist
+  # SHA256SUMS 校验：这个 zip 会被推给全量在线受控端自动执行，必须先验完整性
+  #（CI build-agent 会把 SHA256SUMS 与 zip 一起挂到 latest-agent Release）。
+  sums_url="$(python3 -c "
+import json,sys
+d=json.loads(sys.stdin.read())
+a=[x for x in d.get('assets',[]) if x['name']=='SHA256SUMS']
+print(a[0]['url'] if a else '')
+" <<<"$rel")"
+  expected=""
+  if [[ -n "$sums_url" ]]; then
+    sums="$(curl -fsSL --max-time 30 -H "Authorization: Bearer $tok" -H "Accept: application/octet-stream" "$sums_url")"
+    expected="$(grep -E "[0-9a-f]{64}  ${name}\$" <<<"$sums" | awk '{print $1}')"
+  fi
+  if [[ -z "$expected" ]]; then
+    echo "ERROR: SHA256SUMS 缺失或没有 $name 的条目；拒绝登记未校验的受控端包" >&2
+    exit 1
+  fi
   curl -fsSL --max-time 300 -H "Authorization: Bearer $tok" -H "Accept: application/octet-stream" \
     "$url" -o "agent/dist/$name"
+  actual="$(sha256sum "agent/dist/$name" | awk '{print $1}')"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "ERROR: agent 包 sha256 不匹配（expected=$expected actual=$actual）；拒绝登记" >&2
+    rm -f "agent/dist/$name"
+    exit 1
+  fi
+  echo "agent package sha256 OK: $actual"
   # 登记进控制台（经 /data/tmp 中转避免 root 属主覆盖失败）
   docker cp "agent/dist/$name" "observatory-api:/data/tmp/$name"
   docker exec observatory-api rm -f "/data/packages/$name" >/dev/null 2>&1 || true

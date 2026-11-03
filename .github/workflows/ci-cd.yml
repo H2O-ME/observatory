@@ -100,8 +100,10 @@ jobs:
 
   build-agent:
     name: 受控端 exe（仅 agent 变更时）
-    needs: changes
-    if: needs.changes.outputs.agent == 'true'
+    # 门禁是硬依赖：gate 失败时未经测试的 exe 绝不能替换 latest-agent Release
+    #（0.3.7 审计 O05 同型问题——"测试不过就不部署"必须覆盖所有产物出口）。
+    needs: [changes, gate]
+    if: needs.changes.outputs.agent == 'true' && needs.gate.result == 'success'
     runs-on: windows-latest
     timeout-minutes: 30
     permissions:
@@ -120,9 +122,18 @@ jobs:
         run: |
           python -m pip install --quiet --upgrade pip
           python -m pip install --quiet -r requirements-dev.txt -r agent/requirements.txt
+      - name: Windows 专用测试（win/service、pipe、session——此前从未在 CI 跑过）
+        run: python -m pytest tests/ -q -m "windows_only"
       - name: 构建 exe
         shell: pwsh
         run: pwsh -File agent/build/build.ps1
+      - name: 生成 SHA256SUMS
+        shell: pwsh
+        run: |
+          Get-ChildItem agent/dist/*.zip | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)"
+          } | Set-Content agent/dist/SHA256SUMS
       - name: 发布到固定 Release（latest-agent）
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -130,13 +141,14 @@ jobs:
         run: |
           set -euo pipefail
           gh release delete latest-agent --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
-          gh release create latest-agent agent/dist/*.zip \
+          gh release create latest-agent agent/dist/*.zip agent/dist/SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" \
             --title "Latest Agent Package" \
             --notes "Auto-built from ${GITHUB_SHA}"
 
   build-server:
     name: 服务端镜像 → ghcr
+    needs: gate
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

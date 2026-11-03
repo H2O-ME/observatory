@@ -82,7 +82,13 @@ if not exist "%PROBE%" exit /b 0
 
 for %%A in ("%PROBE%") do set "PROBESIZE=%%~zA"
 if not defined PROBESIZE exit /b 0
-if %PROBESIZE% GEQ 2000 (
+rem 不能只看字节数：反代/WAF/门户的错误页（HTML 404、拦截页）常超过 2000 字节，
+rem 会被当成 install.ps1 执行、报出一堆 PowerShell 语法错误。install.ps1 首行
+rem 注释固定是 "# Observatory 受控端安装程序"，以内容指纹 + 字节数双校验。
+set "PROBEHEAD="
+for /f "usebackq delims=" %%L in (`powershell -NoProfile -Command "(Get-Content -LiteralPath '%PROBE%' -TotalCount 3) -join ' '" 2^>nul`) do set "PROBEHEAD=%%L"
+echo %PROBEHEAD% | findstr /c:"Observatory 受控端安装程序" >nul 2>&1
+if not errorlevel 1 if %PROBESIZE% GEQ 2000 (
   move /y "%PROBE%" "%TARGET%" >nul 2>&1
   if exist "%TARGET%" set "GOT=1"
 )
