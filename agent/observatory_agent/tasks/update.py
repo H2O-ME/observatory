@@ -591,8 +591,8 @@ def _process_alive(pid: int) -> bool:
     else:
         try:
             return bool(psutil.pid_exists(int(pid)))
-        except Exception:  # noqa: BLE001 - psutil 查询失败落到 ctypes 路径
-            pass
+        except Exception as exc:  # noqa: BLE001 - psutil 查询失败落到 ctypes 路径
+            log.debug("psutil pid_exists(%s) failed, falling back to ctypes: %s", pid, exc)
     if os.name != "nt":
         try:
             os.kill(pid, 0)
