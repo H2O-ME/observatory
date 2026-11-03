@@ -106,18 +106,26 @@ def setup_logging(
     ``redact``，令牌/密码值也会在落盘前被替换成短摘要。
     """
 
-    if directory is not None:
-        target_dir = Path(directory)
-        target_dir.mkdir(parents=True, exist_ok=True)
-    elif is_worker_role(role):
-        # worker 进程：用户可写目录；**不**调用 ensure_dirs()（那会去动
-        # SYSTEM 独占的 %ProgramData% 目录并触发 icacls）。
-        target_dir = worker_log_dir()
-        target_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        target_dir = Path(LOG_DIR)
-        ensure_dirs()
-    path = target_dir / f"{role}.log"
+    # 2026-11-04 更新助手事故：helper 启动第一行就是 setup_logging，目录建
+    # 不起来（ACL 收紧/权限边界异常）会把整个 helper 带崩——一行 swap 都没
+    # 做，设备端只留一份空日志。日志目录不可用时降级为仅 stderr（helper 的
+    # stderr 已被 spawn_helper 重定向进 apply-*.log，可观测性不丢）。
+    path: Path | None = None
+    try:
+        if directory is not None:
+            target_dir = Path(directory)
+            target_dir.mkdir(parents=True, exist_ok=True)
+        elif is_worker_role(role):
+            # worker 进程：用户可写目录；**不**调用 ensure_dirs()（那会去动
+            # SYSTEM 独占的 %ProgramData% 目录并触发 icacls）。
+            target_dir = worker_log_dir()
+            target_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            target_dir = Path(LOG_DIR)
+            ensure_dirs()
+        path = target_dir / f"{role}.log"
+    except OSError as exc:
+        print(f"警告：日志目录不可用，降级为仅 stderr 输出：{exc}", file=sys.stderr)
 
     root = logging.getLogger()
     root.setLevel(level)
@@ -125,19 +133,22 @@ def setup_logging(
         root.removeHandler(handler)
 
     formatter = logging.Formatter(FORMAT)
-    try:
-        file_handler = logging.handlers.RotatingFileHandler(
-            path, maxBytes=MAX_BYTES, backupCount=BACKUP_COUNT, encoding="utf-8"
-        )
-        file_handler.setFormatter(formatter)
-        file_handler.addFilter(SecretScrubber())
-        root.addHandler(file_handler)
-    except OSError as exc:
-        # 没有日志文件也要留下证据：stderr 是 Windows 服务/前台控制台唯一的出口。
-        print(f"警告：无法创建日志文件 {path}: {exc}", file=sys.stderr)
+    if path is not None:
+        try:
+            file_handler = logging.handlers.RotatingFileHandler(
+                path, maxBytes=MAX_BYTES, backupCount=BACKUP_COUNT, encoding="utf-8"
+            )
+            file_handler.setFormatter(formatter)
+            file_handler.addFilter(SecretScrubber())
+            root.addHandler(file_handler)
+        except OSError as exc:
+            # 没有日志文件也要留下证据：stderr 是 Windows 服务/前台控制台唯一的出口。
+            print(f"警告：无法创建日志文件 {path}: {exc}", file=sys.stderr)
 
-    if console or not getattr(sys, "frozen", False):
-        stream = logging.StreamHandler(sys.stdout)
+    if console or not getattr(sys, "frozen", False) or path is None:
+        # path is None：文件日志降级了，至少把日志打进 stderr（helper 场景下
+        # 会被重定向进 apply-*.log），不能让 helper 变成完全静默。
+        stream = logging.StreamHandler(sys.stderr if path is None else sys.stdout)
         stream.setFormatter(formatter)
         stream.addFilter(SecretScrubber())
         root.addHandler(stream)

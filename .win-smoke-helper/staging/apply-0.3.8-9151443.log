@@ -1,0 +1,2 @@
+警告：日志目录不可用，降级为仅 stderr 输出：[WinError 5] 拒绝访问。: 'C:\\ProgramData\\Observatory\\logs'
+2026-11-04 02:05:52,496 ERROR   [37712:MainThread] observatory_agent.tasks.update: stop service failed: 停止服务失败: (5, 'OpenSCManager', '拒绝访问。')

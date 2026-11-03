@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "entry.py", line 25, in <module>
+  File "entry.py", line 21, in _entry
+  File "observatory_agent\main.py", line 98, in main
+  File "observatory_agent\main.py", line 255, in _run_update_helper
+  File "observatory_agent\core\logging.py", line 119, in setup_logging
+  File "observatory_agent\core\config.py", line 167, in ensure_dirs
+  File "pathlib\__init__.py", line 1011, in mkdir
+PermissionError: [WinError 5] ¾Ü¾ø·ÃÎÊ¡£: 'C:\\ProgramData\\Observatory\\logs'
+[PYI-25384:ERROR] Failed to execute script 'entry' due to unhandled exception!

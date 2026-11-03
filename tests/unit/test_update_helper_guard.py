@@ -160,3 +160,47 @@ def test_ack_http_delivery_only_acks_delivered() -> None:
     assert session.ack_http_delivery("nope") == 0
     assert session.outbox.pending_count() == 1
     assert session.ack_http_delivery("m3") == 1
+
+
+def test_setup_logging_survives_unwritable_dir(tmp_path, monkeypatch) -> None:
+    """2026-11-04 helper 事故：日志目录建不起来不得杀死进程（降级仅 stderr）。"""
+    import logging as std_logging
+
+    from observatory_agent.core import logging as agent_logging
+
+    bad = tmp_path / "denied"
+
+    def refuse(*_a, **_k):
+        raise PermissionError(5, "拒绝访问", str(bad))
+
+    monkeypatch.setattr(agent_logging, "ensure_dirs", refuse)
+    monkeypatch.setattr(
+        agent_logging, "LOG_DIR", bad, raising=False
+    ) if hasattr(agent_logging, "LOG_DIR") else None
+    import observatory_agent.core.config as cfg
+
+    monkeypatch.setattr(cfg, "LOG_DIR", bad)
+    root = std_logging.getLogger()
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    path = agent_logging.setup_logging("update")
+    assert path is None  # 目录建不起来：无文件日志，但不抛异常
+    handlers = [type(h).__name__ for h in root.handlers]
+    assert "StreamHandler" in handlers  # 降级为 stderr 输出
+    for h in list(root.handlers):
+        root.removeHandler(h)
+
+
+def test_main_helper_path_reports_traceback_instead_of_silence(monkeypatch, capsys) -> None:
+    """helper 启动期任何异常都要把 traceback 写进被重定向的日志，返回 EX_SOFTWARE。"""
+    from observatory_agent import main as agent_main
+
+    def boom(*_a, **_k):
+        raise RuntimeError("模拟启动期未预期异常")
+
+    monkeypatch.setattr("observatory_agent.tasks.update.apply_now", boom)
+    rc = agent_main.main(
+        ["--update-helper", "C:/nonexistent", "--target", "C:/nonexistent", "--pid", "1"]
+    )
+    assert rc == 70
+    assert "RuntimeError" in capsys.readouterr().err

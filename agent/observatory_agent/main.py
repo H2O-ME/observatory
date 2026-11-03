@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import traceback
 from pathlib import Path
 
 from . import __version__
@@ -95,9 +96,24 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.update_helper or args.apply_update:
-        return _run_update_helper(args)
+        # helper 的 stdout/stderr 已被 spawn_helper 重定向进 apply-*.log：
+        # 任何启动期异常都必须留下 traceback，绝不允许静默退出（2026-11-04
+        # 事故里设备端只有空日志，排障无据可查）。
+        try:
+            return _run_update_helper(args)
+        except SystemExit:
+            raise
+        except BaseException:
+            traceback.print_exc()
+            return 70  # EX_SOFTWARE
     if args.purge_helper or args.purge:
-        return _run_purge_helper(args)
+        try:
+            return _run_purge_helper(args)
+        except SystemExit:
+            raise
+        except BaseException:
+            traceback.print_exc()
+            return 70  # EX_SOFTWARE
 
     if args.worker:
         return _run_worker(args.session, boot_id=args.boot_id)
@@ -242,6 +258,19 @@ def _cli_config_changes(args: argparse.Namespace) -> dict:
 
 
 # ---------------------------------------------------------- 更新/卸载助手 ---
+def _force_utf8_stdio() -> None:
+    """helper 的 stdout/stderr 被重定向进 *.log：强制 UTF-8，否则 Windows
+    默认 GBK 写出，取证读日志时中文全是乱码。"""
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8")
+            except (OSError, ValueError):
+                pass
+
+
 def _run_update_helper(args: argparse.Namespace) -> int:
     """更新助手：校验→替换→回滚都在 ``tasks/update.py``，这里只转发参数。
 
@@ -252,6 +281,7 @@ def _run_update_helper(args: argparse.Namespace) -> int:
     from .core.logging import setup_logging
     from .tasks.update import apply_now
 
+    _force_utf8_stdio()
     setup_logging("update")
     payload_root = args.update_helper or args.apply_update
     version = args.version_name or ("" if args.version == PRINT_VERSION else args.version)
@@ -265,6 +295,7 @@ def _run_purge_helper(args: argparse.Namespace) -> int:
     from .core.logging import setup_logging
     from .tasks.uninstall import run_purge_helper
 
+    _force_utf8_stdio()
     setup_logging("uninstall")
     data_dir = Path(args.data_dir) if args.data_dir else program_data_dir()
     confirm_file = Path(args.confirm_file) if args.confirm_file else data_dir / "uninstall-status.json"
