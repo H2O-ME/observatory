@@ -323,6 +323,8 @@ def test_reset_install_acl_is_best_effort(monkeypatch, tmp_path: Path) -> None:
 
     target = tmp_path / "install"
     target.mkdir()
+    # CI 在 ubuntu 上跑：函数有 os.name != "nt" 早退，必须打桩成 Windows 语义
+    monkeypatch.setattr(upd.os, "name", "nt")
     monkeypatch.setattr(upd, "subprocess", SimpleNamespace(run=lambda *a, **k: (_ for _ in ()).throw(OSError("no icacls")), CREATE_NO_WINDOW=0))
     upd._reset_install_acl(target)  # 不抛即通过
 
