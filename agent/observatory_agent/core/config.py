@@ -767,6 +767,11 @@ class ConfigStore:
 
         try:
             self._config.save(self._path)
+            # 0.3.12 真机铁案：这台机的 DACL 状态是"能写不能读"——os.replace
+            # 成功、文件也在，但下一次进程读它直接 PermissionError。只看 save
+            # 是否抛错完全不够，**必须读回校验**；读不回视同失败，走 fallback。
+            if self._config.token and not self._readback_ok():
+                raise OSError("config 写入后读回校验失败（能写不能读的 DACL 状态）")
             if self._save_dirty:
                 log.warning("配置在重试后成功落盘")
             self._save_dirty = False
@@ -777,6 +782,16 @@ class ConfigStore:
                 "配置保存失败（token/设置仅在内存生效，将随心跳持续重试落盘）: %s", exc
             )
         self._write_fallback()
+
+    def _readback_ok(self) -> bool:
+        """保存后立即读回 config，确认本进程下一次启动能读到自己的 token。"""
+
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            log.error("读回 config.json 失败: %s", exc)
+            return False
+        return isinstance(raw, dict) and bool(str(raw.get("token") or ""))
 
     def _write_fallback(self) -> None:
         """主路径不可写时的最后防线：完整配置写进安装目录。失败只记日志。"""

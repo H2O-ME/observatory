@@ -263,3 +263,29 @@ def test_config_store_fallback_write_and_load_back(tmp_path, monkeypatch) -> Non
     loaded = cfg.AgentConfig.load(main_path)
     assert loaded.token == "tok-fb"
     assert loaded.enroll_key == "key-fb"
+
+
+def test_config_store_readback_failure_writes_fallback(tmp_path, monkeypatch) -> None:
+    """0.3.12 真机铁案：DACL"能写不能读"——save 成功但读不回必须走 fallback。"""
+    from observatory_agent.core import config as cfg
+
+    main_path = tmp_path / "ProgramData" / "Observatory" / "config.json"
+    install_dir = tmp_path / "install" / "observatory-agent"
+    install_dir.mkdir(parents=True)
+    monkeypatch.setattr(cfg, "CONFIG_PATH", main_path)
+    monkeypatch.setattr(cfg, "fallback_config_path", lambda: install_dir / "observatory-config.json")
+    monkeypatch.setattr(cfg, "PROGRAM_DATA", main_path.parent, raising=False)
+
+    store = cfg.ConfigStore(path=main_path)
+    # save 成功（不抛），但读回校验失败——模拟能写不能读
+    monkeypatch.setattr(cfg.ConfigStore, "_readback_ok", lambda self: False)
+    store.update(token="tok-rb", enroll_key="key-rb")
+    fallback = install_dir / "observatory-config.json"
+    assert fallback.exists(), "读回校验失败必须写 fallback"
+    assert "tok-rb" in fallback.read_text(encoding="utf-8")
+
+    # 下次 load：主 config 读不到 token → 从 fallback 回补
+    main_path.parent.mkdir(parents=True, exist_ok=True)
+    main_path.write_text('{"device_uid":"OBS-Y","protocol":3}', encoding="utf-8")
+    loaded = cfg.AgentConfig.load(main_path)
+    assert loaded.token == "tok-rb"
