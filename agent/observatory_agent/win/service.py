@@ -705,6 +705,8 @@ class RestartPlan:
     start_boundary: str
     action: tuple[str, ...]
     description: str
+    #: schtasks 要求 DeleteExpiredTaskAfter 必须配 EndBoundary（0.3.11 真机实测）。
+    end_boundary: str = ""
 
 
 def plan_restart(
@@ -725,6 +727,9 @@ def plan_restart(
     return RestartPlan(
         task_name=f"{identity.name}-Restart",
         start_boundary=boundary.strftime("%Y-%m-%dT%H:%M:%S"),
+        # EndBoundary = StartBoundary + TTL（RESTART_TASK_TTL=PT2M）：
+        # 与 DeleteExpiredTaskAfter 的到点自删语义保持一致。
+        end_boundary=(boundary + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S"),
         action=("sc.exe", "start", identity.name),
         description=f"One-shot restart of {identity.display_name}",
     )
@@ -745,6 +750,11 @@ def restart_task_xml(plan: RestartPlan) -> str:
         "  <Triggers>\n"
         "    <TimeTrigger>\n"
         f"      <StartBoundary>{plan.start_boundary}</StartBoundary>\n"
+        # schtasks schema 校验：设置了 DeleteExpiredTaskAfter 就必须有
+        # EndBoundary，否则 /Create /XML 直接拒绝（真机实测 0.3.11：
+        # "XML 缺少必需元素 (35,4):EndBoundary"）。EndBoundary = 启动时刻
+        # + TTL，到点任务先被 DeleteExpiredTaskAfter 自删，语义一致。
+        f"      <EndBoundary>{plan.end_boundary}</EndBoundary>\n"
         "      <Enabled>true</Enabled>\n"
         "    </TimeTrigger>\n"
         "  </Triggers>\n"

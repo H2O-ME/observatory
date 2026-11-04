@@ -42,6 +42,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 import subprocess
 import threading
 import time
@@ -1191,7 +1192,13 @@ class ServiceRuntime:
 
     def _cmd_log_tail(self, command: Command) -> CommandResult:
         lines = int(command.payload.get("lines") or 200)
-        return CommandResult(ok=True, result={"lines": read_tail(lines, "agent")})
+        # role 可选：worker 采集排障必须能看 worker 日志（0.3.11 真机事故里
+        # worker 反复拉起失败却无日志可查）。角色名限制在安全字符集内，
+        # 防止控制台用 ../ 之类穿越出日志目录。
+        role = str(command.payload.get("role") or "agent").strip()
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", role):
+            return CommandResult(ok=False, error=f"非法的日志角色: {role!r}", error_code="BAD_REQUEST")
+        return CommandResult(ok=True, result={"lines": read_tail(lines, role)})
 
     def _cmd_reload_config(self, _command: Command) -> CommandResult:
         return CommandResult(ok=True, result={"config": self._store.settings_snapshot()})
