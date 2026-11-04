@@ -28,6 +28,7 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..core.config import PRODUCT
 from . import WindowsOnlyOperation
 
 log = logging.getLogger(__name__)
@@ -257,6 +258,49 @@ def session_user_sid(session_id: int) -> str:
                 win32api.CloseHandle(token)
 
 
+def worker_log_dir_candidates(session_id: int) -> list[Path]:
+    """worker 日志的候选目录（服务端读日志用，0.3.14 真机盲区修复）。
+
+    服务进程（SYSTEM）算 ``worker_log_dir()`` 时用的是自己的环境块，得到
+    systemprofile 下的路径；而 worker 用登录用户令牌 + CreateEnvironmentBlock
+    启动，日志实际写在**该用户**的 ``%LOCALAPPDATA%``。本函数按 WTS 会话
+    用户名 + ProfileList 注册表还原用户真实 profile 目录。拿不到就返回空表。
+    """
+
+    candidates: list[Path] = []
+    try:
+        import win32ts
+
+        username = str(win32ts.WTSQuerySessionInformation(None, session_id, win32ts.WTSUserName) or "").strip()
+        if not username:
+            return candidates
+        try:
+            sid = session_user_sid(session_id)
+        except Exception as exc:  # noqa: BLE001 - SID 拿不到就退回按用户名猜
+            log.debug("会话 %s 的用户 SID 查询失败：%s", session_id, exc)
+            sid = ""
+        profile_dirs: list[str] = []
+        if sid:
+            try:
+                import winreg
+
+                with winreg.OpenKey(
+                    winreg.HKEY_LOCAL_MACHINE,
+                    rf"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\{sid}",
+                ) as key:
+                    profile_dirs.append(str(winreg.QueryValueEx(key, "ProfileImagePath")[0]))
+            except OSError as exc:
+                log.debug("ProfileList 读不到 SID=%s：%s", sid, exc)
+        profile_dirs.append(rf"C:\Users\{username}")
+        for profile in profile_dirs:
+            candidate = Path(profile) / "AppData" / "Local" / PRODUCT / "logs"
+            if candidate not in candidates:
+                candidates.append(candidate)
+    except Exception as exc:  # noqa: BLE001 - 排障辅助失败不影响主流程
+        log.debug("worker 日志候选目录解析失败 session=%s：%s", session_id, exc)
+    return candidates
+
+
 # --------------------------------------------------------------- launching ---
 def executable_path() -> Path:
     """当前进程的可执行文件（frozen 时是打包 exe，源码运行时是 python）。"""
@@ -471,6 +515,7 @@ __all__ = [
     "list_sessions",
     "select_capturable",
     "session_user_sid",
+    "worker_log_dir_candidates",
     "spawn_local",
     "worker_arguments",
 ]

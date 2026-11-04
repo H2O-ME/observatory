@@ -1198,7 +1198,21 @@ class ServiceRuntime:
         role = str(command.payload.get("role") or "agent").strip()
         if not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", role):
             return CommandResult(ok=False, error=f"非法的日志角色: {role!r}", error_code="BAD_REQUEST")
-        return CommandResult(ok=True, result={"lines": read_tail(lines, role)})
+        # 0.3.14：worker 日志写在**登录用户**的 %LOCALAPPDATA%，而本进程
+        # （SYSTEM）按自己环境算出的路径读不到。先按本进程路径读，读不到再
+        # 按 WTS 会话用户 profile 还原真实目录重试。
+        output = read_tail(lines, role)
+        if not output:
+            matched = re.fullmatch(r"worker-(\d+)", role)
+            if matched is not None:
+                from ..win.session import worker_log_dir_candidates
+
+                for directory in worker_log_dir_candidates(int(matched.group(1))):
+                    output = read_tail(lines, role, directory=directory)
+                    if output:
+                        log.info("worker 日志按用户 profile 目录读到 role=%s dir=%s", role, directory)
+                        break
+        return CommandResult(ok=True, result={"lines": output})
 
     def _cmd_reload_config(self, _command: Command) -> CommandResult:
         return CommandResult(ok=True, result={"config": self._store.settings_snapshot()})
