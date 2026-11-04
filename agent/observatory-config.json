@@ -1,0 +1,15 @@
+{
+  "device_uid": "OBS-BBD3642863B7",
+  "token": "tok-1",
+  "enroll_key": "",
+  "base_urls": [
+    "https://control.tianhw.top",
+    "https://observatory.123423.xyz"
+  ],
+  "server_version": "",
+  "settings": {},
+  "last_server_time_ms": 0,
+  "device_time_offset_ms": 0,
+  "protocol": 3,
+  "fallback": true
+}

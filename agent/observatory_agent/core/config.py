@@ -104,6 +104,19 @@ PROGRAM_DATA: Path = program_data_dir()
 LOG_DIR: Path = PROGRAM_DATA / "logs"
 STAGING_DIR: Path = PROGRAM_DATA / "staging"
 CONFIG_PATH: Path = PROGRAM_DATA / CONFIG_FILENAME
+
+
+def fallback_config_path() -> Path:
+    """主配置不可写时的兜底位置：安装目录（与 exe 同目录）。
+
+    ProgramData 的 DACL/杀毒锁定可能让 config.json 永远写不进去；安装目录
+    由安装器以提权身份创建、swap 每次更新都在那里成功写文件，SYSTEM 必可写。
+    """
+
+    override = os.environ.get("OBS_INSTALL_DIR", "").strip()
+    if override:
+        return Path(override) / "observatory-config.json"
+    return install_dir() / "observatory-config.json"
 INSTALL_DIR: Path = install_dir()
 
 
@@ -515,6 +528,21 @@ class AgentConfig:
         target = path or CONFIG_PATH
         raw = _load_config_json(target)
 
+        # 2026-11-05 真机事故兜底：主路径（ProgramData）写不进的机器上，
+        # save 失败会把完整配置写到安装目录的 fallback 文件。主配置缺 token
+        # 或准入码时从这里回补——否则一次失败的更新重启就让设备永久失忆。
+        if not str(raw.get("token") or "") or not str(raw.get("enroll_key") or ""):
+            try:
+                fallback_raw = _load_config_json(fallback_config_path())
+                if isinstance(fallback_raw, dict) and fallback_raw:
+                    for key in ("token", "enroll_key", "device_uid"):
+                        if not str(raw.get(key) or "") and fallback_raw.get(key):
+                            raw[key] = fallback_raw[key]
+                    if not raw.get("base_urls") and fallback_raw.get("base_urls"):
+                        raw["base_urls"] = fallback_raw["base_urls"]
+            except Exception as exc:  # noqa: BLE001 - 兜底路径绝不能阻断启动
+                log.warning("读取 fallback 配置失败（忽略）：%s", exc)
+
         urls = _split_urls(",".join(str(item) for item in raw.get("base_urls") or []))
         settings = raw.get("settings")
         # 兼容 0.2.10 的键名：升级时旧 config.json 原样还在，不能因此丢时钟偏置。
@@ -732,6 +760,9 @@ class ConfigStore:
         这里**不能**把 OSError 再往上抛：enroll 响应已经收到、token 已经在
         内存里生效，抛出去只会让调用方把"注册成功"当"注册失败"处理，而设备
         下一次重启就永久失忆——那是比"暂时没落盘"严重得多的故障。
+        主路径失败时再写一份到安装目录的 fallback（swap 已证明 SYSTEM 一定
+        可写那里；AV 对 ProgramData 下含令牌文件的锁定不一定会波及安装目录），
+        AgentConfig.load 会从 fallback 回补 token/准入码。
         """
 
         try:
@@ -739,11 +770,40 @@ class ConfigStore:
             if self._save_dirty:
                 log.warning("配置在重试后成功落盘")
             self._save_dirty = False
+            return
         except OSError as exc:
             self._save_dirty = True
             log.error(
                 "配置保存失败（token/设置仅在内存生效，将随心跳持续重试落盘）: %s", exc
             )
+        self._write_fallback()
+
+    def _write_fallback(self) -> None:
+        """主路径不可写时的最后防线：完整配置写进安装目录。失败只记日志。"""
+
+        target = fallback_config_path()
+        try:
+            payload = self._config
+            text = json.dumps(
+                {
+                    "device_uid": payload.device_uid,
+                    "token": payload.token,
+                    "enroll_key": payload.enroll_key,
+                    "base_urls": list(payload.base_urls),
+                    "server_version": payload.server_version,
+                    "settings": payload.settings,
+                    "last_server_time_ms": int(payload.last_server_time_ms),
+                    "device_time_offset_ms": int(payload.device_time_offset_ms),
+                    "protocol": 3,
+                    "fallback": True,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            target.write_text(text, encoding="utf-8")
+            log.warning("配置已写入 fallback %s（主路径持续不可写时设备靠它免于失忆）", target)
+        except OSError as exc:
+            log.error("fallback 配置也写不进 %s: %s", target, exc)
 
     def flush(self) -> bool:
         """dirty 时重试落盘；返回是否处于已保存状态。心跳循环每次调用。"""

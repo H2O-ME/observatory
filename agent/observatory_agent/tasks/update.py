@@ -54,7 +54,12 @@ MAX_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024
 #: helper 秒退判定的观察窗口。2.5s 太短：AV/MOTW 扫描、慢盘首次加载都可能
 #: 让正常的 helper 在窗口内还没写出第一行日志，被误报"启动即退出"；而真正的
 #: 预检失败（RC_PRECHECK_FAILED 等）会先写日志再退出，日志尾部能区分。
-HELPER_GRACE_S = 6.0
+# 2026-11-05 真机复盘：PyInstaller onedir 冷启动 + 杀毒实时扫描可以让 helper
+# 首帧超过 6s 还没挂上日志句柄，agent 侧误判"启动即退出"并发 update_failed，
+# 而 helper 其实正在后台完成 swap——0.3.10 真机实测（audit 同分钟内既有
+# update_failed 又出现 0.3.10 UA 的 enroll）。观察窗放宽到 20s：真死（崩溃）
+# 通常 <1s，20s 的代价只是慢一拍报警。
+HELPER_GRACE_S = 20.0
 #: 安装根目录必须包含的 exe（防止把 ``_internal`` 当安装目录换掉——0.2.10 的事故）。
 INSTALL_ROOT_MARKER = EXE_NAME
 

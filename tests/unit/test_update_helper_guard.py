@@ -231,3 +231,35 @@ def test_config_store_save_failure_marks_dirty_and_flushes(tmp_path, monkeypatch
     assert not (tmp_path / "config.json").read_text(encoding="utf-8").find("tok-1") == -1
     errors = [r for r in caplog.records if r.levelno == std_logging.ERROR]
     assert any("保存失败" in r.getMessage() for r in errors)
+
+
+def test_config_store_fallback_write_and_load_back(tmp_path, monkeypatch) -> None:
+    """主路径不可写 → 完整配置落 fallback（安装目录）；下次 load 从 fallback 回补 token/key。"""
+    from observatory_agent.core import config as cfg
+
+    main_path = tmp_path / "ProgramData" / "Observatory" / "config.json"
+    install_dir = tmp_path / "install" / "observatory-agent"
+    install_dir.mkdir(parents=True)
+    monkeypatch.setattr(cfg, "CONFIG_PATH", main_path)
+    monkeypatch.setattr(cfg, "fallback_config_path", lambda: install_dir / "observatory-config.json")
+    monkeypatch.delenv("OBS_PROGRAM_DATA", raising=False)
+    monkeypatch.setattr(cfg, "PROGRAM_DATA", main_path.parent, raising=False)
+
+    store = cfg.ConfigStore(path=main_path)
+
+    # 模拟主路径永远失败：save 抛 OSError
+    def broken_save(self, path=None):
+        raise OSError(5, "拒绝访问")
+
+    monkeypatch.setattr(cfg.AgentConfig, "save", broken_save)
+    store.update(token="tok-fb", enroll_key="key-fb")
+    assert not main_path.exists()  # 主路径确实写不进
+    fallback = install_dir / "observatory-config.json"
+    assert fallback.exists() and "tok-fb" in fallback.read_text(encoding="utf-8")
+
+    # 主路径 config 缺 token → load 从 fallback 回补
+    main_path.parent.mkdir(parents=True, exist_ok=True)
+    main_path.write_text('{"device_uid":"OBS-X","protocol":3}', encoding="utf-8")
+    loaded = cfg.AgentConfig.load(main_path)
+    assert loaded.token == "tok-fb"
+    assert loaded.enroll_key == "key-fb"
