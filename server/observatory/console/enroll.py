@@ -364,8 +364,15 @@ async def _reject(
     ip: str,
     reason: str,
     message: str,
+    version: str = "",
+    has_code: bool = False,
 ) -> None:
-    """Audit a refused enrolment, then raise. Writes no device state."""
+    """Audit a refused enrolment, then raise. Writes no device state.
+
+    detail 里带 ``version`` 与 ``has_code``：0.3.9 复盘时只能靠这两位推断
+    设备端 config 是否完整丢失（丢 token 的 agent 会同时丢准入码，表现为
+    has_code=false 的 enroll 循环），排障不再需要真机日志。
+    """
 
     await session.rollback()
     await audit.record(
@@ -373,9 +380,9 @@ async def _reject(
         action=audit.ACTION_ENROLL,
         device_uid=uid,
         ip=ip,
-        detail={"ok": False, "uid": uid, "reason": reason},
+        detail={"ok": False, "uid": uid, "reason": reason, "version": version, "has_code": has_code},
     )
-    log_event(log, logging.WARNING, f"enroll.{reason}", uid=uid, ip=ip)
+    log_event(log, logging.WARNING, f"enroll.{reason}", uid=uid, ip=ip, version=version, has_code=has_code)
     raise AppError.auth(message)
 
 
@@ -489,6 +496,8 @@ async def _enroll_once(
             ip=ip,
             reason="device_online",
             message="设备在线中，拒绝接管（enroll.device_online）；如需重装请先远程卸载",
+            version=str(payload.get("agent_version") or ""),
+            has_code=bool(str(payload.get("code") or payload.get("enroll_code") or "").strip()),
         )
     # 10b. 离线记录 + 有效的部署准入密钥 → 允许接管。重装 agent 只剩"uid +
     # 安装时下发的准入密钥"（原设备令牌已丢，例如更新失败后进程重启）；
@@ -515,6 +524,8 @@ async def _enroll_once(
             "该设备记录已存在，注册需要持有原设备令牌（enroll.proof_required）；"
             "若该机器已重装，请先在控制台删除这条设备记录"
         ),
+        version=str(payload.get("agent_version") or ""),
+        has_code=bool(str(payload.get("code") or payload.get("enroll_code") or "").strip()),
     )
     raise AppError.internal("unreachable")  # pragma: no cover - _reject always raises
 

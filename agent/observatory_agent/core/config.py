@@ -675,6 +675,10 @@ class ConfigStore:
         self._lock = threading.RLock()
         self._config = AgentConfig.load(self._path)
         self._clock = Clock(device_time_offset_ms=self._config.device_time_offset_ms)
+        # 2026-11-04 事故：save 抛 OSError 时 token 只剩内存副本，服务一重启
+        # 设备就"失忆"（丢 token 也丢准入码 → proof_required 死循环）。此后
+        # 每次写时机（心跳 apply_server_config）都重试落盘，直到成功。
+        self._save_dirty = False
 
     # -- reads -----------------------------------------------------------
     @property
@@ -719,8 +723,36 @@ class ConfigStore:
         with self._lock:
             for key, value in changes.items():
                 setattr(self._config, key, value)
-            self._config.save(self._path)
+            self._save()
             return self._config
+
+    def _save(self) -> None:
+        """落盘；失败标记 dirty（内存值已生效），由 flush() 在后续写时机重试。
+
+        这里**不能**把 OSError 再往上抛：enroll 响应已经收到、token 已经在
+        内存里生效，抛出去只会让调用方把"注册成功"当"注册失败"处理，而设备
+        下一次重启就永久失忆——那是比"暂时没落盘"严重得多的故障。
+        """
+
+        try:
+            self._config.save(self._path)
+            if self._save_dirty:
+                log.warning("配置在重试后成功落盘")
+            self._save_dirty = False
+        except OSError as exc:
+            self._save_dirty = True
+            log.error(
+                "配置保存失败（token/设置仅在内存生效，将随心跳持续重试落盘）: %s", exc
+            )
+
+    def flush(self) -> bool:
+        """dirty 时重试落盘；返回是否处于已保存状态。心跳循环每次调用。"""
+
+        with self._lock:
+            if not self._save_dirty:
+                return True
+            self._save()
+            return not self._save_dirty
 
     def set_token(self, token: str) -> AgentConfig:
         return self.update(token=str(token))
@@ -737,6 +769,8 @@ class ConfigStore:
         device_time_ms: int | None = None,
     ) -> bool:
         with self._lock:
+            # 心跳是天然的落盘重试时机：上一次 save 失败的 token/设置在这里补写。
+            self.flush()
             changed = self._config.apply_server_config(
                 values, server_time_ms=server_time_ms, device_time_ms=device_time_ms
             )
@@ -746,7 +780,7 @@ class ConfigStore:
                     device_time_ms=local_ms, server_time_ms=int(server_time_ms)
                 )
             if changed:
-                self._config.save(self._path)
+                self._save()
             return changed
 
     def reload(self) -> AgentConfig:

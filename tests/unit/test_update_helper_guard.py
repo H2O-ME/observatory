@@ -204,3 +204,30 @@ def test_main_helper_path_reports_traceback_instead_of_silence(monkeypatch, caps
     )
     assert rc == 70
     assert "RuntimeError" in capsys.readouterr().err
+
+
+def test_config_store_save_failure_marks_dirty_and_flushes(tmp_path, monkeypatch, caplog) -> None:
+    """2026-11-04 真机事故：save 失败必须标记 dirty 并随心跳重试，不能静默丢 token。"""
+    import logging as std_logging
+
+    from observatory_agent.core.config import ConfigStore
+
+    store = ConfigStore(path=tmp_path / "config.json")
+    original_save = type(store.config).save
+    calls = {"n": 0}
+
+    def flaky_save(self, path=None):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise OSError(5, "拒绝访问")
+        original_save(self, path)
+
+    monkeypatch.setattr(type(store.config), "save", flaky_save)
+    with caplog.at_level(std_logging.ERROR):
+        store.update(token="tok-1")  # 失败：token 只在内存
+    assert store.config.token == "tok-1"  # 内存生效
+    assert store.flush() is False  # 仍 dirty（第 2 次尝试失败）
+    assert store.flush() is True  # 第 3 次尝试成功
+    assert not (tmp_path / "config.json").read_text(encoding="utf-8").find("tok-1") == -1
+    errors = [r for r in caplog.records if r.levelno == std_logging.ERROR]
+    assert any("保存失败" in r.getMessage() for r in errors)
