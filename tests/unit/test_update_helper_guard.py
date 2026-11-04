@@ -289,3 +289,50 @@ def test_config_store_readback_failure_writes_fallback(tmp_path, monkeypatch) ->
     main_path.write_text('{"device_uid":"OBS-Y","protocol":3}', encoding="utf-8")
     loaded = cfg.AgentConfig.load(main_path)
     assert loaded.token == "tok-rb"
+
+
+def test_preserve_config_into_payload_keeps_fallback(tmp_path: Path) -> None:
+    """0.3.15 真机事故：swap 会删掉 install 目录里的 fallback 配置。
+
+    helper 必须在 swap 前把 fallback/config 复制进 payload，否则"config 读不了"
+    的机器更新后必失忆。"""
+    install = tmp_path / "install" / "observatory-agent"
+    payload = tmp_path / "payload"
+    install.mkdir(parents=True)
+    payload.mkdir()
+    (install / "observatory-config.json").write_text(
+        '{"token":"tok-old","protocol":3}', encoding="utf-8"
+    )
+    (install / "config.json").write_text('{"token":"tok-main"}', encoding="utf-8")
+
+    plan = upd.SwapPlan(
+        install_dir=install,
+        payload_root=payload,
+        backup_dir=tmp_path / "install" / "observatory-agent.old-1",
+        failed_dir=tmp_path / "install" / "observatory-agent.failed-1",
+    )
+    upd._preserve_config_into_payload(plan)
+    assert "tok-old" in (payload / "observatory-config.json").read_text(encoding="utf-8")
+    assert "tok-main" in (payload / "config.json").read_text(encoding="utf-8")
+
+
+def test_reset_install_acl_is_best_effort(monkeypatch, tmp_path: Path) -> None:
+    """icacls 缺失/失败都不能让 swap 失败——ACL 重置是尽力而为。"""
+
+    import subprocess as sp
+
+    target = tmp_path / "install"
+    target.mkdir()
+    monkeypatch.setattr(upd, "subprocess", SimpleNamespace(run=lambda *a, **k: (_ for _ in ()).throw(OSError("no icacls")), CREATE_NO_WINDOW=0))
+    upd._reset_install_acl(target)  # 不抛即通过
+
+    calls = []
+
+    def fake_run(cmd, **_k):
+        calls.append(cmd)
+        return sp.CompletedProcess(cmd, 0, b"", b"")
+
+    monkeypatch.setattr(upd, "subprocess", sp)
+    monkeypatch.setattr(sp, "run", fake_run)
+    upd._reset_install_acl(target)
+    assert calls and "/reset" in calls[0] and "/t" in calls[0]

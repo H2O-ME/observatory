@@ -455,6 +455,59 @@ def swap_directories(plan: SwapPlan) -> None:
                 log.exception("swap failed and rollback failed as well")
         raise SwapFailed(f"目录替换失败: {exc}", rolled_back=rollback_ok) from exc
     log.info("swap complete: %s -> %s", plan.payload_root, plan.install_dir)
+    _reset_install_acl(plan.install_dir)
+
+
+def _reset_install_acl(path: Path) -> None:
+    """swap 后恢复安装目录的默认 ACL（0.3.15 真机事故）。
+
+    payload 目录从 ``ProgramData\\Observatory\\staging`` 里改名过来，rename 会把
+    DACL 一起带走——staging 被 A2 收紧成 SYSTEM+Administrators (OI)(CI)，于是
+    新安装目录对登录用户不可执行，跨会话拉起的 worker 一加载 DLL 就死（零日志，
+    表现为"无会话/无法采集屏幕"）。用 ``icacls /reset /t /c`` 让整棵树重新从父
+    目录（Program Files，Users 默认有 RX）继承。best-effort：失败只告警。
+    """
+
+    if os.name != "nt":
+        return
+    try:
+        result = subprocess.run(
+            ["icacls", str(path), "/reset", "/t", "/c"],
+            capture_output=True,
+            timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode != 0:
+            log.warning(
+                "icacls /reset %s 失败（rc=%s）：%s",
+                path,
+                result.returncode,
+                result.stderr.decode("mbcs", "replace").strip()[:200],
+            )
+        else:
+            log.info("安装目录 ACL 已重置为继承 %s", path)
+    except OSError as exc:
+        log.warning("icacls 不可用，跳过安装目录 ACL 重置（%s）：%s", path, exc)
+
+
+def _preserve_config_into_payload(plan: SwapPlan) -> None:
+    """swap 前把 fallback/主配置复制进新目录（0.3.15 真机事故）。
+
+    fallback 配置写在 install 目录里，swap 会把它连同旧 token 一起删掉——
+    在 config.json 读不了（能写不能读的 DACL 状态）的机器上更新后必失忆。
+    helper 以 SYSTEM 运行，读 fallback（此前已验证可读）并把 config.json/.bak
+    一并尽力复制：主 config 读不了就忽略，fallback 到位就够 load() 兜底。
+    """
+
+    for name in ("observatory-config.json", "config.json", "config.json.bak"):
+        source = plan.install_dir / name
+        if not source.is_file():
+            continue
+        try:
+            shutil.copy2(source, plan.payload_root / name)
+            log.info("已保留 %s 进新安装目录", name)
+        except OSError as exc:
+            log.warning("保留 %s 失败（忽略）：%s", name, exc)
 
 
 def _remove_tree_with_retries(path: Path, *, attempts: int = 5, sleep: Callable[[float], None] = time.sleep) -> bool:
@@ -739,6 +792,7 @@ def apply_now(
         return RC_SWAP_FAILED
 
     try:
+        _preserve_config_into_payload(plan)
         swap_directories(plan)
     except SwapFailed as exc:
         log.error("swap failed (rolled_back=%s): %s", exc.rolled_back, exc.reason)
