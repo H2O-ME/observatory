@@ -66,3 +66,4 @@ pytest-cache-files-*/
 .ruff_cache/
 .pytest_cache/
 .win-smoke-helper/
+agent/observatory-config.json
