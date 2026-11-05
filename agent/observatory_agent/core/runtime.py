@@ -2050,7 +2050,7 @@ class WorkerRuntime:
         self._control_deadline = time.monotonic() + max(CONTROL_TTL_MIN_S, min(CONTROL_TTL_MAX_S, seconds))
         settings = self._settings_snapshot()
         control_fps = max(1, min(15, fps or int(settings.get("control_fps", 8) or 8)))
-        control_quality = max(20, min(95, quality or int(settings.get("control_quality", 55) or 55)))
+        control_quality = max(20, min(95, quality or int(settings.get("control_quality", 40) or 40)))
         self._control_stop.clear()
         engine = self._engine
         self._control_thread = threading.Thread(

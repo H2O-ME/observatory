@@ -66,7 +66,7 @@ const GROUPS: Array<{ id: string; title: string; hint: string; icon: IconType; k
     title: "实时控制",
     hint: "远程画面与输入频率",
     icon: MonitorPlay,
-    keys: ["control_enabled", "control_fps", "control_quality"],
+    keys: ["control_enabled", "control_fps", "control_quality", "control_max_width"],
   },
   {
     id: "files",

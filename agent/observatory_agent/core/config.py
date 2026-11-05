@@ -262,7 +262,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "max_width": 1600,
     "control_enabled": True,
     "control_fps": 8,
-    "control_quality": 55,
+    "control_quality": 40,
+    #: 0.3.17：控制帧独立分辨率上限（与周期采集的 max_width 分开）。
+    "control_max_width": 1024,
     "file_write_enabled": True,
     "file_upload_max_mb": 512,
     "auto_update": True,

@@ -59,7 +59,11 @@ DEFAULT_MAX_WIDTH: Final[int] = 1600
 MIN_MAX_WIDTH: Final[int] = 320
 MAX_MAX_WIDTH: Final[int] = 3840
 DEFAULT_CONTROL_FPS: Final[int] = 8
-DEFAULT_CONTROL_QUALITY: Final[int] = 55
+DEFAULT_CONTROL_QUALITY: Final[int] = 40
+#: 0.3.17：控制帧独立分辨率上限。1600 宽的 JPEG 每帧 150-250KB，学校 NAT 的
+#: 1-2Mbps 上行根本吃不下（8fps 需要 2Mbps+），且每帧在 TCP 上队头阻塞输入
+#: 事件——"点击无响应"的直接来源。控制帧降到 1024 宽后单帧约 40-70KB。
+DEFAULT_CONTROL_MAX_WIDTH: Final[int] = 1024
 
 #: 采不到屏时健康状态每 N 次失败打一条 warning，避免桌面锁屏时刷爆日志
 #: （第一次失败与错误内容变化时总会立即记录，保证可观测）。
@@ -138,6 +142,7 @@ class CaptureSettings:
     max_width: int = DEFAULT_MAX_WIDTH
     control_fps: int = DEFAULT_CONTROL_FPS
     control_quality: int = DEFAULT_CONTROL_QUALITY
+    control_max_width: int = DEFAULT_CONTROL_MAX_WIDTH
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any] | None) -> "CaptureSettings":
@@ -170,6 +175,9 @@ class CaptureSettings:
             max_width=clamp_max_width(source.get("max_width", DEFAULT_MAX_WIDTH)),
             control_fps=number("control_fps", DEFAULT_CONTROL_FPS, 1, 15),
             control_quality=clamp_quality(source.get("control_quality", DEFAULT_CONTROL_QUALITY)),
+            control_max_width=clamp_max_width(
+                source.get("control_max_width", DEFAULT_CONTROL_MAX_WIDTH), DEFAULT_CONTROL_MAX_WIDTH
+            ),
         )
 
 
@@ -535,7 +543,9 @@ class CaptureEngine:
         target_quality = clamp_quality(quality, self.settings.control_quality)
         image = self._source.grab(self._display)
         try:
-            payload, width, height = self._encode(image, target_quality)
+            # 0.3.17：控制帧用独立的（更小的）分辨率上限——周期采集的 max_width
+            # 是给时间线存图用的，直接拿来发实时流会塞满上行并队头阻塞输入。
+            payload, width, height = self._encode(image, target_quality, max_width=self.settings.control_max_width)
         except CaptureError:
             raise
         except Exception as exc:  # noqa: BLE001 - 统一错误类型
@@ -623,13 +633,13 @@ class CaptureEngine:
             raise CaptureError(f"生成变化指纹失败: {exc}") from exc
         return small.tobytes()
 
-    def _encode(self, image: Image.Image, quality: int) -> tuple[bytes, int, int]:
+    def _encode(self, image: Image.Image, quality: int, *, max_width: int = 0) -> tuple[bytes, int, int]:
         try:
             width, height = image.size
-            max_width = self.settings.max_width
-            if max_width and width > max_width:
-                target_height = max(1, round(height * max_width / width))
-                image = image.resize((max_width, target_height), Image.Resampling.BILINEAR)
+            limit = int(max_width) if max_width else self.settings.max_width
+            if limit and width > limit:
+                target_height = max(1, round(height * limit / width))
+                image = image.resize((limit, target_height), Image.Resampling.BILINEAR)
                 width, height = image.size
             buffer = io.BytesIO()
             image.save(
@@ -676,6 +686,7 @@ class CaptureEngine:
 __all__ = [
     "CHANGE_INTERVALS_S",
     "DEFAULT_CONTROL_FPS",
+    "DEFAULT_CONTROL_MAX_WIDTH",
     "DEFAULT_CONTROL_QUALITY",
     "DEFAULT_JPEG_QUALITY",
     "DEFAULT_MAX_WIDTH",

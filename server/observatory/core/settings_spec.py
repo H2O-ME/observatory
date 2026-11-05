@@ -47,7 +47,8 @@ SPECS: dict[str, Spec] = {
     # ---- live control ------------------------------------------------------
     "control_enabled": Spec("bool", True, per_device=True, description="允许实时控制"),
     "control_fps": Spec("int", 8, 1, 15, per_device=True, description="实时画面帧率"),
-    "control_quality": Spec("int", 55, 20, 85, per_device=True, description="实时画面质量"),
+    "control_quality": Spec("int", 40, 20, 85, per_device=True, description="实时画面质量"),
+    "control_max_width": Spec("int", 1024, 320, 3840, per_device=True, description="实时画面最长边像素"),
     # ---- file manager ------------------------------------------------------
     "file_write_enabled": Spec("bool", True, per_device=True, description="允许写入文件"),
     "file_upload_max_mb": Spec("int", 512, 1, 8192, per_device=True, description="单文件上传上限（MB）"),
