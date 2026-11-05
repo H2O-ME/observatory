@@ -130,8 +130,13 @@ def sha256_file(path: Path, *, chunk: int = 1 << 20) -> str:
 def write_atomic(path: Path, data: bytes) -> None:
     """唯一临时名 + fsync + 原子改名；失败时清理临时文件并抛出 ``OSError``。"""
 
+    # 路径穿越防护：写入目标逐段拒绝 ..（媒体路径均为内部生成，畸形值拒绝）。
+    if ".." in path.parts:
+        raise ValueError("媒体写入目标路径非法（含 .. 段）")
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}-{uuid.uuid4().hex}{TEMP_SUFFIX}")
+    if not tmp.resolve().is_relative_to(path.parent.resolve()):
+        raise ValueError("临时文件越出目标目录")
     try:
         with open(tmp, "wb") as handle:
             handle.write(data)

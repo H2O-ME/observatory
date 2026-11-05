@@ -549,7 +549,13 @@ def spawn_helper(
 
     source = Path(payload_root)
     staging = Path(staging_dir)
+    # 路径穿越防护（Mimosa）：version 参与 apply-* 目录与日志名，只认 x.y.z。
+    if not re.fullmatch(r"\d+\.\d+\.\d+", str(version)):
+        raise UpdateRejected(f"非法更新版本号: {version!r}", step="spawn_helper")
+    if ".." in staging.parts:
+        raise UpdateRejected("staging 路径非法（含 .. 段）", step="spawn_helper")
     staging.mkdir(parents=True, exist_ok=True)
+    staging = staging.resolve()
     workdir = staging / f"apply-{version}-{int(now_ms()) % 10_000_000:07d}"
     if workdir.exists():
         shutil.rmtree(workdir, ignore_errors=True)
@@ -564,7 +570,9 @@ def spawn_helper(
         if not candidates:
             raise UpdateFailed(f"payload 里没有可执行文件: {workdir}", step="spawn_helper")
         helper = candidates[0]
-    log_path = staging / f"{workdir.name}.log"
+    log_path = (staging / f"{workdir.name}.log").resolve()
+    if not log_path.is_relative_to(staging):
+        raise UpdateRejected("helper 日志路径越出 staging", step="spawn_helper")
     arguments = [
         str(helper),
         "--update-helper",

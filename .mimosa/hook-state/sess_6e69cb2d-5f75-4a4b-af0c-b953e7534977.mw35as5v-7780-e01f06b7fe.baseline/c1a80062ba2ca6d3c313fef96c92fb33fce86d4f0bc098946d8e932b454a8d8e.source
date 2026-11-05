@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# 一次性运维脚本：等待生产 update.sh 完成，状态持续写入 await_deploy.status
+# 用法：bash await_deploy.sh   （本机跑，无需参数）
+set -u
+SSH_KEY="D:/SSH密钥/热陈互联香港16H16G.154_id_ed25519"
+SSH="ssh -o IdentitiesOnly=yes -o ConnectTimeout=8 -o BatchMode=yes -i $SSH_KEY -p 2009 root@38.76.168.154"
+STATUS="$(dirname "$0")/await_deploy.status"
+
+: > "$STATUS"
+for i in $(seq 1 48); do
+  snap=$($SSH "
+    pgrep -f 'bash /opt/observatory/deploy/update.sh' >/dev/null && echo STATE=RUNNING || echo STATE=DONE
+    cat /proc/\$(pgrep -f 'bash /opt/observatory/deploy/update.sh' | head -1)/fd/1 2>/dev/null | tail -6
+    docker ps --format '{{.Names}} {{.Image}} {{.Status}}' | grep observatory
+    curl -sk -m 5 https://127.0.0.1:8443/api/v1/health
+  " 2>&1) || { echo "$(date +%T) ssh-fail retry=$i" >> "$STATUS"; sleep 15; continue; }
+  {
+    echo "===== $(date +%T) poll#$i ====="
+    echo "$snap"
+  } >> "$STATUS"
+  echo "$snap" | grep -q "STATE=DONE" && break
+  sleep 15
+done
+echo "===== FINAL $(date +%T) =====" >> "$STATUS"
+tail -30 "$STATUS"

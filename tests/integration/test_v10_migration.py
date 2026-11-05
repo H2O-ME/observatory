@@ -35,12 +35,14 @@ VALUES ('OBS-V10-QUEUED', 1700000000001, 1700000000002),
 
 
 def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
-    return {row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')}
+    return {row[1] for row in connection.execute("SELECT * FROM pragma_table_info(?)", (table,))}
 
 
 def test_v9_to_v10_adds_purge_intent_and_backfills(tmp_dir: Path) -> None:
     from observatory.core.config import Settings
     from observatory.core.db import SCHEMA_VERSION, Database
+
+    from tests.helpers import TEST_ADMIN_PASSWORD, TEST_SECRET_KEY
 
     database_path = tmp_dir / "observatory.db"
     connection = sqlite3.connect(database_path)
@@ -52,8 +54,8 @@ def test_v9_to_v10_adds_purge_intent_and_backfills(tmp_dir: Path) -> None:
 
     settings = Settings(
         data_dir=tmp_dir,
-        secret_key="test-secret-key-0123456789abcdef0123456789",
-        admin_password="test-admin-password",
+        secret_key=TEST_SECRET_KEY,
+        admin_password=TEST_ADMIN_PASSWORD,
     )
     database = Database(settings)
 

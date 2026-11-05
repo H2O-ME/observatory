@@ -1,0 +1,1200 @@
+"""A1–A24 Definition of Done（spec §3.1）。
+
+约定：
+- 函数名以 ``test_aNN_`` 开头，编号与规格一一对应。
+- 断言针对**行为**（HTTP 状态、总线计数、报文形状），不依赖实现细节命名。
+- 同一断言只实现一次：本模块不再导入/转发其他层的测试函数。
+
+编号落点：
+
+======================  ==========================================================
+A1–A13 / A17–A24        本模块（A1/A2/A17 带 ``windows_only``，经 win_smoke 真机验证）
+A14                     ``tests/integration/test_archive_closure.py``
+A15                     ``tests/unit/test_settings_consumers.py``
+A16                     ``tests/unit/test_coords.py``
+======================  ==========================================================
+
+A12 的 DTO/前端半边在 ``tests/unit/test_dto_clock_secrets.py``，本模块只留真 app；
+A23 的"域名单一来源"半边在 ``tests/unit/test_domains_centralised.py``，本模块只留
+agent 域承载控制台 WS 的行为验证。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+import sys
+import time
+import uuid
+from pathlib import Path
+
+import pytest
+
+# 注意：本模块启用了 `from __future__ import annotations`，函数内定义的
+# FastAPI 路由的参数注解会以字符串形式被 FastAPI 在**模块全局**求值——
+# WebSocket 必须在模块级导入，否则路由的 websocket 参数会被当成 query
+# 参数拒绝（2026-10-25 a23 测试的踩坑）。WebSocketDisconnect 仅个别用例
+# 引用，维持函数内局部导入。
+from fastapi import WebSocket
+
+pytestmark = pytest.mark.acceptance
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+# ---------------------------------------------------------------------------
+# A1–A24
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.windows_only
+def test_a01_uninstall_helper_onedir_ack_after_alive() -> None:
+    """A1：真实 onedir 产物启动 helper 成功；ack 只在 helper 确认存活后发出。"""
+
+    from tests.helpers import run_win_smoke, win_smoke_result
+
+    payload = run_win_smoke("uninstall_staging")
+    result = win_smoke_result(payload, "uninstall_staging")
+    assert result["status"] == "PASS", f"uninstall_staging 未通过: {result['detail']}"
+
+    source = (REPO_ROOT / "agent/observatory_agent/tasks/uninstall.py").read_text(encoding="utf-8")
+    assert source.index("await_confirmation(") < source.index("await ack("), "ack 必须晚于 helper 的 ok=true 确认"
+    assert "report_failure" in source, "helper 启动失败必须上报 uninstall_failed，且保持服务运行"
+    assert "status_document(ok=False" in source or "status_document(\n        ok=False" in source or "ok=False" in source
+
+
+@pytest.mark.windows_only
+def test_a02_restart_agent_actually_restarts(tmp_dir: Path, caplog) -> None:
+    """A2：restart_agent 路径可用（SCM/重启任务 XML），boot_id 变化触发 agent.rebooted。"""
+
+    import logging
+
+    from tests.helpers import run_win_smoke, running_app, seed_device, win_smoke_result
+
+    payload = run_win_smoke("service_readonly")
+    result = win_smoke_result(payload, "service_readonly")
+    assert result["status"] == "PASS", f"service_readonly 未通过: {result['detail']}"
+
+    from observatory.core.models import Device  # noqa: PLC0415
+
+    assert "boot_id" in Device.__table__.columns, "devices 必须有 boot_id 列（spec §6）"
+
+    def hello(boot_id: str, msg_id: str) -> dict[str, object]:
+        return {
+            "v": 3,
+            "id": msg_id,
+            "t": "hello",
+            "ts_ms": 1_730_000_000_000,
+            "body": {
+                "agent_version": "0.3.0",
+                "protocol": 3,
+                "boot_id": boot_id,
+                "device_uid": "OBS-A2",
+                "last_ack_id": "",
+                "device_time_ms": 1_730_000_000_000,
+            },
+        }
+
+    with running_app(tmp_dir) as client:
+        device_id = seed_device(client, uid="OBS-A2", token="a2-token")
+        caplog.set_level(logging.INFO, logger="observatory.link.agent_state")
+        # 第一次 hello 是首次登记（previous 为空，不算重启）；换 boot_id 的第二次才是重启。
+        first = client.post(
+            "/api/v1/agent/link",
+            headers={"X-Device-Token": "a2-token"},
+            json={"v": 3, "last_ack_id": "", "items": [hello("boot-old", "a02-hello-1")]},
+        )
+        assert first.status_code == 200, first.text
+        response = client.post(
+            "/api/v1/agent/link",
+            headers={"X-Device-Token": "a2-token"},
+            json={"v": 3, "last_ack_id": "", "items": [hello("boot-new", "a02-hello-2")]},
+        )
+        assert response.status_code == 200, response.text
+        assert "agent.rebooted" in caplog.text, "boot_id 变化必须记 agent.rebooted"
+
+        async def read_boot_id() -> str:
+            from observatory.core.models import Device as Model  # noqa: PLC0415
+
+            async with client.app.state.db.sessionmaker() as session:
+                device = await session.get(Model, device_id)
+                return device.boot_id
+
+        assert client.portal.call(read_boot_id) == "boot-new", "hello 的 boot_id 必须落库"
+
+
+def test_a03_update_requires_sha256_and_aborts_on_mismatch(tmp_dir: Path) -> None:
+    """A3：无摘要/错摘要/不存在的包的 update 命令被拒（422）；摘要不符时中止且不替换。"""
+
+    import sys as _sys
+
+    from tests.helpers import TEST_ADMIN_PASSWORD, running_app, seed_agent_package, seed_device
+
+    # 1) 服务端：update 命令必须有合法 sha256、且与包库中该版本一致（0.3.1 F5）
+    with running_app(tmp_dir) as client:
+        assert client.post("/api/v1/auth/login", json={"password": TEST_ADMIN_PASSWORD}).status_code == 200
+        seed_device(client, uid="OBS-A3", token="a3-token")
+        missing = client.post(
+            "/api/v1/devices/OBS-A3/commands",
+            json={"type": "update", "payload": {"version": "0.3.0"}},
+        )
+        assert missing.status_code == 422, missing.text
+        assert missing.json().get("code") == "BAD_REQUEST"
+        invalid = client.post(
+            "/api/v1/devices/OBS-A3/commands",
+            json={"type": "update", "payload": {"version": "0.3.0", "sha256": "not-a-digest"}},
+        )
+        assert invalid.status_code == 422
+        # 包不存在：即使 sha256 格式合法也拒绝（F5）
+        unknown = client.post(
+            "/api/v1/devices/OBS-A3/commands",
+            json={"type": "update", "payload": {"version": "0.3.0", "sha256": "a" * 64}},
+        )
+        assert unknown.status_code == 422, unknown.text
+        assert "安装包" in unknown.json()["message"]
+        # 包存在但 sha256 与包不符：拒绝
+        real_sha = seed_agent_package(client, version="0.3.0")
+        mismatch = client.post(
+            "/api/v1/devices/OBS-A3/commands",
+            json={"type": "update", "payload": {"version": "0.3.0", "sha256": "a" * 64}},
+        )
+        assert mismatch.status_code == 422, mismatch.text
+        assert "sha256" in mismatch.json()["message"]
+        ok = client.post(
+            "/api/v1/devices/OBS-A3/commands",
+            json={"type": "update", "payload": {"version": "0.3.0", "sha256": real_sha}},
+        )
+        assert ok.status_code == 200, ok.text
+        # F7：响应带 deadline_ms
+        assert isinstance(ok.json().get("deadline_ms"), int) and ok.json()["deadline_ms"] > 0
+
+    # 2) 受控端：空/非法摘要直接拒绝；摘要不符时中止（不进入替换步骤）
+    _sys.path.insert(0, str(REPO_ROOT / "agent"))
+    from observatory_agent.tasks.update import (  # noqa: PLC0415
+        UpdateFailed,
+        UpdateRejected,
+        validate_sha256,
+        verify_package,
+    )
+
+    with pytest.raises(UpdateRejected):
+        validate_sha256("")
+    with pytest.raises(UpdateRejected):
+        validate_sha256("xyz")
+    package = tmp_dir / "observatory-agent-0.3.0.zip"
+    package.write_bytes(b"not the expected bytes")
+    install_dir = tmp_dir / "install"
+    install_dir.mkdir()
+    (install_dir / "marker.txt").write_text("old-install", encoding="utf-8")
+    with pytest.raises((UpdateFailed, UpdateRejected)):
+        verify_package(package, "0" * 64)
+    assert (install_dir / "marker.txt").read_text(encoding="utf-8") == "old-install", (
+        "摘要不符只能中止，不能替换已安装目录"
+    )
+
+
+def test_a04_secrets_never_reach_agent_or_devices_api(tmp_dir: Path) -> None:
+    """A4：下发给受控端的任何 config JSON 与 /devices 响应都不含 SECRET_KEYS。"""
+
+    from observatory.console.dto import device_safe_config
+    from observatory.core.settings_spec import AGENT_VISIBLE_KEYS, SECRET_KEYS
+    from tests.helpers import TEST_ADMIN_PASSWORD, enroll_token, running_app
+
+    # 1) 单一投影：secret 键被剥离，agent 可见集与 secret 集不相交
+    assert not (AGENT_VISIBLE_KEYS & SECRET_KEYS)
+    assert "archive_token" in SECRET_KEYS
+    projected = device_safe_config({**{key: "dummy-secret" for key in SECRET_KEYS}, "capture_interval_s": 30})
+    assert not (set(projected) & SECRET_KEYS)
+    assert projected["capture_interval_s"] == 30
+
+    with running_app(tmp_dir) as client:
+        login = client.post("/api/v1/auth/login", json={"password": TEST_ADMIN_PASSWORD})
+        assert login.status_code == 200, login.text
+        # 写入真实 secret，证明过滤不是"恰好为空"
+        patched = client.patch(
+            "/api/v1/settings",
+            json={
+                "values": {
+                    "archive_token": "ghp_very_secret_token",
+                    "archive_enabled": True,
+                    "archive_repo": "owner/repo",
+                }
+            },
+        )
+        assert patched.status_code == 200, patched.text
+
+        token = enroll_token(client)
+        assert token, "enroll 应返回设备令牌"
+        # v3 链路的 config 出口是 enroll 响应与 welcome.config；enroll 响应即投影结果
+        devices = client.get("/api/v1/devices").json()["data"]["devices"]
+        assert devices, "至少应有一台已注册设备"
+        serialized = json.dumps(devices, ensure_ascii=False)
+        assert "ghp_very_secret_token" not in serialized
+        assert "archive_token" not in serialized
+        for device in devices:
+            assert set(device["settings"]) <= AGENT_VISIBLE_KEYS
+
+        effective = client.get(f"/api/v1/settings/effective/{devices[0]['uid']}")
+        assert effective.status_code == 200
+        assert "archive_token" not in json.dumps(effective.json(), ensure_ascii=False)
+
+    # 2) 静态：所有出站 config 路径都走同一个投影函数
+    server = REPO_ROOT / "server/observatory"
+    for relative in ("console/settings.py", "console/devices.py", "console/enroll.py"):
+        assert "device_safe_config" in (server / relative).read_text(encoding="utf-8"), relative
+
+
+def test_a05_revoke_stops_ctrl_in_and_ttl_closes(tmp_dir: Path) -> None:
+    """A5：revoke 后 ctrl_in 不再转发；TTL 到期自动 ctrl_stop 并关 WS（4408）。"""
+
+    from fastapi import WebSocketDisconnect  # noqa: PLC0415
+
+    from tests.helpers import TEST_ADMIN_PASSWORD, running_app, seed_device  # noqa: PLC0415
+
+    def hello(msg_id: str) -> dict[str, object]:
+        return {
+            "v": 3,
+            "id": msg_id,
+            "t": "hello",
+            "ts_ms": 1_730_000_000_000,
+            "body": {
+                "agent_version": "0.3.0",
+                "protocol": 3,
+                "boot_id": "boot-a5",
+                "device_uid": "OBS-A5",
+                "last_ack_id": "",
+                "device_time_ms": 1_730_000_000_000,
+            },
+        }
+
+    with running_app(tmp_dir) as client:
+        seed_device(client, uid="OBS-A5", token="a5-token")
+        login = client.post("/api/v1/auth/login", json={"password": TEST_ADMIN_PASSWORD})
+        assert login.status_code == 200, login.text
+
+        def create_grant() -> str:
+            response = client.post(
+                "/api/v1/devices/OBS-A5/control",
+                json={"confirm": True, "ttl_s": 30},
+            )
+            assert response.status_code == 200, response.text
+            token = response.json()["data"]["token"]
+            assert isinstance(token, str) and token
+            return token
+
+        acked: dict[str, str] = {"last": ""}
+
+        def heartbeat(msg_id: str) -> dict[str, object]:
+            return {
+                "v": 3,
+                "id": msg_id,
+                "t": "heartbeat",
+                "ts_ms": 1_730_000_000_100,
+                "body": {
+                    "agent_version": "0.3.0",
+                    "boot_id": "boot-a5",
+                    "state": {"transport": "ws"},
+                    "last_ack_id": acked["last"],
+                },
+            }
+
+        seen: set[str] = set()
+
+        def next_control(agent_ws: object, action: str) -> dict:
+            """读下一条 control 信封并用 last_ack_id 消费（outbox at-least-once）。
+
+            已消费 id 的重复投递直接跳过——与真实受控端按下行 id 去重一致。
+            """
+
+            while True:
+                message = agent_ws.receive_json()
+                kind = message.get("t")
+                if kind == "pong" or message.get("id") in seen:
+                    continue
+                assert kind == "control" and message["body"].get("action") == action, message
+                seen.add(message["id"])
+                acked["last"] = message["id"]
+                agent_ws.send_json(heartbeat(f"a5-hb-{uuid.uuid4().hex[:8]}"))
+                return message
+
+        # ---- 路径 1：主动撤销（DELETE）→ ctrl_stop + 关闭 4410 ----
+        with client.websocket_connect(
+            "/api/v1/agent/link", headers={"X-Device-Token": "a5-token"}
+        ) as agent_ws:
+            agent_ws.send_json(hello("a5-hello"))
+            welcome = agent_ws.receive_json()
+            assert welcome["t"] == "welcome", welcome
+
+            token = create_grant()
+            # 路径 1 只测 revoke 语义：CI 慢机（2 CPU + portal 往返）上从 grant()
+            # 到 DELETE 可能跨过真实 30s TTL，grant 会被 TTL 定时器先收走（0.3.1
+            # CI 实录）。主动延长有效期，把"到期自动停止"留给路径 2 的定时器断言。
+            from observatory.console.control import SESSIONS as _A05_SESSIONS
+            from observatory.core.clock import now_ms as _a05_now
+
+            _grant_a5 = _A05_SESSIONS.get(token)
+            assert _grant_a5 is not None
+            _grant_a5.expires_at_ms = _a05_now() + 300_000
+            with client.websocket_connect(f"/api/v1/devices/OBS-A5/control?token={token}") as viewer:
+                ready = viewer.receive_json()
+                assert ready["type"] == "ready", ready
+                next_control(agent_ws, "start")
+
+                # 授权期间输入正常转发
+                viewer.send_json({"type": "input", "ev": {"kind": "move", "x": 10, "y": 20}})
+                next_control(agent_ws, "input")
+
+                revoked = client.delete(f"/api/v1/devices/OBS-A5/control/{token}")
+                assert revoked.status_code == 200, revoked.text
+
+                next_control(agent_ws, "stop")
+                with pytest.raises(WebSocketDisconnect) as exc_info:
+                    while True:
+                        viewer.receive_json()
+                assert exc_info.value.code == 4410, f"撤销必须关闭 4410: {exc_info.value.code}"
+
+            # 撤销后再连同一 token 必须被拒（授权已失效，输入无从转发）
+            with pytest.raises(WebSocketDisconnect) as rejected:
+                with client.websocket_connect(f"/api/v1/devices/OBS-A5/control?token={token}") as viewer:
+                    while True:
+                        viewer.receive_json()
+            assert rejected.value.code in {4401, 4410}, rejected.value.code
+
+        # ---- 路径 2：TTL 到期 → ctrl_stop + 关闭 4408（定时器路径）----
+        from observatory.console.control import SESSIONS  # noqa: PLC0415
+        from observatory.core.clock import now_ms  # noqa: PLC0415
+
+        seen.clear()
+        acked["last"] = ""
+        with client.websocket_connect(
+            "/api/v1/agent/link", headers={"X-Device-Token": "a5-token"}
+        ) as agent_ws:
+            agent_ws.send_json(hello("a5-hello-2"))
+            assert agent_ws.receive_json()["t"] == "welcome"
+            token = create_grant()
+            # 定时器在 viewer 接入时才启动，先收短 TTL 再接入即无需等满 30s
+            grant = SESSIONS.get(token)
+            assert grant is not None
+            grant.expires_at_ms = now_ms() + 600
+            with client.websocket_connect(f"/api/v1/devices/OBS-A5/control?token={token}") as viewer:
+                assert viewer.receive_json()["type"] == "ready"
+                next_control(agent_ws, "start")
+                next_control(agent_ws, "stop")
+                with pytest.raises(WebSocketDisconnect) as ttl_closed:
+                    while True:
+                        viewer.receive_json()
+                assert ttl_closed.value.code == 4408, f"TTL 必须关闭 4408: {ttl_closed.value.code}"
+
+
+def _deploy_text(name: str) -> str:
+    path = REPO_ROOT / "deploy" / name
+    assert path.exists(), f"缺少 {path.relative_to(REPO_ROOT)}"
+    return path.read_text(encoding="utf-8")
+
+
+def test_a06_certificates_are_real_and_renewal_fails_loudly() -> None:
+    """A6：部署产出实体证书（install 拷贝，非悬空符号链接）；续期失败退出非 0。"""
+
+    setup = _deploy_text("setup.sh")
+    renew = _deploy_text("renew-certs.sh")
+
+    # 首次申请：单张双域名证书（webroot），两个域名都做 SAN 断言 + 有效期断言
+    assert "certbot certonly --webroot" in setup
+    assert 'for host in "$CONSOLE_HOST" "$AGENT_HOST"' in setup
+    assert '-checkhost "$host"' in setup
+    assert "-checkend 86400" in setup
+
+    # 实体拷贝：install 到 APP_DIR/certs（不是绝对符号链接，容器内才不会指向自身）
+    assert 'install -m 0644 "$cert_dir/fullchain.pem" "$APP_DIR/certs/server.crt"' in setup
+    assert 'install -m 0600 "$cert_dir/privkey.pem" "$APP_DIR/certs/server.key"' in setup
+    assert 'chown "$OBS_UID:$OBS_UID"' in setup
+    code_lines = "\n".join(
+        line for line in setup.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert not re.search(
+        r"ln\s+-s\w*\s+[^\n]*(?:server\.(?:crt|key)|fullchain\.pem|privkey\.pem)", code_lines
+    ), "证书不能用符号链接交付（容器只挂 certs/）"
+
+    # 续期：webroot + 失败 die → exit 1；成功后仍实体拷贝并重载/重启
+    assert "set -Eeuo pipefail" in renew
+    assert "certbot renew --cert-name" in renew
+    assert 'die "certbot renew 失败' in renew
+    assert "exit 1" in renew
+    assert "copy_certs" in renew
+    assert 'install -m 0644 "$CERT_DIR/fullchain.pem" "$APP_DIR/certs/server.crt"' in renew
+    assert 'install -m 0600 "$CERT_DIR/privkey.pem" "$APP_DIR/certs/server.key"' in renew
+    assert renew.rstrip().endswith("exit 0"), "续期脚本成功路径必须显式 exit 0"
+
+
+
+def test_a07_server_upgrade_backs_up_and_rolls_back() -> None:
+    """A7：服务端升级先落回滚锚点（旧镜像 ref + DB 快照），健康失败自动切回旧镜像并退出非 0。
+
+    （原 0.2.x“服务器上 git pull 重装、update 预检失败自动回滚”的语义已随 GHCR
+    拉取式交付退役，见 tests/acceptance/test_n2_legacy_removed.py；回滚锚点换成镜像 ref 与 pre-deploy DB 快照。）
+    """
+
+    script = _deploy_text("pull-and-restart.sh")
+
+    # 回滚锚点：升级前记录旧镜像 ref；换库前 DB 在线快照
+    assert "OLD_IMAGE=" in script, "升级前必须记录旧镜像 ref"
+    assert "a.backup(b)" in script, "升级前必须对 DB 做在线快照（.pre-deploy.db）"
+
+    # 拉取与切换：compose pull + up -d --no-build（服务器零构建）
+    assert "compose pull" in script
+    assert "compose up -d --no-build" in script
+
+    # 健康门禁：区分 restart/exited 等异常态，打 /api/v1/health
+    assert "restarting|exited|dead" in script
+    assert "/api/v1/health" in script
+
+    # 失败路径：显式日志 + 旧镜像回滚 + 非零退出
+    assert "rolling back to" in script
+    assert 'OBS_IMAGE_TAG="$OLD_IMAGE" compose up -d --no-build' in script
+    assert "exit 1" in script
+
+
+def test_a08_deadline_never_inverts_and_slow_device_succeeds() -> None:
+    """A8：所有接口服务端 deadline < 客户端超时；一次写死，不许各接口自定。
+
+    "25s 慢设备" 的可运行版本在 W2 用可注入延迟的假受控端覆盖；这里钉死预算表、
+    响应契约（deadline_ms 是相对毫秒）以及 session 的唯一取值来源。
+    """
+
+    from observatory.console.dto import with_deadline
+    from observatory.core.clock import CLIENT_TIMEOUT_GRACE_MS, client_timeout_s, server_deadline_ms
+    from observatory.core.config import Settings
+
+    cfg = Settings()
+    for kind in ("files", "update", "uninstall", "sysinfo", "screenshot", "log_tail"):
+        deadline = server_deadline_ms(kind, cfg)
+        client_timeout_ms = client_timeout_s(kind, cfg) * 1000
+        assert deadline <= 25_000
+        assert client_timeout_ms == deadline + CLIENT_TIMEOUT_GRACE_MS
+        assert client_timeout_ms > deadline, f"{kind}: 客户端超时必须大于服务端 deadline"
+
+    stamped = with_deadline({"ok": True}, "files")
+    assert stamped["deadline_ms"] == server_deadline_ms("files", cfg)
+    assert 0 < stamped["deadline_ms"] < 10**12, "deadline_ms 是相对预算而不是 epoch 时间戳"
+
+    session_src = (REPO_ROOT / "server/observatory/link/session.py").read_text(encoding="utf-8")
+    assert "server_deadline_ms" in session_src and "client_timeout_s" in session_src
+    assert "timeout_s=20" not in session_src, "禁止接口各自写死 20s"
+
+
+def test_a09_no_waiter_leak_after_1000_commands(tmp_dir: Path) -> None:
+    """A9：连续创建 1000 条不等待的命令后，等待者条目数回到 0（含取消路径）。"""
+
+    from sqlalchemy import select
+
+    from observatory.core.clock import now_ms
+    from observatory.core.models import Command, Device
+    from tests.helpers import enroll_token, running_app
+
+    with running_app(tmp_dir) as client:
+        enroll_token(client)
+        app = client.app
+
+        async def first_device_id() -> int:
+            async with app.state.db.sessionmaker() as session:
+                row = (await session.execute(select(Device))).scalars().first()
+                assert row is not None
+                return int(row.id)
+
+        device_id = client.portal.call(first_device_id)
+
+        async def seed_commands() -> list[str]:
+            now = now_ms()
+            ids: list[str] = []
+            async with app.state.db.sessionmaker() as session:
+                for index in range(1000):
+                    command_id = str(uuid.uuid4())
+                    session.add(
+                        Command(
+                            id=command_id,
+                            device_id=device_id,
+                            type="sysinfo",
+                            payload={"seq": index},
+                            status="pending",
+                            actor="console",
+                            created_at_ms=now,
+                            expires_at_ms=now + 60_000,
+                            deadline_ms=20_000,
+                            attempts=0,
+                        )
+                    )
+                    ids.append(command_id)
+                await session.commit()
+            return ids
+
+        command_ids = client.portal.call(seed_commands)
+        assert len(command_ids) == 1000
+
+        async def enter_1000_scopes() -> tuple[int, int]:
+            journal = app.state.journal
+            assert journal.open_count() == 0
+            for command_id in command_ids:
+                async with journal.expect(command_id):
+                    assert journal.open_count() >= 1
+            return journal.open_count(), len(command_ids)
+
+        after, count = client.portal.call(enter_1000_scopes)
+        assert count == 1000
+        assert after == 0, "1000 个 scoped waiter 退出后必须归零"
+
+        async def cancelled_waiter_leaves_nothing() -> int:
+            journal = app.state.journal
+            command_id = command_ids[0]
+
+            async def waiter() -> None:
+                async with journal.expect(command_id) as slot:
+                    await slot.wait(30)
+
+            task = asyncio.create_task(waiter())
+            await asyncio.sleep(0)
+            assert journal.open_count() == 1
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            return journal.open_count()
+
+        assert client.portal.call(cancelled_waiter_leaves_nothing) == 0
+
+
+def test_a10_command_delivery_closure_after_reconnect(tmp_dir: Path) -> None:
+    """A10：WS 断开期积压命令重连后 ≤1 心跳送达；回执丢失重投不重复执行。
+
+    附带 §5.6 的 ack 语义（方向相反，容易写反）：
+    - 发 3 条上行 a,b,c → 响应 `ack_id == c`（服务端已处理的上行 id）；
+    - 再发 `last_ack_id=<下行 id>` → 服务端不再重发该下行。
+    """
+
+    from tests.helpers import running_app, seed_device
+
+    with running_app(tmp_dir) as client:
+        device_id = seed_device(client, uid="OBS-A10", token="a10-token")
+
+        async def create_pending_command() -> str:
+            record = await client.app.state.journal.create(device_id, "sysinfo", {"seq": 1})
+            return record.id
+
+        command_id = client.portal.call(create_pending_command)
+
+        hello = {
+            "v": 3,
+            "id": "a10-hello",
+            "t": "hello",
+            "ts_ms": 1_730_000_000_000,
+            "body": {
+                "agent_version": "0.3.0",
+                "protocol": 3,
+                "boot_id": "a10-boot",
+                "device_uid": "OBS-A10",
+                "last_ack_id": "",
+                "device_time_ms": 1_730_000_000_000,
+            },
+        }
+        # 离线期积压的命令在重连后的第一个响应里补投，command_id 保持不变
+        reconnected = client.post(
+            "/api/v1/agent/link",
+            headers={"X-Device-Token": "a10-token"},
+            json={"v": 3, "last_ack_id": "", "items": [hello]},
+        )
+        assert reconnected.status_code == 200, reconnected.text
+        delivered = [
+            item for item in reconnected.json()["items"] if item["t"] == "command"
+        ]
+        assert delivered, "重连后必须补投离线期积压的命令"
+        assert delivered[0]["body"]["command_id"] == command_id, "补投必须复用稳定 command_id"
+
+        # 回执丢失场景：同一 command_id 的 result 重投是幂等的
+        result_item = {
+            "v": 3,
+            "id": "a10-result-1",
+            "t": "result",
+            "ts_ms": 1_730_000_000_100,
+            "body": {"command_id": command_id, "status": "ok", "result": {"ok": True}},
+        }
+        reported = client.post(
+            "/api/v1/agent/link",
+            headers={"X-Device-Token": "a10-token"},
+            json={"v": 3, "last_ack_id": "", "items": [result_item]},
+        )
+        assert reported.status_code == 200
+        assert reported.json()["ack_id"] == "a10-result-1"
+
+        # 已完成命令不会再次补投
+        after = client.post(
+            "/api/v1/agent/link",
+            headers={"X-Device-Token": "a10-token"},
+            json={"v": 3, "last_ack_id": "a10-result-1", "items": []},
+        )
+        assert after.status_code == 200
+        assert all(item["body"].get("command_id") != command_id for item in after.json()["items"]), (
+            "已回执的命令不能重复补投（A10 无重复执行）"
+        )
+
+        # ack 游标：批量上行 a,b,c → ack_id 是最后处理的上行 id c
+        abc = [
+            {
+                "v": 3,
+                "id": uplink_id,
+                "t": "event",
+                "ts_ms": 1_730_000_000_200,
+                "body": {"event": "noop", "data": {"seq": index}},
+            }
+            for index, uplink_id in enumerate(("a", "b", "c"))
+        ]
+        batch = client.post(
+            "/api/v1/agent/link",
+            headers={"X-Device-Token": "a10-token"},
+            json={"v": 3, "last_ack_id": "a10-result-1", "items": abc},
+        )
+        assert batch.status_code == 200
+        assert batch.json()["ack_id"] == "c", "ack_id 必须推进到最后一个上行 id"
+
+
+def test_a11_default_bind_and_forwarded_headers_and_hostsplit() -> None:
+    """A11：默认 127.0.0.1、trust_forwarded_for=false、HostSplit 配置不全 fail-closed。"""
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from observatory.adapters.hostsplit import HostSplit
+    from observatory.core.config import Settings
+
+    inner = FastAPI()
+
+    @inner.get("/api/v1/health")
+    def health() -> dict:
+        return {"ok": True}
+
+    @inner.get("/console")
+    def console() -> dict:
+        return {"page": "console"}
+
+    def app_client(**kwargs: object) -> TestClient:
+        app = HostSplit(
+            inner,
+            console_hosts=kwargs.get("console_hosts", []),  # type: ignore[arg-type]
+            agent_hosts=kwargs.get("agent_hosts", []),  # type: ignore[arg-type]
+            trust_forwarded_for=bool(kwargs.get("trust_forwarded_for", False)),
+        )
+        return TestClient(app)
+
+    # 1) 配置不全 → fail-closed：未知 Host 一律 404，只放行回环
+    incomplete = app_client()
+    assert incomplete.get("/console", headers={"host": "evil.example"}).status_code == 404
+    assert incomplete.get("/api/v1/health", headers={"host": "evil.example"}).status_code == 404
+    assert incomplete.get("/console", headers={"host": "localhost"}).status_code == 200
+    assert incomplete.get("/api/v1/health", headers={"host": "localhost"}).status_code == 200
+
+    # 2) 完整配置：控制台只认 console host；agent host 只能访问共享路径
+    complete = app_client(console_hosts=["console.test"], agent_hosts=["agent.test"])
+    assert complete.get("/console", headers={"host": "console.test"}).status_code == 200
+    assert complete.get("/console", headers={"host": "agent.test"}).status_code == 404
+    assert complete.get("/api/v1/health", headers={"host": "agent.test"}).status_code == 200
+    assert complete.get("/api/v1/health", headers={"host": "unknown.test"}).status_code == 404
+
+    # 3) trust_forwarded_for 默认 false：X-Forwarded-Host 不能伪造控制台 host
+    spoofed = {"host": "evil.example", "x-forwarded-host": "console.test"}
+    assert complete.get("/console", headers=spoofed).status_code == 404
+    trusting = app_client(console_hosts=["console.test"], agent_hosts=["agent.test"], trust_forwarded_for=True)
+    assert trusting.get("/console", headers=spoofed).status_code == 200
+
+    # 4) 默认设置与容器端口绑定
+    defaults = Settings()
+    assert defaults.trust_forwarded_for is False
+    compose = (REPO_ROOT / "deploy/docker-compose.yml").read_text(encoding="utf-8")
+    assert "${OBS_BIND_ADDR:-127.0.0.1}" in compose, "默认必须只绑回环（A11）"
+
+
+def test_a23_console_websockets_served_on_agent_host() -> None:
+    """A23 补充（2026-10-25 生产）：控制台域名可能挂在不支持 WebSocket 的
+    CDN（阿里云 ESA）后面——控制台的两条 WS（实时事件流 /api/v1/ws、实时
+    控制观看端 /api/v1/devices/<uid>/control）必须能在 agent 域名承载；
+    同路径的 REST 仍只归 console 域。"""
+
+    from fastapi import FastAPI, WebSocketDisconnect
+    from fastapi.testclient import TestClient
+
+    from observatory.adapters.hostsplit import HostSplit
+
+    inner = FastAPI()
+
+    @inner.websocket("/api/v1/devices/{uid}/control")
+    async def control_ws(websocket: WebSocket, uid: str) -> None:  # noqa: ARG001
+        await websocket.accept()
+        await websocket.send_json({"type": "ready"})
+        await websocket.close()
+
+    @inner.websocket("/api/v1/ws")
+    async def events_ws(websocket: WebSocket) -> None:
+        await websocket.accept()
+        await websocket.send_json({"type": "hello"})
+        await websocket.close()
+
+    @inner.post("/api/v1/devices/{uid}/control")
+    async def control_grant(uid: str) -> dict:  # noqa: ARG001
+        return {"ok": True}
+
+    client = TestClient(
+        HostSplit(inner, console_hosts=["console.test"], agent_hosts=["agent.test"])
+    )
+
+    # agent host：两条 WS 可建立（经 direct/agent 域承载控制台实时通道）
+    with client.websocket_connect(
+        "/api/v1/devices/OBS-X/control", headers={"host": "agent.test"}
+    ) as viewer:
+        assert viewer.receive_json() == {"type": "ready"}
+    with client.websocket_connect("/api/v1/ws", headers={"host": "agent.test"}) as events:
+        assert events.receive_json() == {"type": "hello"}
+
+    # console host 两条 WS 照常
+    with client.websocket_connect(
+        "/api/v1/devices/OBS-X/control", headers={"host": "console.test"}
+    ) as viewer:
+        assert viewer.receive_json() == {"type": "ready"}
+
+    # 同路径 REST 仍只归 console host；未知 host 的 WS 一律拒绝
+    assert client.post("/api/v1/devices/OBS-X/control", headers={"host": "agent.test"}).status_code == 404
+    assert client.post("/api/v1/devices/OBS-X/control", headers={"host": "console.test"}).status_code == 200
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            "/api/v1/devices/OBS-X/control", headers={"host": "evil.test"}
+        ):
+            pass
+
+
+def test_a12_single_clock_source(tmp_dir: Path) -> None:
+    """A12（真 app 半边）：设备列表与 presence 的 server_time_ms 来自服务端时钟。
+
+    DTO 单元半边（stamp/file_entry_out/前端 Date.now 静态扫描）在
+    ``tests/unit/test_dto_clock_secrets.py``，此处不再重复。
+    """
+
+    from observatory.core.clock import now_ms
+    from tests.helpers import TEST_ADMIN_PASSWORD, enroll_token, running_app
+
+    with running_app(tmp_dir) as client:
+        login = client.post("/api/v1/auth/login", json={"password": TEST_ADMIN_PASSWORD})
+        assert login.status_code == 200
+        enroll_token(client)
+        listed = client.get("/api/v1/devices")
+        assert listed.status_code == 200
+        body = listed.json()
+        assert isinstance(body["server_time_ms"], int)
+        assert abs(body["server_time_ms"] - now_ms()) < 10_000
+        device = body["data"]["devices"][0]
+        assert isinstance(device["server_time_ms"], int)
+        assert isinstance(device["presence"]["server_time_ms"], int)
+
+
+def test_a13_capabilities_are_exact() -> None:
+    """A13：control_enabled=false → control=false；无包 → update=false；无通道 → files=false。"""
+
+    from tests.unit.test_presence_matrix import NOW, FakeSession, _context, _device
+
+    context = _context({1: FakeSession("ws", NOW - 1_000)})
+    online = context.snapshot(_device())
+    assert online["capabilities"] == {
+        "control": True,
+        "files": True,
+        "screenshot": True,
+        "timeline": True,
+        "update": False,
+        "uninstall": True,
+    }
+
+    disabled = context.snapshot(_device(settings={"control_enabled": False}))
+    assert disabled["capabilities"]["control"] is False
+
+    context.latest_agent_version = "0.3.1"
+    assert context.snapshot(_device(agent_version="0.3.0"))["capabilities"]["update"] is True
+    assert context.snapshot(_device(agent_version="0.2.4"))["capabilities"]["update"] is False
+
+    # 无活动通道 → files/control/uninstall 全 false（degraded）
+    degraded = _context().snapshot(_device(last_seen_ms=NOW - 30_000))
+    assert degraded["state"] == "degraded"
+    assert degraded["capabilities"]["files"] is False
+    assert degraded["capabilities"]["control"] is False
+
+    # 单一推导函数：capabilities 只在 presence.py 里计算
+    server = REPO_ROOT / "server/observatory"
+    offenders = [
+        str(path.relative_to(REPO_ROOT))
+        for path in server.rglob("*.py")
+        if "presence" not in path.name
+        and "adapters" not in path.parts
+        and "def _capabilities" in path.read_text(encoding="utf-8")
+    ]
+    assert offenders == [], f"capabilities 出现第二处推导: {offenders}"
+
+
+@pytest.mark.windows_only
+def test_a17_pipe_acl_and_401_reregistration(tmp_dir: Path) -> None:
+    """A17：管道 ACL 仅 SYSTEM/Administrators/当前用户；401 后自动重注册回主链路。"""
+
+    from tests.helpers import run_win_smoke, running_app, seed_device, win_smoke_result
+
+    # 1) 真实 Windows 管道验证：DACL 成员、客户端身份校验、双向帧（win_smoke 本机实跑）
+    for check_name in ("pipe_acl", "pipe_identity", "pipe_duplex"):
+        result = win_smoke_result(run_win_smoke(check_name), check_name)
+        assert result["status"] == "PASS", f"{check_name} 未通过: {result['detail']}"
+
+    # 2) 受控端 401 语义：HTTP 401/WS 4401 → LinkAuthError → on_unauthorized 重注册
+    from websockets.exceptions import ConnectionClosed  # noqa: PLC0415
+    from websockets.frames import Close  # noqa: PLC0415
+
+    from observatory_agent.core.link import (  # noqa: PLC0415
+        WS_CLOSE_RATE_LIMITED,
+        WS_CLOSE_UNAUTHORIZED,
+        LinkAuthError,
+        LinkGoneError,
+        LinkRateLimited,
+        _map_ws_error,
+    )
+
+    assert WS_CLOSE_UNAUTHORIZED == 4401
+    assert isinstance(_map_ws_error(ConnectionClosed(rcvd=Close(4401, "x"), sent=None)), LinkAuthError)
+    assert isinstance(_map_ws_error(ConnectionClosed(rcvd=Close(4410, "x"), sent=None)), LinkGoneError)
+    assert isinstance(_map_ws_error(ConnectionClosed(rcvd=Close(WS_CLOSE_RATE_LIMITED, "x"), sent=None)), LinkRateLimited)
+    runtime_source = (REPO_ROOT / "agent/observatory_agent/core/runtime.py").read_text(encoding="utf-8")
+    assert "on_unauthorized=self._reauth" in runtime_source, "Link 必须挂 _reauth 作为 401 重注册回调"
+
+    # 3) 服务端半边：失效 token 401；重注册拿到的同设备新 token 立即可用
+    hello = {
+        "v": 3,
+        "id": "a17-hello",
+        "t": "hello",
+        "ts_ms": 1_730_000_000_000,
+        "body": {
+            "agent_version": "0.3.0",
+            "protocol": 3,
+            "boot_id": "boot-a17",
+            "device_uid": "OBS-A17",
+            "last_ack_id": "",
+            "device_time_ms": 1_730_000_000_000,
+        },
+    }
+    batch = {"v": 3, "last_ack_id": "", "items": [hello]}
+    with running_app(tmp_dir) as client:
+        seed_device(client, uid="OBS-A17", token="a17-token")
+        rejected = client.post("/api/v1/agent/link", headers={"X-Device-Token": "stale-token"}, json=batch)
+        assert rejected.status_code == 401, rejected.text
+        recovered = client.post("/api/v1/agent/link", headers={"X-Device-Token": "a17-token"}, json=batch)
+        assert recovered.status_code == 200, recovered.text
+
+
+def test_a18_install_needs_no_credential_and_registers_automatically(tmp_dir: Path) -> None:
+    """A18（P4 终态）：安装与注册彻底去凭据化。
+
+    0.3.7 之前"谁可以安装"由部署票据把守；P1 起票据退化为下载入口凭据，P4 把它
+    整体删除。现在断言三件事：票据接口不存在、安装脚本无需任何参数即可下载且
+    内部不再含令牌占位符、设备不带任何凭据也能注册。
+    """
+
+    from tests.helpers import TEST_ADMIN_PASSWORD, running_app
+
+    with running_app(tmp_dir) as client:
+        login = client.post("/api/v1/auth/login", json={"password": TEST_ADMIN_PASSWORD})
+        assert login.status_code == 200, login.text
+
+        # 票据管理接口整体移除（不是"仍可用但不用"，是 404）
+        assert client.get("/api/v1/install-tokens").status_code == 404
+        assert client.post("/api/v1/install-tokens", json={}).status_code in (404, 405)
+
+        # 安装脚本公开可下载，且不含任何凭据或未渲染占位符
+        for path, kind in (("/api/v1/public/install.ps1", "ps1"), ("/api/v1/public/install.cmd", "cmd")):
+            response = client.get(path)
+            assert response.status_code == 200, response.text
+            text = response.text
+            assert "@@" not in text, f"{kind} 有未渲染占位符"
+            assert "install-token" not in text, f"{kind} 仍引用安装令牌"
+            assert "token=" not in text, f"{kind} 仍要求令牌参数"
+
+        # 注册不需要任何凭据字段
+        created = client.post("/api/v1/agent/enroll", json={"uid": "OBS-A18-A", "hostname": "a18-a"})
+        assert created.status_code == 200, created.text
+        assert created.json()["token"], "注册必须下发设备令牌"
+        assert client.post("/api/v1/agent/enroll", json={"uid": "OBS-A18-B"}).status_code == 200
+
+        # 旧客户端仍会带 install_token/code：服务端忽略它们，不得因此拒绝
+        legacy = client.post(
+            "/api/v1/agent/enroll",
+            json={"uid": "OBS-A18-C", "install_token": "dead-ticket", "code": "dead-code"},
+        )
+        assert legacy.status_code == 200, legacy.text
+
+        # 安装信息不再暴露票据字段，并明确 open registration
+        info = client.get("/api/v1/install").json()["data"]
+        assert info["enroll_required"] is True
+        assert "install_token_endpoint" not in info
+        assert "available_tokens" not in info
+        assert info["script_url"].endswith("/install.ps1")
+
+
+def test_a18b_deleted_device_reinstalls_without_approval(tmp_dir: Path) -> None:
+    """A18b（P4 重点）：删除设备后重新安装不需要任何人工批准或票据。
+
+    这是"设备完整生命周期"的闭环：删除只忘记记录，同一 UID 重新注册时按首次
+    注册处理，旧令牌不再有任何特殊语义（既不是 410 也不是被墓碑拒绝）。
+    """
+
+    import sqlite3
+
+    from tests.helpers import TEST_ADMIN_PASSWORD, running_app
+
+    with running_app(tmp_dir) as client:
+        login = client.post("/api/v1/auth/login", json={"password": TEST_ADMIN_PASSWORD})
+        assert login.status_code == 200, login.text
+        headers = {"Authorization": f"Bearer {login.json()['data']['token']}"}
+
+        first = client.post("/api/v1/agent/enroll", json={"uid": "OBS-REINSTALL", "hostname": "re"})
+        assert first.status_code == 200, first.text
+        old_token = first.json()["token"]
+
+        # 删除端点拒绝"在线"设备，先把 last_seen_ms 改老（删除的在线保护逻辑本身不变）
+        connection = sqlite3.connect(tmp_dir / "observatory.db")
+        try:
+            connection.execute(
+                "UPDATE devices SET last_seen_ms = ? WHERE uid = ?",
+                (int(time.time() * 1000) - 600_000, "OBS-REINSTALL"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        assert client.delete("/api/v1/devices/OBS-REINSTALL", headers=headers).status_code == 200
+
+        # 记录已消失：旧令牌只是未知令牌（401），不是墓碑（410）
+        stale = client.post(
+            "/api/v1/agent/link",
+            headers={"X-Device-Token": old_token},
+            json={"v": 3, "last_ack_id": "", "items": [{"v": 3, "id": "probe", "t": "event", "ts_ms": 1, "body": {"event": "noop", "data": {}}}]},
+        )
+        assert stale.status_code == 401, stale.text
+
+        # 重新安装 = 重新注册：无凭据、无批准、拿到新令牌即可用
+        second = client.post("/api/v1/agent/enroll", json={"uid": "OBS-REINSTALL", "hostname": "re"})
+        assert second.status_code == 200, second.text
+        new_token = second.json()["token"]
+        assert new_token != old_token
+        link = client.post(
+            "/api/v1/agent/link",
+            headers={"X-Device-Token": new_token},
+            json={"v": 3, "last_ack_id": "", "items": [{"v": 3, "id": "probe2", "t": "event", "ts_ms": 2, "body": {"event": "noop", "data": {}}}]},
+        )
+        assert link.status_code == 200, link.text
+
+def test_a19_docs_and_version_consistency() -> None:
+    """A19：README/docs 的版本、端口、项数、保留天数与代码一致；--check 覆盖文档。"""
+
+    import subprocess
+
+    from observatory.core.settings_spec import SPECS
+
+    root = REPO_ROOT
+    docs = {path.name: path.read_text(encoding="utf-8") for path in sorted((root / "docs").glob("*.md"))}
+    readme = (root / "README.md").read_text(encoding="utf-8")
+
+    # 保留天数：SPECS 默认值是唯一事实来源，三份用户文档必须写同样的数字
+    retention_defaults = {
+        "frame_retention_days": 14,
+        "audit_retention_days": 180,
+        "command_retention_days": 30,
+    }
+    for key, expected in retention_defaults.items():
+        assert int(SPECS[key].default) == expected, f"{key} 默认值漂移"
+    for name in ("部署.md", "使用.md", "合规与授权.md"):
+        text = docs[name]
+        assert "14 天" in text and "180 天" in text and "30 天" in text, f"{name} 保留天数与代码不一致"
+
+    # 端口：容器/nginx/文档统一 8443
+    assert "8443" in (root / "server/Dockerfile").read_text(encoding="utf-8")
+    assert "8443" in (root / "deploy/docker-compose.yml").read_text(encoding="utf-8")
+    assert "8443" in readme
+    for name in ("部署.md", "接口.md"):
+        assert "8443" in docs[name], f"{name} 未写 8443"
+
+    # 接口文档必须描述 v3 主链路且不再出现 0.2.0
+    interface = docs["接口.md"]
+    assert "/api/v1/agent/link" in interface
+    assert "0.2.0" not in interface
+
+    # 打包文档必须描述实际存在的 CI 工作流（A20 的文档侧）
+    packaging = docs["受控端打包.md"]
+    workflow = (root / ".github/workflows/ci-cd.yml").read_text(encoding="utf-8")
+    for token in ("ci-cd.yml", "build-agent", "latest-agent"):
+        assert token in packaging, f"受控端打包.md 未描述 {token}"
+    assert "build-agent:" in workflow
+    assert "latest-agent" in workflow
+
+    # 安装令牌 TTL 的旧 env 名必须从文档/样例彻底消失（A18/A19）
+    assert "OBS_INSTALL_TOKEN_TTL_MINUTES" not in (root / "server/.env.example").read_text(encoding="utf-8")
+    assert "OBS_INSTALL_TOKEN_TTL_MINUTES" not in docs["部署.md"]
+
+    # --check 必须覆盖 README/docs/README artwork，且当前仓库是同步的
+    completed = subprocess.run(
+        [sys.executable, str(root / "tools/set_version.py"), "--check"],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    for marker in ("README.md", "docs/*.md", "README artwork"):
+        assert marker in completed.stdout, f"set_version --check 未覆盖 {marker}"
+
+
+def test_a20_ci_pipeline_matches_ghcr_delivery() -> None:
+    """A20（0.3.7 末修订）：质量门禁在本地；CI 构建镜像推 GHCR，agent 走 Windows runner，部署走 pull-and-restart。"""
+
+    workflow = (REPO_ROOT / ".github/workflows/ci-cd.yml").read_text(encoding="utf-8")
+    # 镜像即产物：构建并推 GHCR（latest + :sha，tag 时加 vX.Y.Z 别名）
+    assert "docker/build-push-action" in workflow, "CI 必须构建镜像"
+    assert "ghcr.io" in workflow, "镜像必须推 GHCR"
+    # 受控端 exe 只在 agent/** 或 VERSION 变更时动用 Windows runner
+    assert "windows-latest" in workflow and "build.ps1" in workflow, "受控端必须原生构建"
+    assert "agent/**" in workflow, "agent 构建必须按路径过滤"
+    # 部署：SSH 触发服务器拉取切换，失败自动回滚
+    assert "pull-and-restart.sh" in workflow, "部署必须走服务器 pull-and-restart"
+
+
+def test_a21_dead_code_is_gone_or_justified() -> None:
+    """A21：审计列出的死代码全部消失，或有明确保留理由（旧模块删除前只允许留在白名单）。"""
+
+    # 0.2.10 审计报告列出的死代码符号 / 旧 API 定义
+    must_be_gone = (
+        "AgentHello",
+        "FileReadOut",
+        "FrameUploadMeta",
+        "EventOut",
+        "acknowledged_uninstall",
+        "def dumps(",
+        "def runtime_or_none(",
+        "def clockOffset(",
+        "def read_exact(",
+        "def get_state(",
+    )
+    #: 明确保留理由：这些是 v3 仍在使用的名字/兼容字段，不是死代码
+    justified = {
+        "EVENT_CONTROL_FRAME": "0.3.0 console/events.py 的实时事件名（非旧 schemas 常量）",
+        "clock_offset_ms": "legacy 0.2.x 心跳字段的兼容读取（N2）",
+        "last_server_time_ms": "legacy 0.2.x 心跳字段的兼容读取（N2）",
+    }
+
+    # 0.2.10 旧模块已全部删除：白名单必须为空，任何命中都是新架构里的死代码
+    stale_allowlist: set[str] = set()
+    roots = ["server", "agent", "tools", "usb-installer", "webui/src"]
+    offenders: dict[str, list[str]] = {token: [] for token in must_be_gone}
+    for root_name in roots:
+        root = REPO_ROOT / root_name
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*"):
+            if path.suffix not in {".py", ".ts", ".tsx", ".js", ".ps1", ".cmd"}:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            for token in must_be_gone:
+                if token in text:
+                    offenders[token].append(relative)
+
+    unexpected = {
+        token: [path for path in paths if path not in stale_allowlist] for token, paths in offenders.items()
+    }
+    unexpected = {token: paths for token, paths in unexpected.items() if paths}
+    assert not unexpected, f"死代码出现在新架构/非白名单文件: {unexpected}"
+    assert justified, "保留理由必须显式登记（A21 的“或明确保留理由”）"
+
+    # 旧模块不得被新装配 import（删除前的隔离证明）
+    main = (REPO_ROOT / "server/observatory/main.py").read_text(encoding="utf-8")
+    for stale in (".schemas import", ".services.commands", ".services.control"):
+        assert stale not in main, f"main.py 仍引用旧模块: {stale}"
+
+
+def test_a22_no_silent_except_without_log_or_suppress() -> None:
+    """A22：静默 except 全部改为 contextlib.suppress 或带日志；ruff 禁止裸静默。"""
+
+    import re
+
+    server = REPO_ROOT / "server/observatory"
+    new_dirs = ("core", "link", "media", "console", "adapters")
+    files: list[Path] = []
+    for directory in new_dirs:
+        files += list((server / directory).rglob("*.py"))
+    files += [server / "presence.py", server / "main.py", server / "cli.py"]
+
+    silent = re.compile(r"except[^\n:]*:\s*(?:#.*)?\n\s*(?:pass|\.\.\.)\s*(?:#.*)?$", re.MULTILINE)
+    offenders = [
+        f"{path.relative_to(REPO_ROOT)}:{text[:m.start()].count(chr(10)) + 1}"
+        for path in files
+        if (text := path.read_text(encoding="utf-8")) and (m := silent.search(text))
+    ]
+    assert offenders == [], f"仍有静默 except（应改 contextlib.suppress 或记日志）: {offenders}"
+
+    # ruff 必须禁止裸静默（BLE001：blind except；S110：try-except-pass）
+    config = ""
+    for name in ("pyproject.toml", "ruff.toml", ".ruff.toml"):
+        candidate = REPO_ROOT / name
+        if candidate.exists():
+            config += candidate.read_text(encoding="utf-8")
+    assert config, "缺少 ruff 配置（A22 要求静态规则禁止裸静默）"
+    assert "BLE001" in config or "S110" in config, "ruff 配置未启用 BLE001/S110"
+
+
+def test_a24_repo_hygiene() -> None:
+    """A24：根 .dockerignore 生效；容器非 root + 只读根；.gitignore 无重复；.env.dev 不进生产。"""
+
+    root = REPO_ROOT
+
+    # 1) .dockerignore 必须在仓库根（compose 的 context 是 ..），旧 server/.dockerignore 已废
+    dockerignore = root / ".dockerignore"
+    assert dockerignore.is_file(), "缺少根级 .dockerignore（构建上下文是仓库根）"
+    ignored = dockerignore.read_text(encoding="utf-8")
+    for marker in (".localdata", "server/.env", "deploy", "docs", "webui/node_modules"):
+        assert marker in ignored, f".dockerignore 未忽略 {marker}"
+    stale_dockerignore = root / "server/.dockerignore"
+    if stale_dockerignore.exists():
+        stale_text = stale_dockerignore.read_text(encoding="utf-8")
+        assert "此位置不生效" in stale_text and "根" in stale_text, (
+            "server/.dockerignore 若保留，必须明确标注已废弃并指向根 .dockerignore（不能写规则）"
+        )
+        assert not any(line.strip() and not line.strip().startswith("#") for line in stale_text.splitlines()), (
+            "server/.dockerignore 不能含实际规则（Docker 不会读取它）"
+        )
+
+    # 2) 容器非 root + 只读根 + 权限收敛 + 资源限制
+    dockerfile = (root / "server/Dockerfile").read_text(encoding="utf-8")
+    compose = (root / "deploy/docker-compose.yml").read_text(encoding="utf-8")
+    assert "USER observatory" in dockerfile
+    assert "useradd" in dockerfile and "--uid" in dockerfile
+    for marker in ("read_only: true", "user:", "cap_drop:", "no-new-privileges:true", "mem_limit:", "pids_limit:"):
+        assert marker in compose, f"compose 缺少 {marker}"
+    assert "127.0.0.1" in compose, "8443 默认必须只绑回环（A11/A24）"
+
+    # 3) Ubuntu/Debian Docker 源分流（不再写死 Debian 源）
+    setup = (root / "deploy/setup.sh").read_text(encoding="utf-8")
+    assert "linux/ubuntu" in setup and "linux/debian" in setup
+    assert "os-release" in setup and "ID_LIKE" in setup
+
+    # 4) .gitignore 无重复条目
+    lines = [
+        line.strip()
+        for line in (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    duplicates = {line for line in lines if lines.count(line) > 1}
+    assert not duplicates, f".gitignore 重复条目: {duplicates}"
+
+    # 5) .env.dev 不进生产路径：compose/Dockerfile/部署脚本只读 server/.env
+    assert "../server/.env" in compose
+    production_files = [root / "server/Dockerfile", root / "deploy/docker-compose.yml", *sorted((root / "deploy").glob("*.sh"))]
+    for path in production_files:
+        code_lines = "\n".join(
+            line for line in path.read_text(encoding="utf-8").splitlines() if not line.lstrip().startswith("#")
+        )
+        assert ".env.dev" not in code_lines, f"{path.name} 的生效配置引用 .env.dev"
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    assert "cp server/.env.dev" not in readme, "README 不得教用户拷贝弱口令 .env.dev"

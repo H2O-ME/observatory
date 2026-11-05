@@ -1,0 +1,1 @@
+"""Observatory 测试包（spec §9 五层结构）。"""

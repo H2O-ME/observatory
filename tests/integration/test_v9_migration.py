@@ -89,6 +89,8 @@ def test_v8_to_v9_archives_and_drops_legacy_tables(tmp_dir: Path) -> None:
     from observatory.core.config import Settings
     from observatory.core.db import SCHEMA_VERSION, Database
 
+    from tests.helpers import TEST_ADMIN_PASSWORD, TEST_SECRET_KEY
+
     database_path = tmp_dir / "observatory.db"
     connection = sqlite3.connect(database_path)
     try:
@@ -99,8 +101,8 @@ def test_v8_to_v9_archives_and_drops_legacy_tables(tmp_dir: Path) -> None:
 
     settings = Settings(
         data_dir=tmp_dir,
-        secret_key="test-secret-key-0123456789abcdef0123456789",
-        admin_password="test-admin-password",
+        secret_key=TEST_SECRET_KEY,
+        admin_password=TEST_ADMIN_PASSWORD,
     )
     database = Database(settings)
 

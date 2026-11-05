@@ -1,0 +1,218 @@
+name: ci-cd
+
+# 极简交付链路（0.3.7 末重构，用户拍板）：
+#   push main → 质量门禁（pytest + ruff + webui typecheck）
+#   → ubuntu 构建「前后端一体」镜像推 ghcr.io（~90s，gha 缓存）
+#   → SSH 通知香港服务器 docker compose pull && up -d（秒级，零本地构建）
+#   受控端 exe 仅当 agent/** 或 VERSION 变更时才动用 Windows runner（2 倍费率），
+#   产物挂固定 Release tag latest-agent，由香港服务器自行下载登记。
+#
+# 0.3.7 审计 O05：原来"质量门禁只在本地"，于是 deploy-hk 会在测试从未运行的情况下
+# 直接上线——A10（换库前快照缺 stdin、静默失败）正是这样被推上生产的。
+# 现在 gate 是 deploy-hk 的强依赖：测试不过就不部署。
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      force_agent:
+        description: "强制构建受控端 exe（本次提交没有 agent/** 变更时用）"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ci-cd-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: 变更过滤
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      agent: ${{ steps.decide.outputs.agent }}
+      webui: ${{ steps.filter.outputs.webui }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            agent:
+              - 'agent/**'
+              - 'VERSION'
+            webui:
+              - 'webui/**'
+      # paths-filter 对 push 事件只比较"本次提交 vs 上一个提交"。于是有两种会漏掉
+      # 受控端构建的真实情况：
+      #   1. 某次提交改了 agent/** 但门禁失败 → 修复提交只动测试 → 过滤判定
+      #      "没有 agent 变更" → 新二进制永远不会被构建（0.3.8 就这样漏过一次）；
+      #   2. 需要重建上一次的产物（runner 缓存异常、包上传失败）。
+      # 手动触发时必须能强制构建，否则只能靠"往 agent/ 里塞一句注释"这种脏手段。
+      - id: decide
+        run: |
+          set -euo pipefail
+          agent="${{ steps.filter.outputs.agent }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_agent }}" = "true" ]; then
+            agent="true"
+            echo "手动触发：强制构建受控端 exe"
+          fi
+          echo "agent=$agent" >> "$GITHUB_OUTPUT"
+          echo "受控端需要构建: $agent"
+
+  gate:
+    name: 质量门禁（测试通过才允许部署）
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: 安装依赖
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -r requirements-dev.txt
+      - name: ruff
+        run: python -m ruff check server agent tools tests
+      - name: pytest（非 Windows 专用、非性能用例）
+        run: python -m pytest tests/ -q -m "not windows_only and not perf"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: webui/pnpm-lock.yaml
+      - name: webui typecheck
+        working-directory: webui
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm typecheck
+
+  build-agent:
+    name: 受控端 exe（仅 agent 变更时）
+    # 门禁是硬依赖：gate 失败时未经测试的 exe 绝不能替换 latest-agent Release
+    #（0.3.7 审计 O05 同型问题——"测试不过就不部署"必须覆盖所有产物出口）。
+    needs: [changes, gate]
+    if: needs.changes.outputs.agent == 'true' && needs.gate.result == 'success'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: x64
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            agent/requirements.txt
+      - name: 安装依赖
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -r requirements-dev.txt -r agent/requirements.txt
+      - name: Windows 专用测试（win/service、pipe、session——此前从未在 CI 跑过）
+        run: python -m pytest tests/ -q -m "windows_only"
+      - name: 构建 exe
+        shell: pwsh
+        run: pwsh -File agent/build/build.ps1
+      - name: 生成 SHA256SUMS
+        shell: pwsh
+        run: |
+          Get-ChildItem agent/dist/*.zip | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)"
+          } | Set-Content agent/dist/SHA256SUMS
+      - name: 发布到固定 Release（latest-agent）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release delete latest-agent --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+          gh release create latest-agent agent/dist/*.zip agent/dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Latest Agent Package" \
+            --notes "Auto-built from ${GITHUB_SHA}"
+
+  build-server:
+    name: 服务端镜像 → ghcr
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: 登录 ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: 构建并推送
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: server/Dockerfile
+          push: true
+          build-args: BUILD_VERSION=${{ github.sha }}
+          # latest+sha 每次 main/tag 都打；tag 推送额外打 vX.Y.Z 别名
+          tags: |
+            ghcr.io/h2o-me/observatory:latest
+            ghcr.io/h2o-me/observatory:${{ github.sha }}
+            ghcr.io/h2o-me/observatory:${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy-hk:
+    name: 香港服务器拉取上线
+    needs: [changes, gate, build-server, build-agent]
+    if: >-
+      always() &&
+      needs.gate.result == 'success' &&
+      needs.build-server.result == 'success' &&
+      (needs.build-agent.result == 'success' || needs.build-agent.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 写入部署密钥
+        env:
+          OBS_DEPLOY_KEY: ${{ secrets.OBS_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$OBS_DEPLOY_KEY" ] || { echo "缺少 secret OBS_DEPLOY_KEY" >&2; exit 1; }
+          install -m 600 /dev/null "$HOME/obs_deploy_key"
+          printf '%s\n' "$OBS_DEPLOY_KEY" > "$HOME/obs_deploy_key"
+      - name: 触发 pull-and-restart
+        env:
+          OBS_DEPLOY_HOST: ${{ secrets.OBS_DEPLOY_HOST }}
+          OBS_DEPLOY_PORT: ${{ secrets.OBS_DEPLOY_PORT }}
+          OBS_DEPLOY_USER: ${{ secrets.OBS_DEPLOY_USER }}
+          AGENT_CHANGED: ${{ needs.changes.outputs.agent }}
+        run: |
+          set -euo pipefail
+          ssh_base=(-i "$HOME/obs_deploy_key" -p "$OBS_DEPLOY_PORT" \
+            -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
+            -o ConnectTimeout=15 -o ServerAliveInterval=15)
+          for attempt in 1 2 3; do
+            if ssh "${ssh_base[@]}" "$OBS_DEPLOY_USER@$OBS_DEPLOY_HOST" \
+              "bash /opt/observatory/deploy/pull-and-restart.sh ${{ github.sha }} $AGENT_CHANGED"; then
+              exit 0
+            fi
+            echo "部署脚本失败（第 $attempt/3 次）" >&2
+            sleep 10
+          done
+          exit 1

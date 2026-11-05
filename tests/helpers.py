@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -14,9 +15,12 @@ from typing import Iterator
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SERVER_DIR = REPO_ROOT / "server"
 
-#: 测试用固定环境（全部是测试值，不是生产凭据）
-TEST_SECRET_KEY = "test-secret-key-0123456789abcdef0123456789"
-TEST_ADMIN_PASSWORD = "test-admin-password"
+#: 测试用环境凭据：**运行时随机生成**，不是生产凭据，也不落脚面字符串
+#: （Mimosa 卫生扫描：硬编码凭据模式一律拒绝）。同一 pytest 进程内所有
+#: 导入方拿到同一份值；Settings/env 消费方从不依赖具体字面量。
+_SESSION_SEED = secrets.token_hex(16)
+TEST_SECRET_KEY = f"test-key-{_SESSION_SEED}"
+TEST_ADMIN_PASSWORD = f"test-admin-{_SESSION_SEED}"
 TEST_CONSOLE_HOST = "control.example.test"
 TEST_AGENT_HOSTS = "agent.example.test"
 

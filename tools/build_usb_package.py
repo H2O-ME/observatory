@@ -32,10 +32,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import shutil
+import socket
 import sys
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -43,9 +46,50 @@ ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = ROOT / "server" / "observatory" / "templates" / "install.ps1"
 DEFAULT_BASE_URL = "https://control.tianhw.top"
 
+#: ``--allow-private``（离线内网控制台场景）在 main() 里置位。
+_ALLOW_PRIVATE = False
+
+
+def _validated(url: str) -> str:
+    """请求前的 URL 边界校验：协议白名单 + 解析后 IP 不得为私网/环回/链路本地。
+
+    引导响应里的 ``base_urls`` 来自服务器返回；校验保证异常/被篡改的响应不会把
+    制作机引向 ``file:``、内网或云元数据地址。``--allow-private`` 给现场内网
+    控制台留出口（URL 由运维显式提供，风险由运维承担）。
+    """
+
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError(f"拒绝请求非法 URL: {url!r}")
+    if parsed.username or parsed.password:
+        raise ValueError("拒绝带凭据的 URL")
+    if _ALLOW_PRIVATE:
+        return url
+    host = parsed.hostname or ""
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"无法解析主机 {host!r}") from exc
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+            raise ValueError(f"拒绝请求私网/保留地址 {ip}（内网控制台请加 --allow-private）")
+    return url
+
+
+class _GuardedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """重定向同样过协议/IP 边界校验（GitHub asset 下载依赖重定向，不能一刀切禁）。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, D102
+        return super().redirect_request(req, fp, code, msg, headers, _validated(newurl))
+
+
+_OPENER = urllib.request.build_opener(_GuardedRedirectHandler)
+
 
 def fetch_json(url: str) -> dict:
-    with urllib.request.urlopen(url, timeout=30) as response:
+    with _OPENER.open(_validated(url), timeout=30) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -54,7 +98,7 @@ def download(url: str, target: Path) -> str:
 
     digest = hashlib.sha256()
     tmp = target.with_suffix(target.suffix + ".part")
-    with urllib.request.urlopen(url, timeout=300) as response, tmp.open("wb") as handle:
+    with _OPENER.open(_validated(url), timeout=300) as response, tmp.open("wb") as handle:
         total = int(response.headers.get("Content-Length") or 0)
         received = 0
         started = time.monotonic()
@@ -185,7 +229,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="控制台地址（多线路从 bootstrap 自动取）")
     parser.add_argument("--version", default="", help="指定受控端版本（默认取服务器 latest）")
     parser.add_argument("--package", default="", help="直接用本地 zip，不下载（构建机没有网络时用）")
+    parser.add_argument(
+        "--allow-private",
+        action="store_true",
+        help="允许目标为内网/环回地址（现场内网控制台用；默认拒绝，防 SSRF）",
+    )
     args = parser.parse_args(argv)
+    global _ALLOW_PRIVATE
+    _ALLOW_PRIVATE = bool(args.allow_private)
 
     base = args.base_url.rstrip("/")
     dest = Path(args.dest)

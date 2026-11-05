@@ -35,6 +35,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import ssl
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
@@ -93,6 +94,8 @@ WS_CLOSE_RATE_LIMITED: Final[int] = 4429
 
 #: WS 失败后的重连退避序列；最后一项封顶重复使用。
 RECONNECT_DELAYS_S: Final[tuple[float, ...]] = (2, 5, 10, 20, 30, 60, 120)
+#: 单条控制帧的最长等待（0.3.16）：超过即视为拥塞丢帧，绝不拖住链路循环。
+CTRL_SEND_TIMEOUT_S: Final[float] = 8.0
 #: HTTP 载体稳定后向上探测 WS 的间隔：120s 起 ×2，封顶 1800s。
 PROBE_BASE_S: Final[float] = 120.0
 PROBE_MAX_S: Final[float] = 1800.0
@@ -394,6 +397,13 @@ class Link:
         self._closed = False
         self._carrier: str | None = None
         self._ws: Any = None
+        #: 控制帧积压合并（0.3.16）：上行带宽小于帧率时，逐帧 ``await ws.send``
+        #: 会把 keepalive pong 堵在 TCP 队列里 >20s，服务端按 ping 超时踢掉整条
+        #: WS（真机 1011 keepalive ping timeout → 控制流断 + 降级轮询）。改为
+        #: 每会话单槽最新帧 + 独立写任务：拥塞时丢旧帧保新帧，发送带超时上限。
+        self._ctrl_pending: dict[str, bytes] = {}
+        self._ctrl_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._ctrl_dropped = 0
         self._last_error = ""
         self._server_version = ""
         self._unknown_messages = 0
@@ -614,6 +624,13 @@ class Link:
 
         控制流是载体能力而不是协议语义：服务端在设备只有 HTTP 载体时不会下发
         ``control``，所以这里只记 debug 并拒绝，不排队、不改变链路状态。
+
+        0.3.16：本方法**不再直接 ``await ws.send``**。真机事故——上行带宽低于
+        帧率产出时，逐帧同步发送让 keepalive pong 排在帧数据后面 >20s，服务端
+        以 ``1011 keepalive ping timeout`` 踢掉整条 WS，控制流随之中断、设备
+        降级轮询。改为单槽最新帧 + 独立写任务：拥塞时丢旧帧保新帧（画面新鲜度
+        优先于帧数），写任务带超时上限，绝不拖住链路循环。返回 ``True`` 表示
+        "已接受入队"（拥塞丢弃计入计数）。
         """
 
         ws = self._ws
@@ -622,14 +639,49 @@ class Link:
             return False
         now_ms = int(ts_ms) if ts_ms is not None else self._clock.device_now_ms()
         blob = encode_binary({"t": "ctrl", "session": str(session), "ts_ms": now_ms}, payload)
+        if session in self._ctrl_pending:
+            # 上一帧还在路上：用最新帧替换陈旧帧（画面只该看到最后一帧）。
+            self._ctrl_dropped += 1
+            if self._ctrl_dropped % 40 == 1:
+                log.warning("控制流拥塞，丢弃过期帧累计 %s（保最新帧）", self._ctrl_dropped)
+        self._ctrl_pending[session] = blob
+        task = self._ctrl_tasks.get(session)
+        if task is None or task.done():
+            task = asyncio.create_task(self._ctrl_writer(session), name=f"observatory-ctrl-{session[:8]}")
+            self._ctrl_tasks[session] = task
+        return True
+
+    async def _ctrl_writer(self, session: str) -> None:
+        """会话控制帧写任务：串行发送最新帧，带超时；断开/载体切换时自清。"""
+
         try:
-            await ws.send(blob)
-            return True
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - 帧丢失只影响实时画面，链路会自愈
-            log.warning("控制帧发送失败 session=%s: %s", session, exc)
-            return False
+            while True:
+                blob = self._ctrl_pending.pop(session, None)
+                if blob is None:
+                    return
+                ws = self._ws
+                if ws is None or self._carrier != "ws":
+                    self._ctrl_dropped += 1
+                    return
+                try:
+                    await asyncio.wait_for(ws.send(blob), timeout=CTRL_SEND_TIMEOUT_S)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - 帧丢失只影响实时画面，链路会自愈
+                    self._ctrl_dropped += 1
+                    log.warning("控制帧发送失败 session=%s: %s", session, exc)
+                    return
+        finally:
+            self._ctrl_pending.pop(session, None)
+            self._ctrl_tasks.pop(session, None)
+
+    def _reset_control_senders(self) -> None:
+        """载体切换/断开时清掉在途控制帧与写任务（0.3.16）。"""
+
+        self._ctrl_pending.clear()
+        for task in list(self._ctrl_tasks.values()):
+            task.cancel()
+        self._ctrl_tasks.clear()
 
     def enqueue_frame(
         self,
@@ -676,9 +728,19 @@ class Link:
 
         if not version:
             raise LinkBadRequest("下载安装包缺少版本号")
+        # 路径穿越防护（Mimosa）：version 来自服务端下行，进 URL 与本地文件名前
+        # 必须过严格白名单（只认 x.y.z），畸形值直接拒绝而不是拼进路径。
+        if not re.fullmatch(r"\d+\.\d+\.\d+", str(version)):
+            raise LinkBadRequest(f"非法安装包版本号: {version!r}")
         target = Path(destination)
+        if ".." in target.parts:
+            raise LinkBadRequest("安装包目标路径非法（含 .. 段）")
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_suffix(target.suffix + ".part")
+        base_dir = target.parent.resolve()
+        temporary = temporary.resolve()
+        if not temporary.is_relative_to(base_dir):
+            raise LinkBadRequest("安装包临时文件越出目标目录")
         response = await self._request(
             "GET", f"/api/v1/public/agent/{version}/package", timeout=300.0
         )
@@ -865,6 +927,7 @@ class Link:
                 await self._ws_receive_once(ws)
         finally:
             self._ws = None
+            self._reset_control_senders()
             await self._close_ws(ws)
             if self._carrier == "ws":
                 self._set_carrier(None, "websocket 断开")

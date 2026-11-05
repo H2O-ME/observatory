@@ -81,7 +81,7 @@ async def _table_names(conn: AsyncConnection) -> set[str]:
 
 
 async def _column_names(conn: AsyncConnection, table: str) -> set[str]:
-    result = await conn.execute(text(f'PRAGMA table_info("{table}")'))
+    result = await conn.execute(text("SELECT * FROM pragma_table_info(:t)"), {"t": table})
     return {str(row[1]) for row in result.fetchall()}
 
 
@@ -91,10 +91,12 @@ async def _read_schema_version(conn: AsyncConnection) -> int:
     return int(value) if value is not None else 0
 
 
-async def _ensure_column(conn: AsyncConnection, table: str, name: str, ddl: str) -> None:
+async def _ensure_column(conn: AsyncConnection, table: str, name: str, alter_sql: str) -> None:
+    """幂等补列：存在性检查走 bind 参数，DDL 为迁移源码里的完整字面量（无拼接）。"""
+
     if name in await _column_names(conn, table):
         return
-    await conn.execute(text(f'ALTER TABLE "{table}" ADD COLUMN "{name}" {ddl}'))
+    await conn.execute(text(alter_sql))
     log.info("migrating: %s.%s added", table, name)
 
 
@@ -206,12 +208,12 @@ async def _migration_v1_baseline(conn: AsyncConnection) -> None:
 async def _migration_v2_link_v3(conn: AsyncConnection) -> None:
     """0.3.0 link/protocol columns and the two new state tables."""
 
-    await _ensure_column(conn, "devices", "boot_id", "VARCHAR(64) NOT NULL DEFAULT ''")
-    await _ensure_column(conn, "devices", "protocol", "INTEGER NOT NULL DEFAULT 2")
+    await _ensure_column(conn, "devices", "boot_id", "ALTER TABLE devices ADD COLUMN boot_id VARCHAR(64) NOT NULL DEFAULT ''")
+    await _ensure_column(conn, "devices", "protocol", "ALTER TABLE devices ADD COLUMN protocol INTEGER NOT NULL DEFAULT 2")
 
-    await _ensure_column(conn, "frames", "device_ts_ms", "BIGINT")
-    await _ensure_column(conn, "frames", "frame_id", "VARCHAR(64)")
-    await _ensure_column(conn, "frames", "archived_at_ms", "BIGINT")
+    await _ensure_column(conn, "frames", "device_ts_ms", "ALTER TABLE frames ADD COLUMN device_ts_ms BIGINT")
+    await _ensure_column(conn, "frames", "frame_id", "ALTER TABLE frames ADD COLUMN frame_id VARCHAR(64)")
+    await _ensure_column(conn, "frames", "archived_at_ms", "ALTER TABLE frames ADD COLUMN archived_at_ms BIGINT")
     await conn.execute(
         text(
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_frames_device_frame "
@@ -219,9 +221,9 @@ async def _migration_v2_link_v3(conn: AsyncConnection) -> None:
         )
     )
 
-    await _ensure_column(conn, "commands", "error_code", "VARCHAR(32)")
-    await _ensure_column(conn, "commands", "attempts", "INTEGER NOT NULL DEFAULT 0")
-    await _ensure_column(conn, "commands", "deadline_ms", "INTEGER")
+    await _ensure_column(conn, "commands", "error_code", "ALTER TABLE commands ADD COLUMN error_code VARCHAR(32)")
+    await _ensure_column(conn, "commands", "attempts", "ALTER TABLE commands ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+    await _ensure_column(conn, "commands", "deadline_ms", "ALTER TABLE commands ADD COLUMN deadline_ms INTEGER")
 
     await conn.execute(
         text(
@@ -368,9 +370,9 @@ async def _migration_v6_install_tickets(conn: AsyncConnection) -> None:
     ``max_uses = 0`` 表示不限、``expires_at_ms = 0`` 表示长期有效。
     """
 
-    await _ensure_column(conn, "install_tokens", "used_count", "INTEGER NOT NULL DEFAULT 0")
-    await _ensure_column(conn, "install_tokens", "last_used_at_ms", "BIGINT NULL")
-    await _ensure_column(conn, "install_tokens", "revoked_at_ms", "BIGINT NULL")
+    await _ensure_column(conn, "install_tokens", "used_count", "ALTER TABLE install_tokens ADD COLUMN used_count INTEGER NOT NULL DEFAULT 0")
+    await _ensure_column(conn, "install_tokens", "last_used_at_ms", "ALTER TABLE install_tokens ADD COLUMN last_used_at_ms BIGINT NULL")
+    await _ensure_column(conn, "install_tokens", "revoked_at_ms", "ALTER TABLE install_tokens ADD COLUMN revoked_at_ms BIGINT NULL")
     await conn.execute(
         text(
             """
@@ -478,7 +480,7 @@ async def _migration_v8_command_history(conn: AsyncConnection) -> None:
     ``device_uid`` backfill cannot leave empty values behind.
     """
 
-    await _ensure_column(conn, "devices", "purge_pending_at_ms", "BIGINT NULL")
+    await _ensure_column(conn, "devices", "purge_pending_at_ms", "ALTER TABLE devices ADD COLUMN purge_pending_at_ms BIGINT NULL")
 
     columns = await _column_names(conn, "commands")
     if "device_uid" in columns:
@@ -633,8 +635,8 @@ async def _migration_v10_purge_intent(conn: AsyncConnection) -> None:
     的行；v9 之前只有"已卸载后的自动清理"会置标记，所以回填值是可确定的。
     """
 
-    await _ensure_column(conn, "devices", "purge_reason", "VARCHAR(32) NULL")
-    await _ensure_column(conn, "devices", "purge_remote", "INTEGER NULL")
+    await _ensure_column(conn, "devices", "purge_reason", "ALTER TABLE devices ADD COLUMN purge_reason VARCHAR(32) NULL")
+    await _ensure_column(conn, "devices", "purge_remote", "ALTER TABLE devices ADD COLUMN purge_remote INTEGER NULL")
     await conn.execute(
         text(
             "UPDATE devices SET purge_reason = 'auto_after_uninstall', purge_remote = 1 "

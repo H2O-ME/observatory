@@ -156,12 +156,14 @@ def test_n3_migrates_legacy_schema_with_backup(tmp_dir) -> None:
     from observatory.core.config import Settings
     from observatory.core.db import SCHEMA_VERSION, Database
 
+    from tests.helpers import TEST_ADMIN_PASSWORD, TEST_SECRET_KEY
+
     database_path = tmp_dir / "observatory.db"
     _seed_legacy_database(database_path)
     settings = Settings(
         data_dir=tmp_dir,
-        secret_key="test-secret-key-0123456789abcdef0123456789",
-        admin_password="test-admin-password",
+        secret_key=TEST_SECRET_KEY,
+        admin_password=TEST_ADMIN_PASSWORD,
     )
     database = Database(settings)
 
@@ -198,7 +200,7 @@ def test_n3_migrates_legacy_schema_with_backup(tmp_dir) -> None:
         )
 
         for table, columns in legacy_db.EXPECTED_NEW_COLUMNS.items():
-            existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+            existing = {row[1] for row in connection.execute("SELECT * FROM pragma_table_info(?)", (table,))}
             missing = set(columns) - existing
             assert not missing, f"{table} 缺少新列 {missing}"
         frame_columns = {row[1] for row in connection.execute("PRAGMA table_info(frames)")}
@@ -237,12 +239,14 @@ def test_migration_failure_restores_backup(tmp_dir) -> None:
     from observatory.core.config import Settings
     from observatory.core.db import Database, Migration, MigrationError
 
+    from tests.helpers import TEST_ADMIN_PASSWORD, TEST_SECRET_KEY
+
     database_path = tmp_dir / "observatory.db"
     _seed_legacy_database(database_path, devices=3, frames=5)
     settings = Settings(
         data_dir=tmp_dir,
-        secret_key="test-secret-key-0123456789abcdef0123456789",
-        admin_password="test-admin-password",
+        secret_key=TEST_SECRET_KEY,
+        admin_password=TEST_ADMIN_PASSWORD,
     )
 
     async def broken_migration(_conn) -> None:

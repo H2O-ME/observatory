@@ -79,4 +79,6 @@ USER observatory
 # 0.3.1（F45/F16）：转发信任网段可经 .env 覆盖（默认收窄场景写 172.18.0.1）；
 # --timeout-graceful-shutdown 15 与 compose 的 stop_grace_period: 30s 配合，
 # 让 20s 长轮询在途连接先收到正常断连而不是 SIGKILL。
-CMD ["sh", "-c", "uvicorn observatory.main:app --host 0.0.0.0 --port 8443 --ssl-keyfile /certs/server.key --ssl-certfile /certs/server.crt --proxy-headers --forwarded-allow-ips \"${OBS_FORWARDED_ALLOW_IPS:-127.0.0.1,172.16.0.0/12}\" --timeout-graceful-shutdown 15 --no-server-header"]
+# 0.3.16：ws ping 放宽到 30/60——默认 20/20 在弱上行（学校 NAT）+ 实时控制流下
+# 会被帧数据的 TCP 排队堵住 pong，真机 1011 keepalive ping timeout 断链。
+CMD ["sh", "-c", "uvicorn observatory.main:app --host 0.0.0.0 --port 8443 --ssl-keyfile /certs/server.key --ssl-certfile /certs/server.crt --proxy-headers --forwarded-allow-ips \"${OBS_FORWARDED_ALLOW_IPS:-127.0.0.1,172.16.0.0/12}\" --ws-ping-interval 30 --ws-ping-timeout 60 --timeout-graceful-shutdown 15 --no-server-header"]

@@ -187,7 +187,11 @@ def spawn_purge_helper(
         | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         | getattr(subprocess, "CREATE_NO_WINDOW", 0)
     )
-    log_path = staged.parent / f"{staged.name}.log"
+    if ".." in staged.parts:
+        raise UninstallError("staging 路径非法（含 .. 段）", step="spawn_purge_helper")
+    log_path = (staged.parent / f"{staged.name}.log").resolve()
+    if not log_path.is_relative_to(staged.parent.resolve()):
+        raise UninstallError("helper 日志路径越出 staging", step="spawn_purge_helper")
     try:
         with open(log_path, "wb") as log_file:
             process = spawn(

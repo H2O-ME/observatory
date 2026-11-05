@@ -914,7 +914,11 @@ def check_uninstall_staging(ctx: Ctx) -> str:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(staged)
     env["OBS_PROGRAM_DATA"] = str(data_dir)
-    log_path = root / "helper.log"
+    if ".." in Path(root).parts:
+        raise RuntimeError("smoke 根目录路径非法（含 .. 段）")
+    log_path = (root / "helper.log").resolve()
+    if not log_path.is_relative_to(Path(root).resolve()):
+        raise RuntimeError("helper 日志路径越出 smoke 根目录")
     child: subprocess.Popen[bytes] | None = None
     doc_pid = 0
     try:

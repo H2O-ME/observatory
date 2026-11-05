@@ -1,0 +1,902 @@
+"""受控端配置、路径、身份、时钟偏置与线程安全存储。
+
+与 0.2.10 的 ``config.py`` 相比，这一份把三件事收干净：
+
+1. **域名只在这个模块定义**（规格 A23）：``DEFAULT_BASE_URLS`` 是仓库里唯一的
+   默认域名常量；其余模块（``link``/``main``）一律从配置读，不再自己写死
+   （旧代码在 ``config.py:32`` 与 ``client.py:50`` 各写了一份）。
+2. **配置项要么生效要么不存在**（C8）：``DEFAULT_SETTINGS`` 只列受控端真正
+   消费的键；``poll_interval_s``（HTTP 载体轮询间隔）、``transport_reprobe_s``
+   （向上探测起始间隔）、``capture_scope``（采集哪个会话）都各有唯一消费者，
+   0.2.10 的 ``ws_enabled`` 这类安慰剂开关不再出现（载体选优由
+   ``core/link.py`` 的退避状态机负责，不再是可以配错的开关）。
+3. **时钟单一来源**（C5 的受控端侧）：``Clock`` 用服务端 ``server_time_ms``
+   校准出 ``device_time_offset_ms``；所有上行时间字段统一叫 ``device_time_ms``。
+
+纯逻辑部分（``compute_device_time_offset``）不读系统时钟，时间从参数注入；
+只有 ``Clock.device_now_ms`` / ``AgentConfig.load`` 这类 IO/运行时便利方法会
+读本机时钟。
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import secrets
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from .outbox import OVERFLOW_POLICIES, OutboxLimits
+
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------- identity ---
+PRODUCT = "Observatory"
+SERVICE_NAME = "ObservatoryAgent"
+SERVICE_DISPLAY_NAME = "Observatory 受控端"
+SERVICE_DESCRIPTION = "Observatory 受控端：按授权采集画面并接受控制台指令。"
+PIPE_PREFIX = r"\\.\pipe\observatory-agent"
+CONFIG_FILENAME = "config.json"
+
+#: 协议默认域名。**全仓库只允许出现这一次**（A23）；安装脚本通过
+#: ``OBS_BASE_URLS`` 注入线路，注册成功后服务端下发的 ``base_urls`` 覆盖它。
+_BUILTIN_BASE_URLS: tuple[str, ...] = ("https://control.tianhw.top", "https://observatory.123423.xyz")
+
+
+def _split_urls(raw: str) -> list[str]:
+    """按逗号/分号/空白拆分多线路；空段丢弃，去尾部斜杠。"""
+
+    normalized = raw.replace(";", ",").replace("\n", ",").replace(" ", ",")
+    return [item.strip().rstrip("/") for item in normalized.split(",") if item.strip()]
+
+
+def default_base_urls() -> list[str]:
+    """默认线路：环境变量注入优先，其次构建期内置值。
+
+    ``OBS_BASE_URLS`` 由安装脚本/运维人员给出（换域名不需要重新打受控端包）；
+    注册成功后以服务端返回的 ``base_urls`` 为准。
+    """
+
+    injected = os.environ.get("OBS_BASE_URLS", "")
+    urls = _split_urls(injected)
+    if urls:
+        return urls
+    return list(_BUILTIN_BASE_URLS)
+
+
+DEFAULT_BASE_URLS: tuple[str, ...] = _BUILTIN_BASE_URLS
+
+
+# ------------------------------------------------------------------ paths ---
+def program_data_dir() -> Path:
+    override = os.environ.get("OBS_PROGRAM_DATA", "").strip()
+    if override:
+        return Path(override)
+    root = os.environ.get("ProgramData") or os.environ.get("ALLUSERSPROFILE") or r"C:\ProgramData"
+    return Path(root) / PRODUCT
+
+
+def install_dir() -> Path:
+    """本构建所在目录：exe 与 ``_internal`` 的父目录。
+
+    PyInstaller onedir 布局下 ``Path(__file__).parent.parent`` 会落到 ``_internal``
+    里（0.2.10 因此有过一次"更新把 _internal 换掉、服务再也起不来"的事故），
+    冻结后必须从 ``sys.executable`` 反推。``OBS_INSTALL_DIR`` 供测试/调试覆盖。
+    """
+
+    override = os.environ.get("OBS_INSTALL_DIR", "").strip()
+    if override:
+        return Path(override)
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent.parent
+
+
+PROGRAM_DATA: Path = program_data_dir()
+LOG_DIR: Path = PROGRAM_DATA / "logs"
+STAGING_DIR: Path = PROGRAM_DATA / "staging"
+CONFIG_PATH: Path = PROGRAM_DATA / CONFIG_FILENAME
+
+
+def fallback_config_path() -> Path:
+    """主配置不可写时的兜底位置：安装目录（与 exe 同目录）。
+
+    ProgramData 的 DACL/杀毒锁定可能让 config.json 永远写不进去；安装目录
+    由安装器以提权身份创建、swap 每次更新都在那里成功写文件，SYSTEM 必可写。
+    """
+
+    override = os.environ.get("OBS_INSTALL_DIR", "").strip()
+    if override:
+        return Path(override) / "observatory-config.json"
+    return install_dir() / "observatory-config.json"
+INSTALL_DIR: Path = install_dir()
+
+
+def outbox_path() -> Path:
+    """持久化 outbox 的 sqlite 文件（W1：进程被杀后未确认上行可续传）。
+
+    ``OBS_OUTBOX_PATH`` 供测试/多实例隔离；默认落在数据目录，随卸载清理。
+    """
+
+    override = os.environ.get("OBS_OUTBOX_PATH", "").strip()
+    if override:
+        return Path(override)
+    return PROGRAM_DATA / "outbox.sqlite3"
+
+
+OUTBOX_PATH: Path = outbox_path()
+
+
+def worker_log_dir() -> Path:
+    """worker 进程的日志目录：必须**登录用户可写**（A2）。
+
+    服务数据目录被收紧到 SYSTEM+Administrators 之后，用登录用户令牌启动的
+    worker 再往 ``%ProgramData%`` 写日志就会 PermissionError（日志建不起来 →
+    worker 启动即失败）。``%LOCALAPPDATA%`` 属于该用户会话，而 SYSTEM 仍可读，
+    因此它同时满足"用户能写"与"服务端 log_tail 能读"。
+    """
+
+    base = os.environ.get("LOCALAPPDATA", "").strip() or os.environ.get("USERPROFILE", "").strip()
+    if base:
+        return Path(base) / PRODUCT / "logs"
+    # 极端兜底（会话环境块异常时）：临时目录至少可用，且同样在 ProgramData 之外。
+    return Path(os.environ.get("TEMP") or ".") / f"{PRODUCT}-logs"
+
+
+def is_production_path(path: Path) -> bool:
+    """该路径是否位于真实生产数据目录（决定要不要动 ACL）。
+
+    ACL 加固只对**真实现场**有意义：测试/便携目录（``OBS_PROGRAM_DATA`` 覆盖）
+    里收 DACL 只会把跑测试的当前用户锁在外面（``save()`` 的 ``os.replace``
+    直接 PermissionError）。这也是 ``ensure_dirs`` 一直以来的边界，A2 把它抽成
+    一个函数，让配置写入路径共用同一判据。
+    """
+
+    if os.environ.get("OBS_PROGRAM_DATA", "").strip():
+        return False
+    try:
+        return Path(path).resolve().is_relative_to(PROGRAM_DATA.resolve())
+    except OSError:  # 路径解析失败时按"非生产"处理，宁可少加固也不能锁死写者
+        return False
+
+
+def ensure_dirs() -> None:
+    """创建数据目录并收紧 ACL。**只供服务/安装器/更新助手调用**（A2）。
+
+    worker 用登录用户令牌运行，不能也不该碰 ``%ProgramData%``：它通过管道从
+    服务进程接收非敏感设置（``runtime.WorkerRuntime``），日志写
+    :func:`worker_log_dir`。
+    """
+
+    for path in (PROGRAM_DATA, LOG_DIR, STAGING_DIR):
+        path.mkdir(parents=True, exist_ok=True)
+    _harden_acl(PROGRAM_DATA)
+
+
+#: 敏感路径的 ACL 授权表：只有 SYSTEM 与 Administrators（A2）。
+#: 设备令牌、outbox、staging（更新包）都在这里，普通用户一个字节都不能读。
+SENSITIVE_ACL_GRANTS: tuple[str, ...] = (
+    "SYSTEM:(OI)(CI)F",
+    "Administrators:(OI)(CI)F",
+)
+
+
+def acl_grants(*, allow_owner: bool = False) -> list[str]:
+    """构造 ``icacls`` 授权表（纯函数，便于单测）。
+
+    默认**不**把当前用户放进 DACL——这正是 A2 的要求：令牌/outbox 由 SYSTEM
+    独占。``allow_owner=True`` 只留给"非提权的调试/诊断需要自写目录"这一种
+    情形，生产路径（服务、安装器、更新/卸载助手）一律不提权用户。
+    """
+
+    grants = list(SENSITIVE_ACL_GRANTS)
+    if allow_owner:
+        user = os.environ.get("USERNAME", "").strip()
+        if user and user.lower() != "system":
+            grants.append(f"{user}:(OI)(CI)F")
+    return grants
+
+
+def _harden_acl(path: Path, *, allow_owner: bool = False) -> None:
+    """P1（2026-10 审查）：收紧数据目录/配置的 DACL 到 SYSTEM+Administrators。
+
+    ProgramData 子目录继承的默认 ACL 允许本地 Users 读取；config.json 里躺着
+    设备令牌与准入密钥——任意本地用户可窃取令牌冒充受控端。用系统自带的
+    ``icacls`` 去继承并显式授权（零新依赖；服务以 SYSTEM 运行有权限改自己目录
+    的 ACL）。失败只告警：ACL 加固是纵深防御，不能阻断主流程。
+
+    A2（2026-10 审查）：**不再**默认把当前交互用户放进 DACL。旧版这么做是为了
+    让非提权 CLI 还能写配置，代价是普通用户对整棵数据目录有 F——等于把设备
+    令牌公开给本机任何登录用户。改为：
+      * 敏感路径（数据目录、config.json、outbox、staging）只有 SYSTEM+Admins；
+      * worker 不再读写这些路径（设置走管道、日志走 :func:`worker_log_dir`）；
+      * 非提权调试只能用 ``OBS_PROGRAM_DATA`` 指到自建目录。
+
+    两个刻意的边界（win_smoke 的 uninstall_staging 曾被第一版锁死）：
+      * 只对真实生产目录（无 OBS_PROGRAM_DATA 覆盖、位于系统 ProgramData 下）
+        生效——测试/便携目录跳过；
+      * ``allow_owner`` 显式保留调用者（仅少数调试入口使用）。
+    """
+
+    if os.name != "nt":
+        return
+    if not is_production_path(path):
+        return
+    grants = acl_grants(allow_owner=allow_owner)
+    try:
+        result = subprocess.run(
+            ["icacls", str(path), "/inheritance:r", "/grant:r", *grants],
+            capture_output=True,
+            timeout=15,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode != 0:
+            log.warning(
+                "icacls 收紧 %s 失败（rc=%s）：%s",
+                path,
+                result.returncode,
+                result.stderr.decode("mbcs", "replace").strip(),
+            )
+    except OSError as exc:
+        log.warning("icacls 不可用，跳过 ACL 收紧（%s）：%s", path, exc)
+
+
+# --------------------------------------------------------------- settings ---
+#: 受控端真正消费的默认值（C8）。服务端可以覆盖同名键；这里只是首启/离线兜底。
+#: 注意 ``jpeg_quality`` 默认 80：规格 N4 明确受控端出 JPEG q80 中间图，服务端
+#: 再转 WebP q75（0.2.10 的 ``capture.py`` 实际出的是 WebP，与文档不一致）。
+DEFAULT_SETTINGS: dict[str, Any] = {
+    "capture_enabled": True,
+    "capture_interval_s": 30,
+    "capture_on_change_only": False,
+    "capture_change_threshold": 8,
+    "jpeg_quality": 80,
+    "max_width": 1600,
+    "control_enabled": True,
+    "control_fps": 8,
+    "control_quality": 55,
+    "file_write_enabled": True,
+    "file_upload_max_mb": 512,
+    "auto_update": True,
+    "heartbeat_interval_s": 20,
+    #: A15：HTTP 载体两轮之间的间隔（也是长轮询的等待上限语义）。
+    "poll_interval_s": 5,
+    #: A15：HTTP 载体稳定后向上探测 WS 的起始间隔（CarrierPolicy）。
+    "transport_reprobe_s": 120,
+    #: A15：采集目标会话（"session" = 当前交互会话，"console" = 控制台会话）。
+    "capture_scope": "session",
+}
+
+#: 服务端配置里的敏感键（A4）。服务端本来就不该下发这些；受控端再挡一层，
+#: 保证即使服务端配置视图写错，令牌也不会落盘到 %ProgramData%。
+SECRET_KEYS: frozenset[str] = frozenset(
+    {"archive_token", "secret_key", "password", "github_token", "api_token"}
+)
+
+DEFAULT_HEARTBEAT_INTERVAL_S = 20
+MIN_HEARTBEAT_INTERVAL_S = 5
+MAX_HEARTBEAT_INTERVAL_S = 300
+
+
+# ------------------------------------------------------------- identifiers ---
+def new_device_uid() -> str:
+    """稳定的不透明设备标识：优先 MachineGuid，取不到时随机。
+
+    重装受控端后仍保持同一身份（令牌会轮换），服务端因此能识别"同一台机器"。
+    """
+
+    machine = _machine_guid()
+    if machine:
+        return f"OBS-{machine.replace('-', '').upper()[:12]}"
+    return f"OBS-{secrets.token_hex(6).upper()}"
+
+
+def _machine_guid() -> str:
+    try:
+        import winreg
+    except ImportError:
+        # 非 Windows（单测/诊断）环境没有 MachineGuid：随机身份即可。
+        return ""
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Cryptography",
+            0,
+            winreg.KEY_READ | getattr(winreg, "KEY_WOW64_64KEY", 0),
+        ) as key:
+            value, _ = winreg.QueryValueEx(key, "MachineGuid")
+            return str(value)
+    except OSError as exc:
+        log.info("读取 MachineGuid 失败（改用随机设备标识）: %s", exc)
+        return ""
+
+
+def new_boot_id() -> str:
+    """本次**进程**启动的标识。
+
+    A2 的验收是"重启后 boot_id 变化"，所以它必须每个进程新生成，绝不能从
+    config.json 里读回来（那样重启前后不变，测试与服务端都会误判）。
+    """
+
+    return uuid.uuid4().hex
+
+
+# ------------------------------------------------------------------ clock ---
+def compute_device_time_offset(
+    *, device_time_ms: int, server_time_ms: int, rtt_ms: int = 0
+) -> int:
+    """计算 ``device_time_offset_ms``（纯函数）。
+
+    定义：``device_time_offset_ms = device_time_ms - (server_time_ms + rtt/2)``。
+
+    - 设备时钟比服务端快 → 返回正数；
+    - 估计的当前服务端时间 = ``device_now_ms - device_time_offset_ms``；
+    - 减去半个 RTT 是为了把"服务端生成响应"与"设备收到响应"对齐（不追求
+      NTP 级精度，服务端另有 ``server_time_ms`` 兜底，受控端时间只用于展示与
+      超时预算）。
+    """
+
+    if not isinstance(device_time_ms, int) or isinstance(device_time_ms, bool) or device_time_ms <= 0:
+        raise ValueError(f"device_time_ms 非法：{device_time_ms!r}")
+    if not isinstance(server_time_ms, int) or isinstance(server_time_ms, bool) or server_time_ms <= 0:
+        raise ValueError(f"server_time_ms 非法：{server_time_ms!r}")
+    if not isinstance(rtt_ms, int) or isinstance(rtt_ms, bool) or rtt_ms < 0:
+        raise ValueError(f"rtt_ms 非法：{rtt_ms!r}")
+    return int(device_time_ms) - int(server_time_ms) - int(rtt_ms) // 2
+
+
+@dataclass
+class Clock:
+    """服务端时钟偏置（可观测、可持久化的一小块状态）。
+
+    ``observe`` 每次收到带 ``server_time_ms`` 的响应/信封都调用一次；只做单调
+    收敛，不让一次异常值把偏置永久带偏（超过 24 小时或 10 分钟的离谱跳变只
+    记日志并采用新值——单次采样无法判断谁错，服务端时间是唯一权威）。
+    """
+
+    device_time_offset_ms: int = 0
+    updated_at_ms: int = 0
+
+    def observe(self, *, device_time_ms: int, server_time_ms: int, rtt_ms: int = 0) -> int:
+        offset = compute_device_time_offset(
+            device_time_ms=device_time_ms, server_time_ms=server_time_ms, rtt_ms=rtt_ms
+        )
+        self.device_time_offset_ms = offset
+        self.updated_at_ms = int(device_time_ms)
+        return offset
+
+    def server_now_ms(self, device_time_ms: int) -> int:
+        """由设备当前时间估算服务端当前时间。"""
+
+        return int(device_time_ms) - int(self.device_time_offset_ms)
+
+    def device_now_ms(self) -> int:
+        """本机（设备）当前毫秒时间戳；仅运行时代码使用，纯逻辑走参数注入。"""
+
+        return int(time.time() * 1000)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "device_time_offset_ms": int(self.device_time_offset_ms),
+            "updated_at_ms": int(self.updated_at_ms),
+        }
+
+
+def outbox_limits_from_env() -> OutboxLimits:
+    """从环境变量读取 outbox 上限/策略（运维可调，默认保守）。
+
+    这是受控端本地策略，不属于服务端设置：服务端只关心"上行是否到达"，
+    不应该替每台设备决定缓冲区大小。
+    """
+
+    def _int(name: str, default: int) -> int:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            log.warning("环境变量 %s=%r 不是整数，使用默认 %s", name, raw, default)
+            return default
+
+    overflow = os.environ.get("OBS_OUTBOX_OVERFLOW", "").strip() or "drop_oldest"
+    if overflow not in OVERFLOW_POLICIES:
+        log.warning("环境变量 OBS_OUTBOX_OVERFLOW=%r 未知，使用 drop_oldest", overflow)
+        overflow = "drop_oldest"
+    return OutboxLimits(
+        max_items=_int("OBS_OUTBOX_MAX_ITEMS", 2048),
+        max_bytes=_int("OBS_OUTBOX_MAX_BYTES", 32 * 1024 * 1024),
+        overflow=overflow,
+    )
+
+
+# ----------------------------------------------------------------- config ---
+def _load_config_json(target: Path) -> dict[str, Any]:
+    """读取配置 JSON；损坏时隔离坏文件并尝试 ``.bak`` 恢复（F38）。
+
+    配置损坏静默清零 token 会让设备永久离线，所以这里不允许"仅 warning 后
+    继续跑"：坏文件改名隔离为 ``config.json.corrupt-<时间戳>``（保留取证），
+    再尝试从 ``config.json.bak`` 恢复；两者都不可用才落到默认值（此时 token
+    为空，链路会走重新注册，而不是拿着空令牌反复 401）。
+    """
+
+    try:
+        text = target.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        # OSError（文件被锁/ACL/瞬时 IO）不能静默清零：清零会丢 device token，
+        # 把设备打进 proof_required 死循环（2026-11-03 事故的候选根因之一）。
+        # 也不走 ``_restore_config_backup``（那会用 .bak 覆盖原文件——原文件可能
+        # 只是暂时读不了，覆盖会把最新一代配置降级回上一代）；这里只**读取**
+        # 备份内容作为本次的配置，原文件保持原样。
+        backup = target.with_name(target.name + ".bak")
+        log.error("读取配置失败（尝试直接读取备份，不覆盖原文件）%s: %s", target, exc)
+        try:
+            raw_bak: Any = json.loads(backup.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc_bak:
+            log.error("备份配置 %s 也不可用（%s），只能使用默认值（token 会丢失）", backup, exc_bak)
+            return {}
+        if not isinstance(raw_bak, dict):
+            log.error("备份配置 %s 不是 JSON 对象，只能使用默认值（token 会丢失）", backup)
+            return {}
+        log.warning("本次使用备份配置 %s 的内容（原文件未改动）", backup)
+        return raw_bak
+    try:
+        raw: Any = json.loads(text)
+    except ValueError as exc:
+        quarantined = _quarantine_config(target)
+        log.error("配置文件 JSON 解析失败（%s）: %s；坏文件已隔离为 %s", exc, target, quarantined)
+        if _restore_config_backup(target):
+            return _load_config_json(target)
+        return {}
+    if not isinstance(raw, dict):
+        quarantined = _quarantine_config(target)
+        log.error("配置文件不是 JSON 对象: %s；坏文件已隔离为 %s", target, quarantined)
+        if _restore_config_backup(target):
+            return _load_config_json(target)
+        return {}
+    return raw
+
+
+def _quarantine_config(target: Path) -> Path | None:
+    """把损坏的配置文件改名隔离（保留现场取证）；失败返回 None 并记日志。"""
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    quarantined = target.with_name(f"{target.name}.corrupt-{stamp}")
+    try:
+        target.replace(quarantined)
+    except OSError as exc:
+        log.error("隔离损坏的配置文件 %s 失败: %s", target, exc)
+        return None
+    return quarantined
+
+
+def _restore_config_backup(target: Path) -> bool:
+    """从 ``<name>.bak`` 恢复配置；成功返回 True。"""
+
+    backup = target.with_name(target.name + ".bak")
+    if not backup.is_file():
+        log.error("配置损坏且没有可用的备份 %s，只能使用默认值（token 会丢失）", backup)
+        return False
+    try:
+        text = backup.read_text(encoding="utf-8")
+        raw = json.loads(text)
+    except (OSError, ValueError) as exc:
+        log.error("备份配置 %s 也不可用（%s），放弃恢复", backup, exc)
+        return False
+    if not isinstance(raw, dict):
+        log.error("备份配置 %s 不是 JSON 对象，放弃恢复", backup)
+        return False
+    try:
+        target.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        log.error("从备份恢复配置 %s 失败: %s", target, exc)
+        return False
+    log.warning("配置已从备份 %s 恢复", backup)
+    return True
+
+
+@dataclass
+class AgentConfig:
+    """落盘配置；``boot_id`` 是**运行时**字段，每次加载都重新生成。"""
+
+    device_uid: str = ""
+    token: str = ""
+    base_urls: list[str] = field(default_factory=default_base_urls)
+    server_version: str = ""
+    settings: dict[str, Any] = field(default_factory=dict)
+    last_server_time_ms: int = 0
+    device_time_offset_ms: int = 0
+    protocol: int = 3
+    boot_id: str = field(default_factory=new_boot_id)
+    #: A4：部署准入密钥（服务端 ``OBS_ENROLL_KEY``）。空 = 服务端开放注册，
+    #: 请求体里**绝不出现** ``code`` 字段（零凭据语义，不能把旧票据带回来）。
+    enroll_key: str = ""
+
+    # -- persistence -----------------------------------------------------
+    @classmethod
+    def load(cls, path: Path | None = None) -> "AgentConfig":
+        target = path or CONFIG_PATH
+        raw = _load_config_json(target)
+
+        # 2026-11-05 真机事故兜底：主路径（ProgramData）写不进的机器上，
+        # save 失败会把完整配置写到安装目录的 fallback 文件。主配置缺 token
+        # 或准入码时从这里回补——否则一次失败的更新重启就让设备永久失忆。
+        if not str(raw.get("token") or "") or not str(raw.get("enroll_key") or ""):
+            try:
+                fallback_raw = _load_config_json(fallback_config_path())
+                if isinstance(fallback_raw, dict) and fallback_raw:
+                    for key in ("token", "enroll_key", "device_uid"):
+                        if not str(raw.get(key) or "") and fallback_raw.get(key):
+                            raw[key] = fallback_raw[key]
+                    if not raw.get("base_urls") and fallback_raw.get("base_urls"):
+                        raw["base_urls"] = fallback_raw["base_urls"]
+            except Exception as exc:  # noqa: BLE001 - 兜底路径绝不能阻断启动
+                log.warning("读取 fallback 配置失败（忽略）：%s", exc)
+
+        urls = _split_urls(",".join(str(item) for item in raw.get("base_urls") or []))
+        settings = raw.get("settings")
+        # 兼容 0.2.10 的键名：升级时旧 config.json 原样还在，不能因此丢时钟偏置。
+        offset = raw.get("device_time_offset_ms", raw.get("clock_offset_ms", 0))
+        config = cls(
+            device_uid=str(raw.get("device_uid") or ""),
+            token=str(raw.get("token") or ""),
+            base_urls=urls or default_base_urls(),
+            server_version=str(raw.get("server_version") or ""),
+            settings=dict(settings) if isinstance(settings, Mapping) else {},
+            last_server_time_ms=_as_int(raw.get("last_server_time_ms")),
+            device_time_offset_ms=_as_int(offset),
+            protocol=3,
+            # boot_id 故意不从文件读：它必须每个进程不同（A2）。
+            boot_id=new_boot_id(),
+            enroll_key=resolve_enroll_key(raw.get("enroll_key")),
+        )
+        if not config.device_uid:
+            config.device_uid = new_device_uid()
+        return config
+
+    def save(self, path: Path | None = None) -> None:
+        """原子写配置；成功后轮转一份 ``.bak``（F38：load 侧损坏恢复的数据源）。"""
+
+        target = path or CONFIG_PATH
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "device_uid": self.device_uid,
+            "token": self.token,
+            "base_urls": list(self.base_urls),
+            "server_version": self.server_version,
+            "settings": self.settings,
+            "last_server_time_ms": int(self.last_server_time_ms),
+            "device_time_offset_ms": int(self.device_time_offset_ms),
+            "protocol": 3,
+        }
+        # A4：只有真正配置了准入密钥才写进文件；键不存在 = 零凭据注册，
+        # 不会让旧机器因为"字段存在但为空"而改变行为。
+        if self.enroll_key:
+            payload["enroll_key"] = self.enroll_key
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
+        # F38：临时名带 pid——两个进程（服务 + CLI 诊断）同时 save 时，旧的
+        # 固定名 ".part" 会互相覆盖，产生"原子替换出来却是损坏文件"的竞态。
+        temporary = target.with_name(f"{target.name}.{os.getpid()}.part")
+        temporary.write_text(text, encoding="utf-8")
+        os.replace(temporary, target)
+        # P1（2026-10 审查）：这份文件含设备令牌/注册码，ProgramData 的默认
+        # 继承 ACL 允许本地 Users 读——save 后就地收紧到 SYSTEM+Administrators。
+        _harden_acl(target)
+        # F38：成功后轮转一份 .bak（load 阶段配置损坏时从这里恢复）。同样走
+        # ".part + os.replace" 保证备份文件本身也是原子的。
+        backup = target.with_name(target.name + ".bak")
+        backup_part = target.with_name(f"{target.name}.{os.getpid()}.bak.part")
+        try:
+            backup_part.write_text(text, encoding="utf-8")
+            os.replace(backup_part, backup)
+            _harden_acl(backup)
+        except OSError as exc:
+            log.warning("写入配置备份 %s 失败: %s", backup, exc)
+
+    # -- helpers ---------------------------------------------------------
+    def setting(self, key: str, default: Any = None) -> Any:
+        if key in self.settings:
+            return self.settings[key]
+        if key in DEFAULT_SETTINGS:
+            return DEFAULT_SETTINGS[key]
+        return default
+
+    def sanitized_settings(self, values: Mapping[str, Any]) -> dict[str, Any]:
+        """剥掉敏感键并记日志（A4：配置 JSON 到设备侧也不许带密钥）。"""
+
+        return sanitize_settings(values)
+
+    def apply_server_config(
+        self,
+        values: Mapping[str, Any] | None,
+        *,
+        server_time_ms: int = 0,
+        device_time_ms: int | None = None,
+    ) -> bool:
+        """合并服务端配置；返回是否发生变化。敏感键在这里被剥掉。"""
+
+        if not isinstance(values, Mapping):
+            if values is not None:
+                log.warning("服务端配置不是对象，忽略：%r", type(values).__name__)
+            return False
+        cleaned = self.sanitized_settings(values)
+        changed = cleaned != self.settings
+        self.settings = cleaned
+        if server_time_ms > 0:
+            local_ms = device_time_ms if device_time_ms is not None else int(time.time() * 1000)
+            self.last_server_time_ms = int(server_time_ms)
+            self.device_time_offset_ms = compute_device_time_offset(
+                device_time_ms=local_ms, server_time_ms=int(server_time_ms)
+            )
+        return changed
+
+
+def resolve_enroll_key(value: Any = None) -> str:
+    """解析部署准入密钥（A4）：配置文件优先，其次 ``OBS_ENROLL_KEY`` 环境变量。
+
+    服务端只在**创建新设备行 / 重新准入已卸载设备**时校验它（见
+    ``server/observatory/console/enroll.py`` 的 ``_require_admission_key``）；
+    已有活跃设备的令牌轮换不校验，所以换 key 不会把在跑的机器踢下线。
+
+    返回空串表示"没有配置"——此时注册请求体里不得出现任何凭据字段，
+    保持 0.3.7 的零凭据语义（旧的 ``install_token`` 一次性票据已彻底删除）。
+    """
+
+    text = str(value or "").strip()
+    if text:
+        return text
+    return os.environ.get("OBS_ENROLL_KEY", "").strip()
+
+
+def sanitize_settings(values: Mapping[str, Any]) -> dict[str, Any]:
+    """剥掉敏感键并记日志（A4：配置 JSON 到设备侧也不许带密钥）。
+
+    纯函数：``AgentConfig.sanitized_settings`` 与 worker（只有管道设置、没有
+    config.json 的 :class:`AgentConfig` 实例）共用同一份实现，避免两套过滤
+    规则漂移。
+    """
+
+    cleaned: dict[str, Any] = {}
+    stripped: list[str] = []
+    for key, value in values.items():
+        if not isinstance(key, str):
+            log.warning("忽略非字符串配置键 %r", key)
+            continue
+        if key in SECRET_KEYS:
+            stripped.append(key)
+            continue
+        cleaned[key] = value
+    if stripped:
+        log.warning(
+            "服务端配置包含敏感键 %s，已在受控端脱落（服务端不应下发这些字段）",
+            sorted(stripped),
+        )
+    return cleaned
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+class ConfigStore:
+    """线程安全的配置/时钟门面（服务进程与辅助线程共享）。
+
+    ``config`` 返回的是**同一个可变对象**（与 0.2.10 行为一致），写入必须走
+    ``update`` / ``apply_server_config`` 以便加锁并落盘。
+    """
+
+    def __init__(self, path: Path | None = None) -> None:
+        self._path = path or CONFIG_PATH
+        self._lock = threading.RLock()
+        self._config = AgentConfig.load(self._path)
+        self._clock = Clock(device_time_offset_ms=self._config.device_time_offset_ms)
+        # 2026-11-04 事故：save 抛 OSError 时 token 只剩内存副本，服务一重启
+        # 设备就"失忆"（丢 token 也丢准入码 → proof_required 死循环）。此后
+        # 每次写时机（心跳 apply_server_config）都重试落盘，直到成功。
+        self._save_dirty = False
+
+    # -- reads -----------------------------------------------------------
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    @property
+    def config(self) -> AgentConfig:
+        with self._lock:
+            return self._config
+
+    @property
+    def clock(self) -> Clock:
+        return self._clock
+
+    def setting(self, key: str, default: Any = None) -> Any:
+        with self._lock:
+            return self._config.setting(key, default)
+
+    def settings_snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return dict(self._config.settings)
+
+    @property
+    def token(self) -> str:
+        with self._lock:
+            return self._config.token
+
+    def observe_server_time(self, *, server_time_ms: int, device_time_ms: int, rtt_ms: int = 0) -> int:
+        """用一次服务端时间采样校准偏置（只改内存，不在心跳里频繁写盘）。"""
+
+        if server_time_ms <= 0:
+            return self._clock.device_time_offset_ms
+        offset = self._clock.observe(
+            device_time_ms=device_time_ms, server_time_ms=server_time_ms, rtt_ms=rtt_ms
+        )
+        self._config.device_time_offset_ms = offset
+        return offset
+
+    # -- writes ----------------------------------------------------------
+    def update(self, **changes: Any) -> AgentConfig:
+        with self._lock:
+            for key, value in changes.items():
+                setattr(self._config, key, value)
+            self._save()
+            return self._config
+
+    def _save(self) -> None:
+        """落盘；失败标记 dirty（内存值已生效），由 flush() 在后续写时机重试。
+
+        这里**不能**把 OSError 再往上抛：enroll 响应已经收到、token 已经在
+        内存里生效，抛出去只会让调用方把"注册成功"当"注册失败"处理，而设备
+        下一次重启就永久失忆——那是比"暂时没落盘"严重得多的故障。
+        主路径失败时再写一份到安装目录的 fallback（swap 已证明 SYSTEM 一定
+        可写那里；AV 对 ProgramData 下含令牌文件的锁定不一定会波及安装目录），
+        AgentConfig.load 会从 fallback 回补 token/准入码。
+        """
+
+        try:
+            self._config.save(self._path)
+            # 0.3.12 真机铁案：这台机的 DACL 状态是"能写不能读"——os.replace
+            # 成功、文件也在，但下一次进程读它直接 PermissionError。只看 save
+            # 是否抛错完全不够，**必须读回校验**；读不回视同失败，走 fallback。
+            if self._config.token and not self._readback_ok():
+                raise OSError("config 写入后读回校验失败（能写不能读的 DACL 状态）")
+            if self._save_dirty:
+                log.warning("配置在重试后成功落盘")
+            self._save_dirty = False
+            return
+        except OSError as exc:
+            self._save_dirty = True
+            log.error(
+                "配置保存失败（token/设置仅在内存生效，将随心跳持续重试落盘）: %s", exc
+            )
+        self._write_fallback()
+
+    def _readback_ok(self) -> bool:
+        """保存后立即读回 config，确认本进程下一次启动能读到自己的 token。"""
+
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            log.error("读回 config.json 失败: %s", exc)
+            return False
+        return isinstance(raw, dict) and bool(str(raw.get("token") or ""))
+
+    def _write_fallback(self) -> None:
+        """主路径不可写时的最后防线：完整配置写进安装目录。失败只记日志。"""
+
+        target = fallback_config_path()
+        try:
+            payload = self._config
+            text = json.dumps(
+                {
+                    "device_uid": payload.device_uid,
+                    "token": payload.token,
+                    "enroll_key": payload.enroll_key,
+                    "base_urls": list(payload.base_urls),
+                    "server_version": payload.server_version,
+                    "settings": payload.settings,
+                    "last_server_time_ms": int(payload.last_server_time_ms),
+                    "device_time_offset_ms": int(payload.device_time_offset_ms),
+                    "protocol": 3,
+                    "fallback": True,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            target.write_text(text, encoding="utf-8")
+            log.warning("配置已写入 fallback %s（主路径持续不可写时设备靠它免于失忆）", target)
+        except OSError as exc:
+            log.error("fallback 配置也写不进 %s: %s", target, exc)
+
+    def flush(self) -> bool:
+        """dirty 时重试落盘；返回是否处于已保存状态。心跳循环每次调用。"""
+
+        with self._lock:
+            if not self._save_dirty:
+                return True
+            self._save()
+            return not self._save_dirty
+
+    def set_token(self, token: str) -> AgentConfig:
+        return self.update(token=str(token))
+
+    def set_base_urls(self, urls: list[str]) -> AgentConfig:
+        cleaned = _split_urls(",".join(str(url) for url in urls))
+        return self.update(base_urls=cleaned or default_base_urls())
+
+    def apply_server_config(
+        self,
+        values: Mapping[str, Any] | None,
+        *,
+        server_time_ms: int = 0,
+        device_time_ms: int | None = None,
+    ) -> bool:
+        with self._lock:
+            # 心跳是天然的落盘重试时机：上一次 save 失败的 token/设置在这里补写。
+            self.flush()
+            changed = self._config.apply_server_config(
+                values, server_time_ms=server_time_ms, device_time_ms=device_time_ms
+            )
+            if server_time_ms > 0:
+                local_ms = device_time_ms if device_time_ms is not None else int(time.time() * 1000)
+                self._clock.observe(
+                    device_time_ms=local_ms, server_time_ms=int(server_time_ms)
+                )
+            if changed:
+                self._save()
+            return changed
+
+    def reload(self) -> AgentConfig:
+        with self._lock:
+            self._config = AgentConfig.load(self._path)
+            return self._config
+
+
+__all__ = [
+    "CONFIG_PATH",
+    "Clock",
+    "ConfigStore",
+    "DEFAULT_BASE_URLS",
+    "DEFAULT_HEARTBEAT_INTERVAL_S",
+    "DEFAULT_SETTINGS",
+    "INSTALL_DIR",
+    "LOG_DIR",
+    "MAX_HEARTBEAT_INTERVAL_S",
+    "MIN_HEARTBEAT_INTERVAL_S",
+    "PIPE_PREFIX",
+    "PRODUCT",
+    "PROGRAM_DATA",
+    "OUTBOX_PATH",
+    "SECRET_KEYS",
+    "SENSITIVE_ACL_GRANTS",
+    "SERVICE_DESCRIPTION",
+    "SERVICE_DISPLAY_NAME",
+    "SERVICE_NAME",
+    "STAGING_DIR",
+    "AgentConfig",
+    "acl_grants",
+    "compute_device_time_offset",
+    "default_base_urls",
+    "ensure_dirs",
+    "install_dir",
+    "new_boot_id",
+    "new_device_uid",
+    "outbox_limits_from_env",
+    "outbox_path",
+    "program_data_dir",
+    "resolve_enroll_key",
+    "sanitize_settings",
+    "worker_log_dir",
+]

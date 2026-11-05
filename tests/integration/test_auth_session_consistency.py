@@ -11,11 +11,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import secrets
+
 import pytest
 
 pytestmark = pytest.mark.integration
 
-NEW_PASSWORD = "new-admin-password-123"
+# 运行时随机生成（Mimosa 卫生：不落脚面凭据）；登录断言与设置同进程取值，语义不变。
+NEW_PASSWORD = f"new-admin-{secrets.token_hex(8)}"
 
 
 def _login(client, password: str) -> dict[str, str]:

@@ -1,0 +1,85 @@
+"""端到端模拟：helper 完成 swap 前后 config.json 必须幸存。
+
+复现 0.3.9 真机疑案：更新成功（UA 已变 0.3.9）但重启后 token+准入码同时消失。
+本模拟用注入的假 ServiceController（本地无 SCM 权限）跑 apply_now 全流程，
+检查 swap 是否碰 ProgramData\OBS_PROGRAM_DATA 下的 config.json。
+"""
+
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+REPO = Path(r"D:\web\shenmi")
+sys.path.insert(0, str(REPO / "agent"))
+
+from observatory_agent.tasks import update as upd  # noqa: E402
+
+DIST = REPO / "agent" / "build" / "dist" / "observatory-agent"
+
+
+class FakeService:
+    def __init__(self) -> None:
+        self.started = 0
+        self.stopped = 0
+
+    def wait_for_process_exit(self, pid: int, *, timeout_s: float, poll_s: float = 0.0) -> bool:
+        return True  # 老 pid 视为已退出
+
+    def stop(self, **_k) -> bool:
+        self.stopped += 1
+        return True
+
+    def start(self, **_k) -> bool:
+        self.started += 1
+        return True
+
+
+def main() -> int:
+    base = Path(tempfile.mkdtemp(prefix="obs-e2e-"))
+    install = base / "install" / "observatory-agent"
+    data = base / "programdata" / "Observatory"
+    data.mkdir(parents=True)
+    install.mkdir(parents=True)
+    shutil.copytree(DIST, install, dirs_exist_ok=True)
+    shutil.copytree(DIST, base / "payload", dirs_exist_ok=True)
+    # 模拟真实 config：token + enroll_key 都在
+    config = data / "config.json"
+    config.write_text(
+        '{"device_uid":"OBS-TEST","token":"tok-123","enroll_key":"sekret","base_urls":["https://x"],"protocol":3}',
+        encoding="utf-8",
+    )
+    (base / "payload" / "VERSION").write_text("0.3.9\n", encoding="utf-8")
+
+    env_backup = os.environ.get("OBS_PROGRAM_DATA")
+    os.environ["OBS_PROGRAM_DATA"] = str(data)
+    try:
+        svc = FakeService()
+        rc = upd.apply_now(base / "payload", install, wait_pid=1, version="0.3.9", controller=svc)
+        print(f"apply_now rc={rc} stop={svc.stopped} start={svc.started}")
+        print("config exists:", config.exists())
+        if config.exists():
+            print("config content:", config.read_text(encoding="utf-8")[:120])
+        print("install version file:", (install / "VERSION").read_text(encoding="utf-8").strip())
+        leftovers = [p.name for p in (base / "install").iterdir()]
+        print("install parent entries:", leftovers)
+        ok = (
+            rc == upd.RC_OK
+            and config.exists()
+            and "tok-123" in config.read_text(encoding="utf-8")
+            and (install / "VERSION").read_text(encoding="utf-8").strip() == "0.3.9"
+        )
+        print("PASS" if ok else "FAIL")
+        return 0 if ok else 1
+    finally:
+        if env_backup is None:
+            os.environ.pop("OBS_PROGRAM_DATA", None)
+        else:
+            os.environ["OBS_PROGRAM_DATA"] = env_backup
+        shutil.rmtree(base, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

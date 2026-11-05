@@ -75,11 +75,13 @@ def _make_v7_db(path: Path) -> None:
 
 def test_v7_to_v8_migration_preserves_command_history(tmp_path: Path) -> None:
     from observatory.core.config import Settings  # noqa: PLC0415
+
+    from tests.helpers import TEST_SECRET_KEY  # noqa: PLC0415
     from observatory.core.db import Database, SCHEMA_VERSION  # noqa: PLC0415
 
     path = tmp_path / "observatory.db"
     _make_v7_db(path)
-    settings = Settings(data_dir=tmp_path, secret_key="v8-migration-test-secret-key-0001")
+    settings = Settings(data_dir=tmp_path, secret_key=TEST_SECRET_KEY + "-0001")
 
     async def run() -> None:
         database = Database(settings)
@@ -126,11 +128,13 @@ def test_device_delete_keeps_commands_with_null_device_id(tmp_path: Path) -> Non
     """CASCADE 换成 SET NULL：卸载证据不能随设备记录一起消失。"""
 
     from observatory.core.config import Settings  # noqa: PLC0415
+
+    from tests.helpers import TEST_SECRET_KEY  # noqa: PLC0415
     from observatory.core.db import Database  # noqa: PLC0415
 
     path = tmp_path / "observatory.db"
     _make_v7_db(path)
-    settings = Settings(data_dir=tmp_path, secret_key="v8-migration-test-secret-key-0002")
+    settings = Settings(data_dir=tmp_path, secret_key=TEST_SECRET_KEY + "-0002")
 
     async def run() -> None:
         database = Database(settings)
