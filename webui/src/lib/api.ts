@@ -640,6 +640,25 @@ export const api = {
   getSettings() {
     return request<SettingsPayload>(`${API_ROOT}/settings`, { opKey: "settings.get" });
   },
+  /** Agent 接入页状态（0.3.19）：api_key 只回布尔位，永不回显真值。 */
+  getAgentSkillStatus() {
+    return request<{
+      api_key_set: boolean;
+      exec_enabled_default: boolean;
+      version: string;
+      console_host: string;
+    }>(`${API_ROOT}/console/agent-skill/status`, { opKey: "agentSkill.status" });
+  },
+  /** 下载本地 agent skill 包（zip：SKILL.md + scripts/obs.py）。 */
+  async downloadAgentSkill(): Promise<{ blob: Blob; filename: string }> {
+    const { blob, headers } = await requestBinary(`${API_ROOT}/console/agent-skill/download`, {
+      opKey: "agentSkill.download",
+      timeoutMs: 60_000,
+    });
+    const disposition = headers.get("Content-Disposition") ?? "";
+    const filename = disposition.match(/filename="?([^";]+)"?/)?.[1] ?? "observatory-agent-skill.zip";
+    return { blob, filename };
+  },
   patchSettings(values: Record<string, unknown>) {
     return request<SettingsPayload>(`${API_ROOT}/settings`, {
       method: "PATCH",

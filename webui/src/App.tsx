@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/card";
 import { Spinner } from "@/components/ui/spinner";
 import { AccountPage } from "@/pages/account";
+import { AgentAccessPage } from "@/pages/agent-access";
 import { AuditPage } from "@/pages/audit";
 import { BackupPage } from "@/pages/backup";
 import { DevicePage } from "@/pages/device";
@@ -93,6 +94,7 @@ export function App() {
           <Route path="updates" element={<UpdatesPage />} />
           <Route path="audit" element={<AuditPage />} />
           <Route path="settings" element={<SettingsPage />} />
+          <Route path="agent-access" element={<AgentAccessPage />} />
           <Route path="system" element={<SystemPage />} />
           <Route path="account" element={<AccountPage />} />
           <Route path="login" element={<Navigate to="/wall" replace />} />

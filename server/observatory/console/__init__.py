@@ -12,6 +12,7 @@ from fastapi import APIRouter
 
 from . import (
     agent_frames,
+    agent_skill,
     audit,
     auth,
     backup,
@@ -30,6 +31,7 @@ from . import (
 
 console_router = APIRouter()
 console_router.include_router(agent_frames.router)
+console_router.include_router(agent_skill.router)
 console_router.include_router(enroll.router)
 console_router.include_router(uninstall_ack.router)
 console_router.include_router(auth.router)

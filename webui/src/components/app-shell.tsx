@@ -14,6 +14,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   Archive,
+  Bot,
   ChevronRight,
   LogOut,
   MonitorSmartphone,
@@ -67,6 +68,7 @@ const NAV_GROUPS: Array<{ label: string; items: NavEntry[] }> = [
     items: [
       { to: "/system", label: "系统", hint: "服务端状态", icon: ServerCog },
       { to: "/settings", label: "设置", hint: "全局配置", icon: SettingsIcon },
+      { to: "/agent-access", label: "Agent 接入", hint: "本地自动化", icon: Bot },
     ],
   },
 ];

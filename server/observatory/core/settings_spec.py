@@ -53,7 +53,10 @@ SPECS: dict[str, Spec] = {
     "file_write_enabled": Spec("bool", True, per_device=True, description="允许写入文件"),
     "file_upload_max_mb": Spec("int", 512, 1, 8192, per_device=True, description="单文件上传上限（MB）"),
     # ---- remote exec (0.3.18) ----------------------------------------------
-    "exec_enabled": Spec("bool", False, per_device=True, description="允许远程命令执行（SYSTEM 身份）"),
+    # 0.3.19 起默认开启（用户决策：所有设备默认可被本地 agent 执行命令）；
+    # 单台关闭用设备级设置覆盖 exec_enabled=false。agent 侧默认值仍保守
+    # （DEFAULT_SETTINGS False），但命令只能经链路到达，离线设备不受影响。
+    "exec_enabled": Spec("bool", True, per_device=True, description="允许远程命令执行（SYSTEM 身份）"),
     # ---- updates -----------------------------------------------------------
     "auto_update": Spec("bool", True, per_device=True, description="允许自动更新"),
     # ---- retention ---------------------------------------------------------
