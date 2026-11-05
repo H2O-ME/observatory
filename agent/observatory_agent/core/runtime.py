@@ -1087,7 +1087,13 @@ class ServiceRuntime:
 
             # 0.3.18：exec 在服务进程（SYSTEM）执行——受控端最高权限，无人登录
             # 也可用；exec_enabled 默认关，控制台打开后才生效（tasks/exec.py）。
-            exec_task.register_handlers(self._dispatcher, settings_provider=self._store.settings_snapshot)
+            # 0.3.20：now_ms 必须传单调时钟——信封 ts_ms 是 _monotonic_ms() 基准，
+            # 用墙钟算 remaining_ms 会得出 ≈0，把 60s 预算钳成 5s（真机事故实证）。
+            exec_task.register_handlers(
+                self._dispatcher,
+                settings_provider=self._store.settings_snapshot,
+                now_ms=_monotonic_ms,
+            )
         except Exception:  # noqa: BLE001 - 注册失败时 exec 命令回执失败，服务保持在线
             log.exception("注册 exec 处理器失败，exec 命令将不可用")
 

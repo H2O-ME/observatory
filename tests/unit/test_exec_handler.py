@@ -123,6 +123,54 @@ def test_exec_output_truncation_flags() -> None:
     assert len(result.result["stderr"].encode("utf-8")) <= 64 * 1024
 
 
+def test_runtime_wiring_uses_monotonic_clock_for_budget() -> None:
+    """真机事故回归（0.3.20）：信封 ts_ms 是单调时钟基准，exec 处理器必须用同源时钟算预算。
+
+    事故机制：注册时注入了墙钟 now_ms，remaining_ms(墙钟) 对单调 ts_ms 算出 ≈0，
+    60s 预算被钳到下限 5s——所有 ≥5s 的命令全部 TIMEOUT（exit 0 也白搭）。
+    本测试走 ServiceRuntime 的真实注册路径，断言 60s 预算原样传到 subprocess。
+    """
+
+    import sys
+
+    sys.path.insert(0, "agent")
+    import asyncio
+
+    from observatory_agent.core import runtime as runtime_module
+    from observatory_agent.tasks import exec as exec_module
+
+    runtime = runtime_module.ServiceRuntime(service_mode=False)
+    runtime._register_handlers()
+    runtime._store.config.settings["exec_enabled"] = True
+
+    seen: dict[str, object] = {}
+
+    def fake_run_command(command: str, timeout_s: int, **kwargs):
+        seen["timeout"] = timeout_s
+        return {
+            "exit_code": 0, "stdout": "ok", "stderr": "",
+            "stdout_truncated": False, "stderr_truncated": False,
+            "duration_ms": 1, "timed_out": False,
+        }
+
+    original = exec_module.run_command
+    exec_module.run_command = fake_run_command
+    try:
+        command = runtime_module.Command(
+            id="wiring-1",
+            type="exec",
+            payload={"command": "slow-but-under-budget", "timeout_s": 60},
+            deadline_ms=60_000,
+            ts_ms=runtime_module._monotonic_ms(),  # 与处理器同源的单调时钟
+        )
+        result = asyncio.run(runtime._dispatcher.dispatch(command))
+    finally:
+        exec_module.run_command = original
+    assert result.ok is True, result.error
+    # 允许构造到执行之间的真实流逝（≈1s）；旧 bug 会把预算钳到下限 5
+    assert seen.get("timeout", 0) >= 50, f"60s 预算被错误钳制: {seen}（时钟源错配未修）"
+
+
 def test_clamp_timeout_s_range() -> None:
     assert clamp_timeout_s(None) == 60
     assert clamp_timeout_s("abc") == 60

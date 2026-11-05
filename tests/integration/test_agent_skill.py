@@ -79,10 +79,51 @@ def test_skill_download_returns_rendered_zip(client) -> None:
     readme = bundle.read("observatory-agent-skill/README.txt").decode("utf-8")
     for name, text in (("SKILL.md", skill), ("obs.py", cli), ("README.txt", readme)):
         assert "@@" not in text, f"{name} 仍有未渲染的占位符"
-    assert "Authorization: Bearer" in skill
-    assert "confirm" in skill and "exec" in skill
-    assert "OBS_API_KEY" in cli and "_validated" in cli or "getaddrinfo" in cli, "CLI 必须带 URL 边界校验"
     assert skill.startswith("---\n"), "SKILL.md 必须带 frontmatter（skill 目录格式）"
+    _assert_skill_contract(skill, cli)
+    assert "OBS_ALLOW_PRIVATE" in readme, "README 必须写清 fake-ip 场景（F1）"
+    assert ".agents/skills" in readme, "README 必须覆盖非 ZCode 的 agent 目录约定"
+
+
+def _assert_skill_contract(skill: str, cli: str) -> None:
+    """0.3.20 文档契约（实测报告 A1-A9 的防复发钉子）。"""
+
+    # A1：读写走 /files/raw；/files/op 的 read/write 教法不得复活
+    assert "/files/raw" in skill and "X-Eof" in skill and "truncate" in skill
+    assert '"op":"read"' not in skill and '"op":"write"' not in skill
+    assert "已废弃" in skill
+    # A2：错误码含 AUTH/GONE；A5：信封双层 data；A6：capabilities 门控
+    for needle in ("AUTH", "GONE", "data.data", "capabilities"):
+        assert needle in skill, needle
+    # A4/A8：WebP 与截图新鲜度
+    assert "WebP" in skill and "ts_ms > 下发时刻" in skill
+    # A9：frontmatter 带版本（渲染后应有 version: "0."）
+    assert 'version: "0.' in skill
+    # C 系：CLI 必备子命令与边界校验（分片响应头按 CLI 的小写取用形态断言）
+    for needle in ("def cmd_get", "def cmd_put", "def cmd_settings", "def cmd_shot",
+                   "x-file-size", "x-eof", "OBS_ALLOW_PRIVATE", "OBS_ALLOW_HTTP",
+                   "sys.stdout.reconfigure", "_PinnedHTTPS", "def cmd_exec"):
+        assert needle in cli, needle
+
+
+def test_files_op_rejects_read_write_before_reachability(client) -> None:
+    """A1 的服务端契约：op=read/write 一律 422 指向 /files/raw（无需活动链路）。"""
+
+    import secrets
+
+    headers = _admin(client)
+    uid = f"OBS-SKILL-{secrets.token_hex(3).upper()}"
+    from tests.helpers import enroll_device  # noqa: PLC0415
+
+    enroll_device(client, uid=uid)
+    for op in ("read", "write"):
+        response = client.post(
+            f"/api/v1/devices/{uid}/files/op",
+            json={"op": op, "path": "C:\\x"},
+            headers=headers,
+        )
+        assert response.status_code == 422, (op, response.text)
+        assert "/files/raw" in response.text, op
 
 
 def test_exec_enabled_defaults_to_true(client) -> None:

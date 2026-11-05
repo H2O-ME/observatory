@@ -94,11 +94,20 @@ async def agent_skill_download(request: Request) -> Response:
                 "Observatory 本地 Agent 接入包（版本 @@VERSION@@）\n"
                 "\n"
                 "安装：把 observatory-agent-skill/ 整个目录放进你的 AI agent 的 skills\n"
-                "目录（ZCode: ~/.zcode/skills/ 或项目 .zcode/skills/），然后按其中的\n"
-                "SKILL.md 使用；scripts/obs.py 可独立当 CLI 用。\n"
+                "目录——ZCode: ~/.zcode/skills/ 或项目 .zcode/skills/；Claude Code 等\n"
+                "读 .agents/skills/ 的 agent 同理（实体目录放哪边、junction/软链指哪边\n"
+                "都可以）。然后按其中的 SKILL.md 使用；scripts/obs.py 可独立当 CLI 用。\n"
                 "\n"
-                "认证：环境变量 OBS_API_KEY（控制台「Agent 接入」页生成），\n"
-                "服务地址 OBS_API_BASE（默认 https://@@CONSOLE_HOST@@）。\n",
+                "环境变量（三个都可能需要）：\n"
+                "  OBS_API_KEY         Bearer 密钥——控制台「Agent 接入」页生成\n"
+                "  OBS_API_BASE        控制台地址，默认 https://@@CONSOLE_HOST@@\n"
+                "  OBS_ALLOW_PRIVATE=1 本机代理 fake-ip DNS（Clash TUN 把域名解析成\n"
+                "                      198.18.x.x）或内网控制台时必须设，否则 CLI 拒连\n"
+                "  OBS_ALLOW_HTTP=1    仅本地 http 调试；默认强制 https\n"
+                "\n"
+                "命令行 --allow-private / --json 放在子命令前后都可以。\n"
+                "退出码：0 成功；3 认证失败；4 远端命令失败/超时（exec 会透传远端\n"
+                "exit_code）；5 网络/服务端错误。脚本化时用退出码判成败，别解析文案。\n",
                 version=version,
                 console_host=console_host,
             ),
