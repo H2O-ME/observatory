@@ -283,6 +283,7 @@ export function OverviewView({ device, onRefresh }: Props) {
         </Banner>
       ) : null}
 
+      {/* 0.3.20 重排：每行「2+1」，左右高度接近，不再出现大片空洞。 */}
       <div className="grid min-w-0 grid-cols-1 items-start gap-6 lg:grid-cols-3">
         <Panel title="资源占用" className="min-w-0 lg:col-span-2">
           <div className="flex min-w-0 flex-col items-center gap-6 sm:flex-row sm:gap-10">
@@ -331,57 +332,34 @@ export function OverviewView({ device, onRefresh }: Props) {
           </div>
         </Panel>
 
-        <div className="flex min-w-0 flex-col gap-6 lg:col-span-1">
-          {disks.length > 0 ? (
-            <Panel title="磁盘" className="min-w-0">
-              <div className="space-y-3">
-                {disks.map((disk, index) => {
-                  // Bar length = 已用占比, derived from the server's total/free
-                  // pair (fall back to the agent's own percent when totals are
-                  // missing). High fill therefore reads as "almost full".
-                  const total = disk.total ?? 0;
-                  const used = total > 0 ? Math.max(0, total - (disk.free ?? 0)) : 0;
-                  const usedPercent =
-                    total > 0
-                      ? (used / total) * 100
-                      : typeof disk.percent === "number"
-                        ? disk.percent
-                        : null;
-                  return (
-                    <div key={`${disk.mount ?? index}`} className="min-w-0">
-                      <Meter
-                        label={`${disk.mount ?? "?"} · 已用 ${formatBytes(used)}`}
-                        value={usedPercent}
-                        hint={`共 ${formatBytes(total)} · 剩余 ${formatBytes(disk.free ?? 0)}`}
-                      />
-                    </div>
-                  );
-                })}
-              </div>
-            </Panel>
-          ) : null}
-
-          {sessions.length > 0 ? (
-            <Panel title="登录会话" className="min-w-0">
-              <ul className="space-y-2">
-                {sessions.map((session) => (
-                  <li
-                    key={session.session_id}
-                    className={cn(
-                      "grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 text-foreground",
-                      bodyText,
-                    )}
-                  >
-                    <span className="min-w-0 truncate">
-                      会话 {session.session_id} · {session.username || "（未登录）"}
-                    </span>
-                    <span className={cn("shrink-0 text-muted-foreground", metaText)}>{session.state}</span>
-                  </li>
-                ))}
-              </ul>
-            </Panel>
-          ) : null}
-        </div>
+        {disks.length > 0 ? (
+          <Panel title="磁盘" className="min-w-0">
+            <div className="space-y-3">
+              {disks.map((disk, index) => {
+                // Bar length = 已用占比, derived from the server's total/free
+                // pair (fall back to the agent's own percent when totals are
+                // missing). High fill therefore reads as "almost full".
+                const total = disk.total ?? 0;
+                const used = total > 0 ? Math.max(0, total - (disk.free ?? 0)) : 0;
+                const usedPercent =
+                  total > 0
+                    ? (used / total) * 100
+                    : typeof disk.percent === "number"
+                      ? disk.percent
+                      : null;
+                return (
+                  <div key={`${disk.mount ?? index}`} className="min-w-0">
+                    <Meter
+                      label={`${disk.mount ?? "?"} · 已用 ${formatBytes(used)}`}
+                      value={usedPercent}
+                      hint={`共 ${formatBytes(total)} · 剩余 ${formatBytes(disk.free ?? 0)}`}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          </Panel>
+        ) : null}
       </div>
 
       {selfUpdateBlocked ? (
@@ -393,9 +371,8 @@ export function OverviewView({ device, onRefresh }: Props) {
         </Banner>
       ) : null}
 
-      <div className="grid min-w-0 grid-cols-1 items-start gap-6 lg:grid-cols-2">
-        <div className="flex min-w-0 flex-col gap-6">
-          <Panel title="设备信息" className="min-w-0">
+      <div className="grid min-w-0 grid-cols-1 items-start gap-6 lg:grid-cols-3">
+        <Panel title="设备信息" className="min-w-0 lg:col-span-2">
             <dl className="grid min-w-0 grid-cols-1 gap-x-12 gap-y-4 sm:grid-cols-2">
               <div className="min-w-0 sm:col-span-2">
                 <PanelRow label="设备标识">
@@ -450,6 +427,29 @@ export function OverviewView({ device, onRefresh }: Props) {
             </dl>
           </Panel>
 
+        {sessions.length > 0 ? (
+          <Panel title="登录会话" className="min-w-0">
+            <ul className="space-y-2">
+              {sessions.map((session) => (
+                <li
+                  key={session.session_id}
+                  className={cn(
+                    "grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 text-foreground",
+                    bodyText,
+                  )}
+                >
+                  <span className="min-w-0 truncate">
+                    会话 {session.session_id} · {session.username || "（未登录）"}
+                  </span>
+                  <span className={cn("shrink-0 text-muted-foreground", metaText)}>{session.state}</span>
+                </li>
+              ))}
+            </ul>
+          </Panel>
+        ) : null}
+      </div>
+
+      <div className="grid min-w-0 grid-cols-1 items-start gap-6 lg:grid-cols-2">
           <Panel
             title="远程操作"
             hint="命令通道可用时才能下发；重启只影响受控端服务。"
@@ -531,7 +531,6 @@ export function OverviewView({ device, onRefresh }: Props) {
               </li>
             </ul>
           </Panel>
-        </div>
 
         <div className="flex min-w-0 flex-col gap-6">
           <RenamePanel device={device} onSaved={onRefresh} />

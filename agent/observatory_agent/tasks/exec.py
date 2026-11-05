@@ -81,35 +81,75 @@ def truncate(data: str, limit: int) -> tuple[str, bool]:
     return encoded[:limit].decode("utf-8", "ignore"), True
 
 
+def _kill_tree(pid: int) -> None:
+    """taskkill /T /F：杀掉整棵进程树。
+
+    真机事故（2026-11-05）：subprocess.run 超时只杀直接子进程（cmd.exe），
+    常驻循环的 powershell 孙进程继续握着 stdout/stderr 管道，收尾的管道读取
+    永久阻塞 → 处理线程挂死 → 分发循环冻结 → 设备命令通道全灭 1.5 小时。
+    """
+
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            capture_output=True,
+            timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception as exc:  # noqa: BLE001 - 杀树失败不能阻塞回执
+        log.warning("taskkill /T /F 失败 pid=%s: %s", pid, exc)
+
+
 def run_command(
     command: str,
     timeout_s: int,
     *,
-    run: Callable[..., Any] = subprocess.run,
     now_ms: Callable[[], int] = default_now_ms,
+    popen: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
-    """同步执行一条 shell 命令并打包回执（线程池里跑，不阻塞事件循环）。"""
+    """同步执行一条 shell 命令并打包回执（线程池里跑，不阻塞事件循环）。
+
+    超时路径不直接用 ``subprocess.run(timeout=…)``：它超时只杀直接子进程，
+    孙进程持有的管道会让收尾读取永久挂死（见 :func:`_kill_tree`）。这里用
+    ``Popen`` + ``wait(timeout)``，超时先杀整棵树再受控地收管道。
+    """
 
     started = now_ms()
     timed_out = False
     stdout_data = b""
     stderr_data = b""
     exit_code: int | None = None
+    if popen is None:
+        popen = subprocess.Popen
     try:
-        completed = run(
+        process = popen(
             command,
             shell=True,
-            capture_output=True,
-            timeout=timeout_s,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-        exit_code = int(getattr(completed, "returncode", 0) or 0)
-        stdout_data = completed.stdout or b""
-        stderr_data = completed.stderr or b""
-    except subprocess.TimeoutExpired as exc:
+    except Exception as exc:  # noqa: BLE001 - 启动失败也要回执
+        return {
+            "exit_code": None,
+            "stdout": "",
+            "stderr": str(exc),
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+            "duration_ms": max(0, now_ms() - started),
+            "timed_out": False,
+        }
+    try:
+        stdout_data, stderr_data = process.communicate(timeout=timeout_s)
+        exit_code = int(process.returncode or 0)
+    except subprocess.TimeoutExpired:
         timed_out = True
-        stdout_data = exc.stdout or b""
-        stderr_data = exc.stderr or b""
+        _kill_tree(process.pid)
+        try:
+            # 树已杀，管道应立即 EOF；再给 5s 兜底，仍不通就放弃读取。
+            stdout_data, stderr_data = process.communicate(timeout=5)
+        except Exception:  # noqa: BLE001 - 收不到就带部分输出走
+            stdout_data, stderr_data = b"", b""
     duration_ms = max(0, now_ms() - started)
     stdout, stdout_truncated = truncate(decode_output(stdout_data), MAX_STDOUT_BYTES)
     stderr, stderr_truncated = truncate(decode_output(stderr_data), MAX_STDERR_BYTES)
@@ -128,7 +168,7 @@ def make_exec_handler(
     *,
     settings_provider: Callable[[], Mapping[str, Any]],
     now_ms: Callable[[], int] = default_now_ms,
-    run: Callable[..., Any] = subprocess.run,
+    popen: Callable[..., Any] | None = None,
 ) -> Callable[[Command], Any]:
     """构造 ``exec`` 命令处理器（注册到服务进程 dispatcher，SYSTEM 身份执行）。"""
 
@@ -153,7 +193,7 @@ def make_exec_handler(
         if remaining is not None:
             budget_s = max(MIN_TIMEOUT_S, int(remaining / 1000))
             timeout_s = min(timeout_s, budget_s)
-        outcome = await asyncio.to_thread(run_command, text, timeout_s, run=run, now_ms=now_ms)
+        outcome = await asyncio.to_thread(run_command, text, timeout_s, popen=popen, now_ms=now_ms)
         if outcome.get("timed_out"):
             return CommandResult(
                 ok=False,
@@ -171,13 +211,13 @@ def register_handlers(
     *,
     settings_provider: Callable[[], Mapping[str, Any]],
     now_ms: Callable[[], int] = default_now_ms,
-    run: Callable[..., Any] = subprocess.run,
+    popen: Callable[..., Any] | None = None,
 ) -> None:
     """把 ``exec`` 注册到 :class:`core.commands.CommandDispatcher`。"""
 
     dispatcher.register(
         "exec",
-        make_exec_handler(settings_provider=settings_provider, now_ms=now_ms, run=run),
+        make_exec_handler(settings_provider=settings_provider, now_ms=now_ms, popen=popen),
     )
 
 

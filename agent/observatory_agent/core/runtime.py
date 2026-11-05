@@ -95,6 +95,10 @@ CONTROL_TTL_MIN_S = 15.0
 CONTROL_TTL_MAX_S = 3600.0
 #: 租约到期检查的粒度（秒）：控制循环每一帧都查，空闲时也至少每这么多秒查一次。
 CONTROL_LEASE_CHECK_S = 1.0
+#: 0.3.21：单条服务命令处理器的看门狗下限（秒）。exec 最长 600s、update 卸载
+#: 等也都是分钟级——看门狗只防"处理器永不返回"（真机事故：常驻 PS 孙进程握
+#: 住管道），不改变任何正常路径。命令自带更长预算时按预算放宽。
+COMMAND_HANDLER_WATCHDOG_S = 660.0
 
 
 def _now_ms() -> int:
@@ -1029,7 +1033,30 @@ class ServiceRuntime:
             await self._send_result(command.id, expired_result(command))
             return
         if command.type in self._dispatcher.handlers:
-            result = await self._dispatcher.dispatch(command)
+            # 0.3.21 看门狗：单条命令的处理器挂死（真机事故：常驻 PS 孙进程握
+            # 住管道，exec 线程永不返回）绝不能冻结整个分发循环——串行 await
+            # 一处挂，设备所有下行全灭。这里给处理器一个上限（exec 最长 600s
+            # 再加宽限）；wait_for 超时放弃等待并回 TIMEOUT，卡死的线程随进程
+            # 生命周期结束（taskkill /T /F 修复后正常不会走到这一步）。
+            budget_s = COMMAND_HANDLER_WATCHDOG_S
+            if command.deadline_ms:
+                budget_s = max(budget_s, command.deadline_ms / 1000 + 30)
+            try:
+                result = await asyncio.wait_for(
+                    self._dispatcher.dispatch(command), timeout=budget_s
+                )
+            except asyncio.TimeoutError:
+                log.error(
+                    "命令 %s (type=%s) 处理器 %ss 未返回，放弃等待（分发循环继续）",
+                    command.id,
+                    command.type,
+                    budget_s,
+                )
+                result = CommandResult(
+                    ok=False,
+                    error=f"命令处理器超过 {budget_s:.0f}s 未返回，已放弃等待",
+                    error_code="TIMEOUT",
+                )
             await self._send_result(command.id, result)
             return
         await self._forward_to_worker(command)
@@ -1390,25 +1417,47 @@ class ServiceRuntime:
             )
             return
         try:
-            pipe.send(
-                new_envelope(
-                    "command",
-                    {
-                        "command_id": command.id,
-                        "type": command.type,
-                        # A6：转交的是**剩余**预算，不是原始 deadline_ms。worker 用自己的
-                        # 单调时钟起算，排队时间因此也被算进预算——旧实现把原始值转发
-                        # 过去，worker 每次重新拿到满额预算，排队多久都能执行。
-                        "deadline_ms": (
-                            command.remaining_ms(_monotonic_ms())
-                            if command.deadline_ms
-                            else 0
-                        )
-                        or 0,
-                        "payload": command.payload,
-                    },
-                    ts_ms=_now_ms(),
-                )
+            envelope = new_envelope(
+                "command",
+                {
+                    "command_id": command.id,
+                    "type": command.type,
+                    # A6：转交的是**剩余**预算，不是原始 deadline_ms。worker 用自己的
+                    # 单调时钟起算，排队时间因此也被算进预算——旧实现把原始值转发
+                    # 过去，worker 每次重新拿到满额预算，排队多久都能执行。
+                    "deadline_ms": (
+                        command.remaining_ms(_monotonic_ms())
+                        if command.deadline_ms
+                        else 0
+                    )
+                    or 0,
+                    "payload": command.payload,
+                },
+                ts_ms=_now_ms(),
+            )
+            # 0.3.21：pipe.send 是阻塞写，worker 挂死（管道缓冲写满）时会把
+            # 整个分发循环永久卡住——真机事故（2026-11-05，设备命令通道 18:29
+            # 起全灭 1.5 小时）。放线程 + 超时：超时即认定该 worker 管道坏死，
+            # 关闭管道（服务会重新拉起 worker）并回明确失败，绝不拖死循环。
+            await asyncio.wait_for(asyncio.to_thread(pipe.send, envelope), timeout=10.0)
+        except asyncio.TimeoutError:
+            log.error(
+                "会话 %s 的管道写入 %ss 超时（worker 无响应），强制关闭管道",
+                session_id,
+                10,
+            )
+            try:
+                pipe.close()
+            except Exception:  # noqa: BLE001 - 关闭失败也必须回执
+                log.exception("关闭无响应管道失败 session=%s", session_id)
+            self._pipes.pop(session_id, None)
+            await self._send_result(
+                command.id,
+                CommandResult(
+                    ok=False,
+                    error="受控端 worker 无响应，管道已重置；请稍后重试",
+                    error_code="INTERNAL",
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - 管道断开要变成可观测失败回执
             log.warning("会话 %s 的命令转发失败：%s", session_id, exc)

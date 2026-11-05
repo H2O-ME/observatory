@@ -5,7 +5,7 @@ import { Expand, Keyboard, MousePointer2, Power, RefreshCw, WifiOff } from "luci
 import { FrameStage } from "@/components/frame-view";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { api, isApiError } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { serverNow, serverTimeLeft, useServerNow } from "@/store/clock";
@@ -782,9 +782,19 @@ export function LiveView({ device }: Props) {
     }
   };
 
+  /** 发送文本；换行还原成远端回车（Unicode 注入不带按键语义）。 */
   const sendText = (value: string) => {
     if (!value) return;
-    send({ type: "input", ev: { kind: "text", text: value } });
+    const segments = value.split(/\r?\n/);
+    segments.forEach((segment, index) => {
+      if (segment) {
+        send({ type: "input", ev: { kind: "text", text: segment } });
+      }
+      if (index < segments.length - 1) {
+        send({ type: "input", ev: { kind: "key", code: 0x0d, down: true } });
+        send({ type: "input", ev: { kind: "key", code: 0x0d, down: false } });
+      }
+    });
   };
 
   const requestFullscreen = () => {
@@ -923,6 +933,15 @@ export function LiveView({ device }: Props) {
             onTouchCancel={onTouchCancel}
             onKeyDown={onKeyDown}
             onKeyUp={onKeyUp}
+            // 0.3.21：直接在画面上粘贴文本（含中文/多行）——粘贴板内容走
+            // Unicode 注入；IME 组合输入仍建议用下方输入条。
+            onPaste={(event) => {
+              if (!sessionRef.current) return;
+              const pasted = event.clipboardData.getData("text/plain");
+              if (!pasted) return;
+              event.preventDefault();
+              sendText(pasted);
+            }}
             // W4：控制区域失去焦点（Tab 移走、点进下方文本框、窗口切走）时
             // keyup 会落在别的元素上，必须主动释放已按下的键与鼠标键。
             onBlur={releaseAllInputs}
@@ -979,17 +998,19 @@ export function LiveView({ device }: Props) {
           />
       </div>
 
-      {/* Keyboard text row: on a watch the send button drops to its own row. */}
-      <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-2 rounded-md border border-border bg-card p-2.5 sm:grid-cols-[auto_minmax(0,1fr)_auto]">
-        <Keyboard className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-        <Input
-          placeholder="在此输入文字并按回车，直接发送到受控端"
-          className="h-11 text-sm sm:h-9"
+      {/* Keyboard text row: textarea 支持多行粘贴；回车只属于输入法/换行，
+          Ctrl+Enter 或按钮才发送（0.3.21：修中文 IME 候选词回车误发送）。 */}
+      <div className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-2 rounded-md border border-border bg-card p-2.5 sm:grid-cols-[auto_minmax(0,1fr)_auto]">
+        <Keyboard className="mt-2 size-4 shrink-0 text-muted-foreground" aria-hidden />
+        <Textarea
+          rows={2}
+          placeholder="输入或粘贴文字（支持多行）；Ctrl+Enter 发送到受控端"
+          className="min-h-0 text-sm"
           aria-label="发送文字到受控端"
           value={textValue}
           onChange={(event) => setTextValue(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter") {
+            if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
               event.preventDefault();
               sendText(textValue);
               setTextValue("");
@@ -998,7 +1019,7 @@ export function LiveView({ device }: Props) {
         />
         <Button
           variant="outline"
-          className="col-span-2 min-h-9 sm:col-span-1"
+          className="min-h-9 self-stretch"
           onClick={() => {
             sendText(textValue);
             setTextValue("");
