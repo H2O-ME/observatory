@@ -30,7 +30,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-BASE = os.environ.get("OBS_API_BASE", "https://control.tianhw.top").rstrip("/")
+BASE = os.environ.get("OBS_API_BASE", "https://@@CONSOLE_HOST@@").rstrip("/")
 KEY = os.environ.get("OBS_API_KEY", "")
 TERMINAL = {"ok", "error", "timeout", "cancelled", "failed", "unconfirmed"}
 _ALLOW_PRIVATE = False

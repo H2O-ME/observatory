@@ -11,7 +11,7 @@ description: 通过 Observatory 控制台 API 管理远端 Windows 设备：设�
 ## 环境变量
 
 ```
-OBS_API_BASE=https://control.tianhw.top   # 控制台地址
+OBS_API_BASE=https://@@CONSOLE_HOST@@   # 控制台地址
 OBS_API_KEY=obs-xxxxxxxxxxxxxxxxxxxxxxxx # Bearer 密钥（必填）
 ```
 

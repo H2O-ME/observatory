@@ -73,8 +73,10 @@ const ENDPOINTS: Array<{ group: string; rows: Array<[string, string, string]> }>
   },
 ];
 
-const QUICK_START = `# 环境变量
-export OBS_API_BASE=https://control.tianhw.top
+/** 地址来自服务端 status（console_host），前端不硬编码生产域名（A23）。 */
+function buildQuickStart(baseUrl: string): string {
+  return `# 环境变量
+export OBS_API_BASE=${baseUrl}
 export OBS_API_KEY=obs-xxxxxxxx...        # 本页生成
 
 # 设备列表
@@ -89,6 +91,7 @@ curl -s -X POST -H "Authorization: Bearer $OBS_API_KEY" \\
 # 轮询回执
 curl -s -H "Authorization: Bearer $OBS_API_KEY" \\
   $OBS_API_BASE/api/v1/devices/OBS-xxxx/commands/<command_id>`;
+}
 
 function randomApiKey(): string {
   const bytes = new Uint8Array(24);
@@ -132,6 +135,8 @@ export function AgentAccessPage() {
     const host = status?.console_host?.trim();
     return host ? `https://${host}` : window.location.origin;
   }, [status?.console_host]);
+
+  const quickStart = useMemo(() => buildQuickStart(baseUrl), [baseUrl]);
 
   const resetKey = async () => {
     setResetting(true);
@@ -254,10 +259,10 @@ export function AgentAccessPage() {
           <CardTitle className="flex items-center gap-2">
             <TerminalSquare className="size-4" /> 快速上手
           </CardTitle>
-          <CopyButton value={QUICK_START} label="复制" />
+          <CopyButton value={quickStart} label="复制" />
         </CardHeader>
         <CardContent>
-          <pre className="overflow-x-auto rounded-lg bg-muted p-3 font-mono text-xs leading-relaxed">{QUICK_START}</pre>
+          <pre className="overflow-x-auto rounded-lg bg-muted p-3 font-mono text-xs leading-relaxed">{quickStart}</pre>
         </CardContent>
       </Card>
 

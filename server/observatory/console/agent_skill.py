@@ -17,7 +17,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
 
-from ..core.config import resolve_version
+from ..core.config import DEFAULT_CONSOLE_HOST, resolve_version
 from ..core.db import get_session
 from .deps import client_ip, require_admin, store
 from .envelope import ConsoleRoute
@@ -79,7 +79,7 @@ async def agent_skill_download(request: Request) -> Response:
     from pathlib import Path
 
     version = resolve_version()
-    console_host = _console_host(request) or "control.tianhw.top"
+    console_host = _console_host(request) or DEFAULT_CONSOLE_HOST
     base_dir: Path = _template_dir(request)
     base_dir: Path = _template_dir(request)
     buffer = io.BytesIO()
