@@ -58,7 +58,7 @@ def _validated(url: str) -> str:
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
-            raise SystemExit(f"拒绝请求私网/保留地址 {ip}（内网控制台加 --allow-private）")
+            raise SystemExit(f"拒绝请求私网/保留地址 {ip}（本机代理 fake-ip DNS 或内网控制台：设 OBS_ALLOW_PRIVATE=1 或加 --allow-private）")
     return url
 
 
