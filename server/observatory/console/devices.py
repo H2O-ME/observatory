@@ -49,9 +49,10 @@ ALLOWED_COMMAND_TYPES = frozenset(
         "uninstall",
         "reboot",
         "poweroff",
+        "exec",
     }
 )
-CONFIRM_REQUIRED = frozenset({"uninstall", "restart_agent", "reboot", "poweroff"})
+CONFIRM_REQUIRED = frozenset({"uninstall", "restart_agent", "reboot", "poweroff", "exec"})
 _FILE_OPS = frozenset(
     {"list", "stat", "mkdir", "delete", "rename", "copy", "move", "search", "drives", "read", "write", "hash"}
 )
@@ -149,6 +150,17 @@ def validate_command_payload(command_type: str, payload: dict[str, Any] | None) 
             body["lines"] = max(1, min(5000, int(body.get("lines", 200))))
         except (TypeError, ValueError) as exc:
             raise AppError.bad_request("lines 必须是整数") from exc
+    elif command_type == "exec":
+        # exec 必须排在 CONFIRM_REQUIRED 清空分支之前：它既要显式确认，
+        # 又要保留 command/timeout_s payload（0.3.18）。
+        text = str(body.get("command") or "").strip()
+        if not text:
+            raise AppError.bad_request("exec 命令缺少 command 字段")
+        body["command"] = text
+        try:
+            body["timeout_s"] = max(5, min(600, int(body.get("timeout_s", 60))))
+        except (TypeError, ValueError) as exc:
+            raise AppError.bad_request("timeout_s 必须是整数") from exc
     elif command_type in CONFIRM_REQUIRED:
         body = {}
     return body
@@ -172,6 +184,11 @@ async def create_command(
 
     body = validate_command_payload(command_type, payload)
     deadline_ms = budget_ms(command_type)
+    if command_type == "exec":
+        # 0.3.18：exec 的预算按 payload 派生。journal 的行过期 = 预算×3，长
+        # 命令（如 timeout_s=600）的结果不能被判 TIMEOUT 丢回执；envelope 的
+        # deadline_ms 对 exec 只约束"何时开始执行"，执行时长由 payload 决定。
+        deadline_ms = max(deadline_ms, int(body.get("timeout_s", 60)) * 1000)
     record = await get_journal(request).create(
         device.id,
         command_type,

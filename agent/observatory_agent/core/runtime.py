@@ -1082,6 +1082,14 @@ class ServiceRuntime:
             )
         except Exception:  # noqa: BLE001 - 注册失败时卸载命令会回执失败，服务保持在线
             log.exception("注册 uninstall 处理器失败，卸载命令将不可用")
+        try:
+            from ..tasks import exec as exec_task
+
+            # 0.3.18：exec 在服务进程（SYSTEM）执行——受控端最高权限，无人登录
+            # 也可用；exec_enabled 默认关，控制台打开后才生效（tasks/exec.py）。
+            exec_task.register_handlers(self._dispatcher, settings_provider=self._store.settings_snapshot)
+        except Exception:  # noqa: BLE001 - 注册失败时 exec 命令回执失败，服务保持在线
+            log.exception("注册 exec 处理器失败，exec 命令将不可用")
 
     def _cmd_update(self, command: Command) -> CommandResult:
         """更新命令的唯一入口：并发保护 + 绑定本次版本的 fetch。

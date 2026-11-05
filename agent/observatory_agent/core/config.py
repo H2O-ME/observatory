@@ -267,6 +267,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "control_max_width": 1024,
     "file_write_enabled": True,
     "file_upload_max_mb": 512,
+    #: 0.3.18：远程命令执行（SYSTEM 身份）。默认关，控制台显式打开后才生效。
+    "exec_enabled": False,
     "auto_update": True,
     "heartbeat_interval_s": 20,
     #: A15：HTTP 载体两轮之间的间隔（也是长轮询的等待上限语义）。

@@ -26,6 +26,7 @@ const TYPE_LABEL: Record<string, string> = {
   uninstall: "远程卸载",
   reboot: "重启机器",
   poweroff: "关机",
+  exec: "执行命令",
 };
 
 const STATUS_LABEL: Record<CommandStatus, string> = {

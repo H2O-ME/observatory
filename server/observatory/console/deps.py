@@ -12,7 +12,8 @@ from typing import Any
 
 from fastapi import Request
 
-from ..core.crypto import SESSION_COOKIE, decode_session
+from ..core.clock import now_ms
+from ..core.crypto import SESSION_COOKIE, constant_time_compare, decode_session
 from ..core.errors import AppError
 
 __all__ = [
@@ -115,9 +116,48 @@ def check_console_session(request: Request) -> tuple[dict | None, str]:
     )
 
 
+async def _api_key_payload(request: Request) -> dict[str, Any] | None:
+    """0.3.18：Bearer 静态密钥（settings ``api_key``）的第二条认证路径。
+
+    只认 ``Authorization: Bearer`` 头（cookie 值即使等于密钥也不认证）；密钥
+    为空 = 禁用。设置值经 :func:`store` 的进程内缓存读取，热路径零额外查询；
+    DB 读失败时此路径不生效（JWT 路径不受影响，fail-closed）。
+    """
+
+    header = request.headers.get("authorization", "")
+    if not header.lower().startswith("bearer "):
+        return None
+    bearer = header[7:].strip()
+    if not bearer:
+        return None
+    database = getattr(request.app.state, "db", None)
+    if database is None:
+        return None
+    try:
+        async with database.sessionmaker() as session:
+            values = await store().load(session)
+    except Exception:  # noqa: BLE001 - 设置读失败时密钥路径不生效，不放大故障
+        return None
+    api_key = str(values.get("api_key") or "")
+    if not api_key or not constant_time_compare(bearer, api_key):
+        return None
+    now = now_ms()
+    return {
+        "sub": "api_key",
+        "scope": "console",
+        "iat": now,
+        "exp": now,
+        "ver": 0,
+        "pwv": int(getattr(request.app.state, "credential_version", 0) or 0),
+    }
+
+
 async def require_admin(request: Request) -> dict:
     payload, reason = check_console_session(request)
     if payload is None:
         # F15: 密码/TOTP 变更后签名仍有效的旧令牌也必须当作未登录。
+        key_payload = await _api_key_payload(request)
+        if key_payload is not None:
+            return key_payload
         raise AppError.auth(reason)
     return payload

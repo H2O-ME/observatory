@@ -19,7 +19,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PRODUCT = "Observatory"
-FALLBACK_VERSION = "0.3.17"
+FALLBACK_VERSION = "0.3.18"
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 #: Lowest agent build that may replace itself through the v3 update path (A3/A18).
@@ -85,6 +85,9 @@ class Settings(BaseSettings):
     command_timeout_update_ms: int = Field(default=60_000, ge=1_000)
     command_timeout_uninstall_ms: int = Field(default=60_000, ge=1_000)
     command_timeout_sysinfo_ms: int = Field(default=60_000, ge=1_000)
+    #: 0.3.18：exec 的基础预算（真正预算在 create_command 里按 payload 的
+    #: timeout_s 派生，这里只是 payload 异常时的下限兜底）。
+    command_timeout_exec_ms: int = Field(default=110_000, ge=1_000)
     command_timeout_default_ms: int = Field(default=20_000, ge=1_000)
 
     # ---- security -----------------------------------------------------------
@@ -186,6 +189,7 @@ class Settings(BaseSettings):
             "update": self.command_timeout_update_ms,
             "uninstall": self.command_timeout_uninstall_ms,
             "sysinfo": self.command_timeout_sysinfo_ms,
+            "exec": self.command_timeout_exec_ms,
         }.get(kind, self.command_timeout_default_ms)
 
     # -- storage layout -------------------------------------------------------

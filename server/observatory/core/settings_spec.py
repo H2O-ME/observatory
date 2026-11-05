@@ -52,6 +52,8 @@ SPECS: dict[str, Spec] = {
     # ---- file manager ------------------------------------------------------
     "file_write_enabled": Spec("bool", True, per_device=True, description="允许写入文件"),
     "file_upload_max_mb": Spec("int", 512, 1, 8192, per_device=True, description="单文件上传上限（MB）"),
+    # ---- remote exec (0.3.18) ----------------------------------------------
+    "exec_enabled": Spec("bool", False, per_device=True, description="允许远程命令执行（SYSTEM 身份）"),
     # ---- updates -----------------------------------------------------------
     "auto_update": Spec("bool", True, per_device=True, description="允许自动更新"),
     # ---- retention ---------------------------------------------------------
@@ -70,6 +72,9 @@ SPECS: dict[str, Spec] = {
     # ---- misc --------------------------------------------------------------
     "heartbeat_interval_s": Spec("int", 20, 5, 300, per_device=True, description="心跳间隔（秒）"),
     "install_script_note": Spec("str", "", description="安装页备注"),
+    # 0.3.18：控制台长效 API 密钥（本地自动化用 Bearer 调用）。留空=禁用；
+    # secret 不回显、绝不下发给受控端。
+    "api_key": Spec("str", "", secret=True, agent_visible=False, description="控制台 API 密钥（留空禁用）"),
 }
 
 DEFAULT_SETTINGS: dict[str, Any] = {key: spec.default for key, spec in SPECS.items()}
