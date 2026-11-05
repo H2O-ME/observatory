@@ -33,11 +33,14 @@ import urllib.request
 BASE = os.environ.get("OBS_API_BASE", "https://@@CONSOLE_HOST@@").rstrip("/")
 KEY = os.environ.get("OBS_API_KEY", "")
 TERMINAL = {"ok", "error", "timeout", "cancelled", "failed", "unconfirmed"}
-_ALLOW_PRIVATE = False
+#: 本机跑代理（Clash/mihomo TUN 的 fake-ip DNS 把域名解析成 198.18.0.0/15）或
+#: 内网控制台时，设 ``OBS_ALLOW_PRIVATE=1`` 或传 ``--allow-private`` 放行；
+#: 流量仍由本机路由决定，校验只挡"被异常响应引向内网"的情形。
+_ALLOW_PRIVATE = os.environ.get("OBS_ALLOW_PRIVATE", "").strip().lower() in {"1", "true", "yes"}
 
 
 def _validated(url: str) -> str:
-    """请求边界：仅 http/https，拒绝私网/环回/链路本地/保留地址（--allow-private 出口）。"""
+    """请求边界：仅 http/https，拒绝私网/环回/链路本地/保留地址（出口见上）。"""
 
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
@@ -228,7 +231,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     global _ALLOW_PRIVATE
-    _ALLOW_PRIVATE = bool(args.allow_private)
+    _ALLOW_PRIVATE = _ALLOW_PRIVATE or bool(args.allow_private)  # 环境变量与 flag 任一即可
     args.func(args)
     return 0
 

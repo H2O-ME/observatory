@@ -13,6 +13,7 @@ description: 通过 Observatory 控制台 API 管理远端 Windows 设备：设�
 ```
 OBS_API_BASE=https://@@CONSOLE_HOST@@   # 控制台地址
 OBS_API_KEY=obs-xxxxxxxxxxxxxxxxxxxxxxxx # Bearer 密钥（必填）
+OBS_ALLOW_PRIVATE=1                      # 仅当本机代理 fake-ip DNS（Clash TUN）或内网控制台时需要
 ```
 
 所有请求带 `Authorization: Bearer $OBS_API_KEY`。响应统一为信封
