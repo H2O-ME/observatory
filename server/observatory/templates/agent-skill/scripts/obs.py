@@ -20,7 +20,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import ipaddress
 import json
 import os
