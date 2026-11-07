@@ -351,7 +351,11 @@ async def stage_update(
         raise UpdateRejected("更新请求缺少 version", step="stage_update")
     staging = Path(staging_dir)
     staging.mkdir(parents=True, exist_ok=True)
-    cleanup_staging(staging)
+    # 0.3.23 审查补漏：以下全部是磁盘密集阻塞调用（staging 清扫 rmtree、整包
+    # sha256、zip 解压最高 2GB），stage_update 跑在 runtime 主事件循环的更新
+    # 后台任务里——裸调会把心跳/命令分发/看门狗冻结秒到分钟级（服务端按 WS
+    # idle 踢链路，设备"每次更新必掉线"）。统一挪线程。
+    await asyncio.to_thread(cleanup_staging, staging)
     if package_size and int(package_size) > 0:
         try:
             free = shutil.disk_usage(staging).free
@@ -370,12 +374,13 @@ async def stage_update(
     if on_event is not None:
         await on_event("update_downloading", {"version": version})
     await fetch(archive)
-    verify_package(archive, checksum)
+    await asyncio.to_thread(verify_package, archive, checksum)
     if on_event is not None:
         await on_event("update_extracting", {"version": version})
-    payload_root = extract_payload(archive, staging / f"payload-{version}")
+    payload_root = await asyncio.to_thread(extract_payload, archive, staging / f"payload-{version}")
     (payload_root / VERSION_FILE).write_text(version + "\n", encoding="utf-8")
-    log.info("agent package %s staged at %s (%s bytes)", version, payload_root, archive.stat().st_size)
+    size = await asyncio.to_thread(lambda: archive.stat().st_size)
+    log.info("agent package %s staged at %s (%s bytes)", version, payload_root, size)
     return payload_root
 
 
@@ -726,8 +731,11 @@ async def apply_update(
     )
     if on_event is not None:
         await on_event("update_precheck", {"version": version})
-    precheck(payload_root, version)
-    helper = spawn_helper(
+    # 0.3.23 审查补漏（同 stage_update）：precheck 起 exe 最长 60s、copytree
+    # 整个 onedir、helper 观察窗必然空转 20s——全部挪线程，事件循环只做 await。
+    await asyncio.to_thread(precheck, payload_root, version)
+    helper = await asyncio.to_thread(
+        spawn_helper,
         payload_root,
         install_dir=install_dir,
         staging_dir=staging_dir,
@@ -736,7 +744,7 @@ async def apply_update(
         now_ms=now_ms,
         spawn=spawn,
     )
-    verify_helper_alive(helper)
+    await asyncio.to_thread(verify_helper_alive, helper)
     if on_event is not None:
         await on_event("update_helper_started", {"version": version, "pid": helper.pid})
     return helper

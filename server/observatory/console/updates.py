@@ -15,7 +15,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 import re
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -117,7 +119,10 @@ class PackageService:
         stored_name = f"observatory-{kind}-{version}.zip"
         target = self.root / stored_name
         self.root.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_suffix(".zip.part")
+        # 临时名带 pid+uuid（与 agent 侧 config.save 同款约束）：固定名 ".zip.part"
+        # 在同版本并发上传时会互相覆盖——A 的半截内容经 B 的 replace 提交成 target，
+        # 落盘字节与 DB 记录的 sha256 不一致（agent 下载后校验必失败且无法定位）。
+        tmp = target.with_name(f"{target.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.part")
         await asyncio.to_thread(tmp.write_bytes, data)
         await asyncio.to_thread(tmp.replace, target)
 

@@ -440,9 +440,8 @@ class ServiceRuntime:
             outbox = self._outbox
             if outbox is not None:
                 outbox.close()
-            self._shutdown_workers()
+            await self._shutdown_workers()
             log.info("服务运行时已停止")
-
     def _safe_version(self) -> str:
         try:
             from .. import __version__
@@ -485,13 +484,19 @@ class ServiceRuntime:
         token = str(payload.get("token") or "")
         if not token:
             raise RuntimeError("注册响应没有 token")
-        self._store.update(
+        # 0.3.23 审查补漏：update/apply_server_config 内部有同步磁盘 IO
+        # （两次写文件 + os.replace + icacls 收紧 ACL，最坏 15s），跑在主事件
+        # 循环上会冻结心跳/分发——统一挪线程（store 的 RLock 保证并发安全）。
+        await asyncio.to_thread(
+            self._store.update,
             token=token,
             base_urls=[str(url) for url in (payload.get("base_urls") or config.base_urls)],
             server_version=str(payload.get("server_version") or ""),
         )
-        self._store.apply_server_config(
-            payload.get("config") or {}, server_time_ms=int(payload.get("server_time_ms") or 0)
+        await asyncio.to_thread(
+            self._store.apply_server_config,
+            payload.get("config") or {},
+            server_time_ms=int(payload.get("server_time_ms") or 0),
         )
         link.set_base_urls(self._store.config.base_urls)
         log.info("设备已注册 uid=%s", self._store.config.device_uid)
@@ -620,20 +625,20 @@ class ServiceRuntime:
             try:
                 sessions = await asyncio.to_thread(self._list_sessions)
                 self._sessions = sessions
-                self._reconcile_workers()
+                await self._reconcile_workers()
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - 一次扫描失败不能终止扫描循环
                 log.exception("会话扫描失败")
             await self._sleep_or_stop(SESSION_SCAN_S)
 
-    def _reconcile_workers(self) -> None:
+    async def _reconcile_workers(self) -> None:
         active = {int(_session_dict(item).get("session_id") or 0) for item in self._sessions}
         active.discard(0)
         for session_id in list(self._pipes):
             if session_id not in active:
                 log.info("会话 %s 已结束，停止 worker 管道", session_id)
-                self._stop_worker(session_id)
+                await self._stop_worker(session_id)
         if not self._service_mode and os.environ.get("OBS_WORKER_IN_CONSOLE", "").strip().lower() not in {
             "1",
             "true",
@@ -814,14 +819,30 @@ class ServiceRuntime:
             with contextlib.suppress(Exception):  # 关闭句柄失败无害
                 win32api.CloseHandle(handle)
 
-    def _stop_worker(self, session_id: int) -> None:
+    async def _stop_worker(self, session_id: int) -> None:
         server = self._pipes.pop(session_id, None)
         if server is not None:
+            # 0.3.22 审查补漏：stop 信封也走 _pipe_send 护栏。会话结束时 worker
+            # 可能已经挂死（正是 0.3.22 事故形态），裸 pipe.send 的阻塞 WriteFile
+            # 会把调用方（_session_loop）永久卡住——心跳/会话扫描全灭。
             try:
-                server.send(new_envelope("stop", {"reason": "session_end"}, ts_ms=_now_ms()))
+                await self._pipe_send(
+                    session_id,
+                    server,
+                    new_envelope("stop", {"reason": "session_end"}, ts_ms=_now_ms()),
+                    timeout_s=5.0,
+                )
             except Exception as exc:  # noqa: BLE001 - 连接已断是常态，记录后继续收尾
                 log.debug("向会话 %s 发送 stop 失败：%s", session_id, exc)
-            server.stop()
+            # stop() 用哑客户端解 ConnectNamedPipe，最坏 ~12s：放执行器里，
+            # 不占事件循环（会话扫描 5s 一次，卡住即扫描停摆）。
+            try:
+                loop = asyncio.get_running_loop()
+                await asyncio.wait_for(
+                    loop.run_in_executor(self._pipe_executor, server.stop), timeout=20.0
+                )
+            except Exception as exc:  # noqa: BLE001 - 收尾失败只能记录
+                log.debug("停止会话 %s 的管道服务失败：%s", session_id, exc)
         self._processes.pop(session_id, None)
         worker = self._local_workers.pop(session_id, None)
         if worker is not None and worker.poll() is None:
@@ -835,9 +856,9 @@ class ServiceRuntime:
         self._session_state.pop(session_id, None)
         self._health.remove(session_id)
 
-    def _shutdown_workers(self) -> None:
+    async def _shutdown_workers(self) -> None:
         for session_id in list(self._pipes):
-            self._stop_worker(session_id)
+            await self._stop_worker(session_id)
         for session_id, worker in list(self._local_workers.items()):
             if worker.poll() is None:
                 try:
@@ -1011,8 +1032,12 @@ class ServiceRuntime:
             return
         if kind == "config":
             values = body.get("config")
-            changed = self._store.apply_server_config(
-                values if isinstance(values, dict) else {}, server_time_ms=int(body.get("server_time_ms") or 0)
+            # 0.3.23 审查补漏：apply_server_config 含同步磁盘 IO（写文件 + icacls，
+            # 最坏 15s），不能跑在分发循环上——挪线程。
+            changed = await asyncio.to_thread(
+                self._store.apply_server_config,
+                values if isinstance(values, dict) else {},
+                server_time_ms=int(body.get("server_time_ms") or 0),
             )
             if changed:
                 log.info("服务端配置已更新：%s", sorted(values or {}))
@@ -1021,8 +1046,10 @@ class ServiceRuntime:
         if kind == "welcome":
             values = body.get("config")
             if isinstance(values, dict):
-                self._store.apply_server_config(
-                    values, server_time_ms=int(body.get("server_time_ms") or 0)
+                await asyncio.to_thread(
+                    self._store.apply_server_config,
+                    values,
+                    server_time_ms=int(body.get("server_time_ms") or 0),
                 )
                 await self._broadcast_config()
             offer = body.get("update_offer")
@@ -2040,7 +2067,7 @@ class WorkerRuntime:
         self._dispatcher.register("collect_now", screenshot)
         fs.register_handlers(
             self._dispatcher,
-            settings_provider=self._settings,
+            settings_provider=self._settings_snapshot,
             now_ms=_now_ms,
         )
         self._dispatcher.register("log_tail", self._log_tail)
@@ -2068,9 +2095,6 @@ class WorkerRuntime:
         if self._engine is not None:
             self._engine.apply_settings(self._settings_snapshot())
         log.info("worker 已应用新配置：%s", sorted(cleaned))
-
-    def _settings(self) -> dict[str, Any]:
-        return self._settings_snapshot()
 
     # -- 分发 ------------------------------------------------------------
     def _dispatch(self, header: dict[str, Any], payload: bytes) -> None:
@@ -2376,7 +2400,10 @@ def run_console() -> int:
     except KeyboardInterrupt:
         log.info("前台运行被中断")
     finally:
-        runtime._shutdown_workers()  # noqa: SLF001 - 确保 worker 不残留
+        # asyncio.run 已关掉 _run 的循环：收尾用新循环跑异步清理（worker 停止
+        # 走 _pipe_send 护栏后不再提供同步路径）。
+        with contextlib.suppress(Exception):
+            asyncio.run(runtime._shutdown_workers())  # noqa: SLF001 - 确保 worker 不残留
     return 0
 
 

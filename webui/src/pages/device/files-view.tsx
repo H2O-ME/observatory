@@ -68,6 +68,8 @@ import { cn } from "@/lib/utils";
 
 /** One agent chunk (`MAX_CHUNK_BYTES` on both sides). */
 const CHUNK_BYTES = 1024 * 1024;
+/** 下载总量硬上限的容差：允许远端文件比列表时增长这么多（仍远小于内存风险）。 */
+const DOWNLOAD_GROWTH_TOLERANCE_BYTES = 64 * 1024 * 1024;
 
 interface Entry {
   name: string;
@@ -351,7 +353,16 @@ export function FilesView({ device }: { device: Device }) {
       const parts: BlobPart[] = [];
       let offset = 0;
       let total = entry.size;
+      // 硬上限：列表条目可能过期（远端文件在增长/已变化），eof 判据又被 agent
+      // 控制——没有上限时一条"列表说 1MB、实际无限追加的日志"能把浏览器内存
+      // 拉爆。上限 = 列表大小 + 64MB 容差（容忍合法增长），超限中止并明确报错。
+      const maxBytes = entry.size + DOWNLOAD_GROWTH_TOLERANCE_BYTES;
       for (let guard = 0; guard < 100_000; guard += 1) {
+        if (offset > maxBytes) {
+          throw new Error(
+            `文件比列表显示的大小（${formatBytes(entry.size)}）超出容差仍未见结尾，已中止下载`,
+          );
+        }
         const chunk = await api.readChunk(uid, entry.path, offset, CHUNK_BYTES, controller.signal);
         if (chunk.size > 0) total = chunk.size;
         if (chunk.blob.size === 0) break;

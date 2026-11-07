@@ -175,7 +175,6 @@ let unauthorizedHandler: ((requestEpoch: number) => void) | null = null;
  * store here would be circular.
  */
 let sessionEpoch = 0;
-let unauthorizedEpoch = -1;
 
 export function currentSessionEpoch(): number {
   return sessionEpoch;
@@ -192,16 +191,7 @@ export function setUnauthorizedHandler(handler: ((requestEpoch: number) => void)
 }
 
 function notifyUnauthorized(requestEpoch: number): void {
-  unauthorizedEpoch = requestEpoch;
   unauthorizedHandler?.(requestEpoch);
-}
-
-/**
- * True when this 401 belongs to a superseded request (pre-login in-flight or
- * a stale retry) and must not tear the current session down.
- */
-export function isStaleUnauthorized(): boolean {
-  return unauthorizedEpoch !== sessionEpoch;
 }
 
 // -------------------------------------------------------------- deadline budget ---
@@ -851,7 +841,13 @@ export function openEventSocket(options: {
     if (generation !== connectionGen) return;
     const list = origins.length ? origins : [`wss://${location.host}`];
     if (originCursor >= list.length) originCursor = 0;
-    const token = readToken();
+    // 同源候选不带 ?token=：浏览器握手会自动携带 obs_session HttpOnly cookie，
+    // 服务端（console/events.py）依次尝试 query token → cookie → bearer。
+    // 长效会话令牌进 URL 会落入反代/CDN 访问日志（保留期远长于会话期）；
+    // 跨域候选拿不到 SameSite=strict cookie，仍需 query token。
+    const origin = list[originCursor];
+    const sameOrigin = origin === `wss://${location.host}` || origin === `ws://${location.host}`;
+    const token = sameOrigin ? "" : readToken();
     const query = token ? `?token=${encodeURIComponent(token)}` : "";
     // 回调闭包绑定这条 socket 自己的身份（ws），不再读可变的 socket 变量。
     const ws = new WebSocket(`${list[originCursor]}${API_ROOT}/ws${query}`);

@@ -25,6 +25,13 @@ DEFAULT_CONCURRENCY = 2
 DEFAULT_THUMB_WIDTH = 320
 DEFAULT_THUMB_QUALITY = 68
 
+#: 解码前的像素数硬上限（0.3.23 审查补漏）。``max_frame_bytes`` 只限压缩后字节——
+#: 均匀色 6MB 压缩图可声明上亿像素，Pillow 默认阈值（~89.5M 像素，且超 2 倍才拒绝）
+#: 放行到 ~537MB RGB 解码内存；并发 2 路下两帧就能吃 ~1GB，小 VPS 直接 OOM。
+#: 数据源是可能被攻陷的受控端，必须在解码**前**按声明尺寸拒绝。
+#: 上限按服务端 max_width 上限 3840 × 2160 留 2 倍余量取整。
+MAX_PIXELS = 24_000_000
+
 _MIN_DIMENSION = 1
 _MAX_THUMB_WIDTH = 1024
 
@@ -38,7 +45,14 @@ def _open(data: bytes) -> Image.Image:
         raise ImageError("空图像数据")
     try:
         image = Image.open(io.BytesIO(data))
+        width, height = image.size
+        if width * height > MAX_PIXELS:
+            raise ImageError(
+                f"图像尺寸超限（{width}x{height}={width * height} 像素 > {MAX_PIXELS}），拒绝解码"
+            )
         image.load()
+    except ImageError:
+        raise
     except Exception as exc:  # noqa: BLE001 - Pillow 对坏数据抛的异常类型不统一，统一转成 ImageError
         raise ImageError(f"无法解码图像: {exc}") from exc
     if image.mode not in ("RGB", "L"):

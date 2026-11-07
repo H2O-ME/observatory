@@ -300,6 +300,11 @@ export function LiveView({ device }: Props) {
         URL.revokeObjectURL(lastUrlRef.current);
         lastUrlRef.current = "";
       }
+      // keepMounted 下切换设备时组件不重挂载：清掉上一台的画面尺寸与 RTT，
+      // 否则下一台的第一帧 onLoad 之前，指针坐标仍按旧设备宽高比换算
+      // （会点到错误位置），RTT 也显示上一台的值。
+      setNatural({ width: 0, height: 0 });
+      setRttMs(null);
       setFrameUrl("");
       setFps(0);
       setStatus(nextMessage ? "closed" : "idle");

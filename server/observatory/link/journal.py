@@ -164,21 +164,6 @@ class CommandRecord:
             "deadline_ms": int(deadline_ms if deadline_ms is not None else self.deadline_ms),
         }
 
-    def to_legacy(self) -> dict[str, Any]:
-        """0.2.x ``Command`` shape used by the legacy compatibility layer."""
-
-        return {
-            "id": self.id,
-            "type": self.kind,
-            "status": self.status,
-            "payload": dict(self.body),
-            "result": self.result,
-            "error": self.error,
-            "created_at_ms": self.created_at_ms,
-            "dispatched_at_ms": self.dispatched_at_ms,
-            "finished_at_ms": self.finished_at_ms,
-        }
-
 
 class WaiterSlot:
     """One scoped waiter. ``settle`` is safe to call more than once."""

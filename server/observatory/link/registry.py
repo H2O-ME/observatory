@@ -107,10 +107,6 @@ class DatabaseDeviceDirectory:
         )
 
 
-#: Backward-compatible alias — the actual contract is ``SessionProtocol``.
-SessionLike = SessionProtocol
-
-
 class LinkRegistry:
     """One live session per device id; replacement closes the stale session.
 
@@ -279,7 +275,6 @@ __all__ = [
     "DeviceIdentity",
     "InMemoryDeviceDirectory",
     "LinkRegistry",
-    "SessionLike",
     "registry",
     "require_session",
 ]

@@ -25,10 +25,7 @@ function channelsOf(data: Record<string, unknown> | undefined): { ws: number; po
 
 /** frame_added burst coalescer — see the handler below. Module-level so a
  *  socket reconnect never doubles the flush timer. */
-const pendingFrameInvalidation: { timer: number | undefined; uids: Set<string> } = {
-  timer: undefined,
-  uids: new Set(),
-};
+const pendingFrameInvalidation: { timer: number | undefined } = { timer: undefined };
 
 export function LiveBridge() {
   const queryClient = useQueryClient();
@@ -88,12 +85,11 @@ export function LiveBridge() {
         // Burst coalescing (0.3.7): a fleet capturing on its own interval can
         // emit dozens of frame_added per second; invalidating five query trees
         // per event hammered the API and re-rendered every list on the watch.
-        // Collect for 1.5s, then invalidate once.
-        pendingFrameInvalidation.uids.add(uid ?? "");
+        // Collect for 1.5s, then invalidate once. Re-arming while a flush is
+        // pending is a no-op: the pending flush already covers the new frame.
         if (!pendingFrameInvalidation.timer) {
           pendingFrameInvalidation.timer = window.setTimeout(() => {
             pendingFrameInvalidation.timer = undefined;
-            pendingFrameInvalidation.uids.clear();
             void queryClient.invalidateQueries({ queryKey: ["devices"] });
             void queryClient.invalidateQueries({ queryKey: ["frames"] });
             void queryClient.invalidateQueries({ queryKey: ["timeline"] });

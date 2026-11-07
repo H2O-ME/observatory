@@ -167,34 +167,6 @@ class LinkClosed(LinkError):
 
 
 # ------------------------------------------------------- 纯退避状态机 ---
-def reconnect_delays(count: int | None = None) -> tuple[float, ...]:
-    """重连退避序列（纯函数，默认 2→120s）。"""
-
-    if count is None:
-        return RECONNECT_DELAYS_S
-    if count <= 0:
-        return ()
-    if count <= len(RECONNECT_DELAYS_S):
-        return RECONNECT_DELAYS_S[:count]
-    return RECONNECT_DELAYS_S + (RECONNECT_DELAYS_S[-1],) * (count - len(RECONNECT_DELAYS_S))
-
-
-def probe_delay(attempt: int) -> float:
-    """第 ``attempt`` 次（0 起）WS 探测间隔（纯函数）：120,240,…,1800,1800…"""
-
-    if attempt < 0:
-        raise ValueError("attempt 不能为负")
-    return min(PROBE_BASE_S * (2.0**attempt), PROBE_MAX_S)
-
-
-def probe_delays(count: int) -> tuple[float, ...]:
-    """连续 ``count`` 次探测的间隔序列（纯函数，便于单测断言）。"""
-
-    if count <= 0:
-        return ()
-    return tuple(probe_delay(index) for index in range(count))
-
-
 @dataclass
 class CarrierPolicy:
     """载体升/降级的**纯**状态机：只存计数，不读时钟、不做 IO。
@@ -735,12 +707,14 @@ class Link:
         target = Path(destination)
         if ".." in target.parts:
             raise LinkBadRequest("安装包目标路径非法（含 .. 段）")
+        # 0.3.23 复查加固：目标路径本身也规范化，写盘与 os.replace 全部使用
+        # 解析后的绝对路径，杜绝任何非规范形式参与 IO。
+        target = target.resolve()
+        base_dir = target.parent
         target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_suffix(target.suffix + ".part")
-        base_dir = target.parent.resolve()
-        temporary = temporary.resolve()
-        if not temporary.is_relative_to(base_dir):
-            raise LinkBadRequest("安装包临时文件越出目标目录")
+        temporary = target.with_suffix(target.suffix + ".part").resolve()
+        if not (temporary.is_relative_to(base_dir) and target.is_relative_to(base_dir)):
+            raise LinkBadRequest("安装包目标路径越出目标目录")
         response = await self._request(
             "GET", f"/api/v1/public/agent/{version}/package", timeout=300.0
         )
@@ -1701,7 +1675,4 @@ __all__ = [
     "WS_CLOSE_RATE_LIMITED",
     "WS_CLOSE_UNAUTHORIZED",
     "WS_PATH",
-    "probe_delay",
-    "probe_delays",
-    "reconnect_delays",
 ]

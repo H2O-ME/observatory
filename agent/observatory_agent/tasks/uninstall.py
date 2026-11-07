@@ -510,8 +510,12 @@ async def perform_remote_uninstall(
         # 丢弃上一次卸载残留的状态文件，否则会读到旧的 ok=true 而误 ack。
         with contextlib.suppress(FileNotFoundError):
             status_path.unlink()
-        staged = stage_helper(install, staging_root=staging, now_ms=now_ms)
-        ticket = spawn_purge_helper(
+        # 0.3.23 审查补漏（与 tasks/update.py 同族）：copytree 整个 onedir 安装
+        # 目录、spawn 的文件落盘都是磁盘密集阻塞调用，跑在这里（runtime 主事件
+        # 循环的卸载协程）会把心跳/命令分发冻结数秒到数十秒。
+        staged = await asyncio.to_thread(stage_helper, install, staging_root=staging, now_ms=now_ms)
+        ticket = await asyncio.to_thread(
+            spawn_purge_helper,
             staged,
             install_dir=install,
             data_dir=data,
