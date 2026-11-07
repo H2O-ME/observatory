@@ -99,6 +99,19 @@ CONTROL_LEASE_CHECK_S = 1.0
 #: 等也都是分钟级——看门狗只防"处理器永不返回"（真机事故：常驻 PS 孙进程握
 #: 住管道），不改变任何正常路径。命令自带更长预算时按预算放宽。
 COMMAND_HANDLER_WATCHDOG_S = 660.0
+#: 0.3.22：所有服务进程 → worker 的管道写统一走护栏（0.3.21 只护栏了命令转发）。
+#: 管道写是阻塞 WriteFile，worker 挂死（不读管道）时写会永久阻塞——真机事故
+#: （2026-11-07，四楼公共教室下行全灭一整天）：配置广播/控制转发的裸写把分发
+#: 循环卡死，命令永远无人消费。超时后必须 force_close 关句柄，让阻塞线程的
+#: WriteFile 出错返回——否则每次超时都泄漏一个执行器线程，耗尽后所有
+#: to_thread 永久排队（佐证：该设备 sysinfo 停更）。
+PIPE_SEND_TIMEOUT_S = 10.0
+#: 0.3.22：分发循环停滞看门狗（秒）。分发循环是下行命令的**唯一**消费者，
+#: 它挂死/退出后设备"在线但永聋"——心跳与截帧都活着，服务端无从察觉。
+#: 监督器按 _maintenance_loop 的节律检查：超过该秒数没有消费任何下行信封
+#: 且链路在线，就取消并重生分发循环。必须明显大于最大正常等待（exec 看门狗
+#: 660s + 分发余量），否则长命令执行期间会被误杀。
+DISPATCH_STALL_WATCHDOG_S = 900.0
 
 
 def _now_ms() -> int:
@@ -286,6 +299,14 @@ class ServiceRuntime:
         self._link: Link | None = None
         self._outbox: Outbox | None = None
         self._dispatcher = CommandDispatcher()
+        #: 0.3.22：管道 IO 专用执行器（小而独立）。默认执行器的线程可能全部
+        #: 卡死在阻塞 WriteFile 上（护栏超时只放弃等待、杀不掉阻塞读写的线程），
+        #: 之后的 force_close/管道写如果还走默认执行器就会永久排队。
+        self._pipe_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="obs-pipe")
+        #: 0.3.22：分发循环任务与最后消费时刻（单调时钟）。监督器据此重生停滞的循环。
+        self._dispatch_task: asyncio.Task[Any] | None = None
+        self._dispatch_alive_at: float = 0.0
+        self._dispatch_respawn_count = 0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._stop_event: asyncio.Event | None = None
@@ -397,7 +418,7 @@ class ServiceRuntime:
             await self._ensure_enrolled()
             await self._link.start()
             tasks = [
-                asyncio.create_task(self._dispatch_loop(), name="agent-dispatch"),
+                self._spawn_dispatch_loop(),
                 asyncio.create_task(self._session_loop(), name="agent-sessions"),
                 asyncio.create_task(self._sysinfo_loop(), name="agent-sysinfo"),
                 asyncio.create_task(self._maintenance_loop(), name="agent-maintenance"),
@@ -408,6 +429,9 @@ class ServiceRuntime:
                 for task in tasks:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
+                # 0.3.22：管道执行器里可能有被 force_close 解救后正在退出的
+                # 线程；不 wait（进程即将退出），只停止接收新任务。
+                self._pipe_executor.shutdown(wait=False, cancel_futures=True)
         finally:
             link = self._link
             if link is not None:
@@ -907,7 +931,7 @@ class ServiceRuntime:
             # A2：worker 不再读 config.json（SYSTEM 独占），所以**必须**在 hello
             # 之后立刻把非敏感设置推给它。此前这条同步只在配置变化时发生，
             # worker 靠自读文件兜底；现在兜底没有了，首帧推送就是唯一来源。
-            self._send_config_to(session_id)
+            await self._send_config_to(session_id)
             return
         if envelope.type == "heartbeat":
             self._health.update(
@@ -935,20 +959,38 @@ class ServiceRuntime:
         log.debug("忽略 worker 上行类型 %s（session=%s）", envelope.type, session_id)
 
     # -- 下行分发 --------------------------------------------------------
+    def _spawn_dispatch_loop(self) -> asyncio.Task[Any]:
+        """创建分发循环任务并记录句柄（0.3.22 监督器重生时复用）。"""
+
+        self._dispatch_alive_at = time.monotonic()
+        task = asyncio.create_task(self._dispatch_loop(), name="agent-dispatch")
+        self._dispatch_task = task
+        return task
+
     async def _dispatch_loop(self) -> None:
         assert self._link is not None
         while not self._stop_flag.is_set():
             try:
-                envelope = await self._link.recv()
+                # 0.3.22：recv 带 60s 上限——设备安静（没有下行）时也要周期性
+                # 刷新存活时刻，否则监督器会把"没命令"误判成"循环挂死"。
+                envelope = await asyncio.wait_for(self._link.recv(), timeout=60.0)
+            except asyncio.TimeoutError:
+                self._dispatch_alive_at = time.monotonic()
+                continue
             except LinkClosed:
                 log.info("链路已关闭，命令分发退出")
                 return
+            # 0.3.22：每次消费都刷新存活时刻——监督器（_maintenance_loop）发现
+            # 超过 DISPATCH_STALL_WATCHDOG_S 没刷新就重生本循环。分发循环是
+            # 下行命令的唯一消费者，挂死即"在线但永聋"（真机事故 2026-11-07）。
+            self._dispatch_alive_at = time.monotonic()
             try:
                 await self._handle_downlink(envelope)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - 单条下行失败不能终止分发
                 log.exception("处理下行信封失败 type=%s", envelope.type)
+            self._dispatch_alive_at = time.monotonic()
 
     async def _handle_downlink(self, envelope: Any) -> None:
         kind = envelope.type
@@ -974,7 +1016,7 @@ class ServiceRuntime:
             )
             if changed:
                 log.info("服务端配置已更新：%s", sorted(values or {}))
-            self._broadcast_config()
+            await self._broadcast_config()
             return
         if kind == "welcome":
             values = body.get("config")
@@ -982,7 +1024,7 @@ class ServiceRuntime:
                 self._store.apply_server_config(
                     values, server_time_ms=int(body.get("server_time_ms") or 0)
                 )
-                self._broadcast_config()
+                await self._broadcast_config()
             offer = body.get("update_offer")
             if isinstance(offer, dict):
                 await self._dispatch_internal("update", offer)
@@ -1066,10 +1108,29 @@ class ServiceRuntime:
 
         这类下行没有服务端创建的 command id，结果通过事件/``uninstall_ack`` 表达；
         仍然复用 dispatcher 的处理器与幂等，避免第二条更新/卸载实现。
+
+        0.3.22：与 _handle_command 同款看门狗——welcome 里的 update_offer 以前
+        裸 await 处理器，更新下载/落盘卡死会把分发循环永久占住（监督器只能
+        重生，更新却要重来）。预算与命令路径一致（deadline 缺省按看门狗下限）。
         """
 
         command = Command(id=new_id(), type=command_type, payload=dict(payload))
-        result = await self._dispatcher.dispatch(command)
+        budget_s = COMMAND_HANDLER_WATCHDOG_S
+        if command.deadline_ms:
+            budget_s = max(budget_s, command.deadline_ms / 1000 + 30)
+        try:
+            result = await asyncio.wait_for(self._dispatcher.dispatch(command), timeout=budget_s)
+        except asyncio.TimeoutError:
+            log.error(
+                "内部派发 %s 超过 %.0fs 未返回，放弃等待（分发循环继续）",
+                command_type,
+                budget_s,
+            )
+            result = CommandResult(
+                ok=False,
+                error=f"内部派发 {command_type} 超过 {budget_s:.0f}s 未返回，已放弃等待",
+                error_code="TIMEOUT",
+            )
         log.info(
             "内部派发 %s 完成 ok=%s error=%s", command_type, result.ok, result.error or "-"
         )
@@ -1403,6 +1464,61 @@ class ServiceRuntime:
             self._updating = False
         await self._send_event(name, data)
 
+    async def _pipe_send(
+        self,
+        session_id: int | None,
+        pipe: Any,
+        envelope: Any,
+        payload: bytes = b"",
+        *,
+        timeout_s: float | None = None,
+    ) -> None:
+        """护栏内的服务进程 → worker 管道写（0.3.22 统一入口）。
+
+        管道写是阻塞 ``WriteFile``：worker 挂死（不读管道）时写会永久阻塞。
+        0.3.21 只护栏了命令转发，配置广播（``_broadcast_config``）、hello 配置
+        （``_send_config_to``）与控制转发（``_forward_control``）仍是裸写——
+        真机事故（2026-11-07，四楼公共教室）：裸写卡死分发循环，设备"在线但
+        永聋"一整天。三条铁律：
+
+        1. 写必须在**专用执行器**（``_pipe_executor``）里跑——默认执行器的
+           线程可能已被先前超时的写全部占死，再投进去只会永久排队；
+        2. 超时必须 ``force_close`` 关句柄——``wait_for`` 只放弃等待，阻塞在
+           ``WriteFile`` 里的线程不会自己退出，不关句柄就是每次超时泄漏一个
+           线程，直到执行器耗尽、``to_thread`` 全面瘫痪（佐证：该设备 sysinfo
+           停更）；``force_close`` 不取 ``_write_lock``——持锁线程正阻塞在写上，
+           取锁反而死锁（与 pipe.stop() 兜底强关同一理由）；
+        3. 超时抛 ``asyncio.TimeoutError``，由调用方按"管道已重置"处理。
+        """
+
+        loop = asyncio.get_running_loop()
+        effective_timeout = PIPE_SEND_TIMEOUT_S if timeout_s is None else float(timeout_s)
+        try:
+            await asyncio.wait_for(
+                loop.run_in_executor(self._pipe_executor, pipe.send, envelope, payload),
+                timeout=effective_timeout,
+            )
+        except asyncio.TimeoutError:
+            log.error(
+                "会话 %s 的管道写入 %.0fs 超时（worker 无响应），强制关闭管道解救阻塞线程",
+                session_id,
+                effective_timeout,
+            )
+            force_close = getattr(pipe, "force_close", None)
+            if force_close is not None:
+                try:
+                    await asyncio.wait_for(
+                        loop.run_in_executor(self._pipe_executor, force_close), timeout=5.0
+                    )
+                except Exception:  # noqa: BLE001 - 解救失败也要返回，让调用方回执
+                    log.exception("强制关闭无响应管道失败 session=%s", session_id)
+            else:  # 测试替身/无 force_close 的旧实现：退回整段 stop（放线程）
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(
+                        loop.run_in_executor(self._pipe_executor, pipe.close), timeout=15.0
+                    )
+            raise
+
     async def _forward_to_worker(self, command: Command) -> None:
         session_id = self._pick_session()
         pipe = self._pipes.get(session_id) if session_id is not None else None
@@ -1437,19 +1553,15 @@ class ServiceRuntime:
             )
             # 0.3.21：pipe.send 是阻塞写，worker 挂死（管道缓冲写满）时会把
             # 整个分发循环永久卡住——真机事故（2026-11-05，设备命令通道 18:29
-            # 起全灭 1.5 小时）。放线程 + 超时：超时即认定该 worker 管道坏死，
-            # 关闭管道（服务会重新拉起 worker）并回明确失败，绝不拖死循环。
-            await asyncio.wait_for(asyncio.to_thread(pipe.send, envelope), timeout=10.0)
+            # 起全灭 1.5 小时）。0.3.22 起统一走 _pipe_send 护栏（专用执行器 +
+            # 超时 + force_close 解救阻塞线程），不再用默认执行器。
+            await self._pipe_send(session_id, pipe, envelope)
         except asyncio.TimeoutError:
             log.error(
-                "会话 %s 的管道写入 %ss 超时（worker 无响应），强制关闭管道",
+                "会话 %s 的管道写入 %.0fs 超时（worker 无响应），强制关闭管道",
                 session_id,
-                10,
+                PIPE_SEND_TIMEOUT_S,
             )
-            try:
-                pipe.close()
-            except Exception:  # noqa: BLE001 - 关闭失败也必须回执
-                log.exception("关闭无响应管道失败 session=%s", session_id)
             self._pipes.pop(session_id, None)
             await self._send_result(
                 command.id,
@@ -1525,7 +1637,12 @@ class ServiceRuntime:
             await self._send_event("control_failed", {"reason": "没有可用的交互式会话", "session": session_token})
             return
         try:
-            pipe.send(
+            # 0.3.22：控制帧也走 _pipe_send 护栏——控制输入是分发循环上的高频
+            # 路径，worker 挂死时裸写同样能把循环卡死（真机事故同类后门）。
+            # 控制帧小、正常瞬时返回；超时按管道坏死处理并回报 control_failed。
+            await self._pipe_send(
+                session_id,
+                pipe,
                 new_envelope(
                     "control",
                     {
@@ -1540,7 +1657,12 @@ class ServiceRuntime:
                         "ttl_s": int(body.get("ttl_s") or 0),
                     },
                     ts_ms=_now_ms(),
-                )
+                ),
+            )
+        except asyncio.TimeoutError:
+            log.warning("控制指令转发超时 session=%s（管道已重置）", session_token)
+            await self._send_event(
+                "control_failed", {"reason": "受控端 worker 无响应，管道已重置", "session": session_token}
             )
         except Exception as exc:  # noqa: BLE001 - 管道断开要可观测
             log.warning("控制指令转发失败 session=%s：%s", session_token, exc)
@@ -1600,22 +1722,30 @@ class ServiceRuntime:
             self._drop_control_lease(token, reason="ttl")
         return expired
 
-    def _broadcast_config(self) -> None:
+    async def _broadcast_config(self) -> None:
         config = self._store.settings_snapshot()
         for session_id, pipe in list(self._pipes.items()):
             if not pipe.connected.is_set():
                 continue
             try:
-                pipe.send(new_envelope("config", {"config": config}, ts_ms=_now_ms()))
+                # 0.3.22：裸 pipe.send 是真机事故（四楼公共教室）的头号嫌疑——
+                # worker 挂死时阻塞 WriteFile 卡死分发循环。统一走 _pipe_send
+                # 护栏；失败（含超时重置）下次 hello/配置变化会重新同步。
+                await self._pipe_send(
+                    session_id, pipe, new_envelope("config", {"config": config}, ts_ms=_now_ms())
+                )
             except Exception as exc:  # noqa: BLE001 - 未连接/断开的会话下次 hello 会重新同步
-                log.debug("向会话 %s 广播配置失败：%s", session_id, exc)
+                log.warning("向会话 %s 广播配置失败：%s", session_id, exc)
 
-    def _send_config_to(self, session_id: int) -> None:
+    async def _send_config_to(self, session_id: int) -> None:
         """把当前设置推给**指定**会话（A2：worker 的唯一设置来源）。
 
         worker 用登录用户令牌运行，读不了 SYSTEM 独占的 config.json；它启动时
         只有 ``DEFAULT_SETTINGS``，必须由服务进程在 hello 之后把服务端下发的
         设置补上，否则"服务端改配置"在真机上永远不会生效。
+
+        0.3.22：走 _pipe_send 护栏——worker 起来后立刻挂死时，裸写会在 hello
+        处理里把管道消息处理任务卡死。
         """
 
         pipe = self._pipes.get(session_id)
@@ -1623,7 +1753,9 @@ class ServiceRuntime:
             return
         config = self._store.settings_snapshot()
         try:
-            pipe.send(new_envelope("config", {"config": config}, ts_ms=_now_ms()))
+            await self._pipe_send(
+                session_id, pipe, new_envelope("config", {"config": config}, ts_ms=_now_ms())
+            )
             log.info("已向会话 %s 下发配置（%s 项）", session_id, len(config))
         except Exception as exc:  # noqa: BLE001 - 管道断开时记日志，下次 hello 再同步
             log.warning("向会话 %s 下发配置失败：%s", session_id, exc)
@@ -1675,12 +1807,20 @@ class ServiceRuntime:
                 log.warning("刷新 sysinfo 失败", exc_info=True)
 
     async def _maintenance_loop(self) -> None:
-        """清理过期控制会话（服务端 TTL 是主机制，这里只防内存泄漏）。"""
+        """清理过期控制会话（服务端 TTL 是主机制，这里只防内存泄漏）。
+
+        0.3.22 起同时承担**分发循环监督**：分发循环是下行命令的唯一消费者，
+        它挂死或退出后设备"在线但永聋"——心跳、截帧一切正常，服务端无从察觉，
+        命令在重投循环里烂掉（真机事故 2026-11-07，四楼公共教室一整天）。
+        监督只认一个信号：``_dispatch_alive_at`` 超过 ``DISPATCH_STALL_WATCHDOG_S``
+        没刷新且链路在线 → 取消旧任务并重生。重生上限不做——聋着比反复重生更糟。
+        """
 
         while not self._stop_flag.is_set():
             await self._sleep_or_stop(CONTROL_REAP_S)
             if self._stop_flag.is_set():
                 return
+            self._supervise_dispatch_loop()
             expired = self._expire_control_leases(self._control_clock())
             for token in expired:
                 await self._send_event("control_failed", {"reason": "控制会话已到期", "session": token})
@@ -1688,6 +1828,30 @@ class ServiceRuntime:
                 keep = dict(list(self._controls.items())[-16:])
                 log.warning("控制会话表异常增长（%s），保留最近 16 个", len(self._controls))
                 self._controls = keep
+
+    def _supervise_dispatch_loop(self) -> None:
+        """分发循环停滞看门狗：停滞即重生（0.3.22）。"""
+
+        link = self._link
+        if link is None or not link.connected():
+            # 链路不在线时 recv() 本来就收不到东西，不算分发循环的错。
+            self._dispatch_alive_at = time.monotonic()
+            return
+        stalled_for = time.monotonic() - self._dispatch_alive_at
+        if stalled_for < DISPATCH_STALL_WATCHDOG_S:
+            return
+        old_task = self._dispatch_task
+        self._dispatch_respawn_count += 1
+        log.error(
+            "分发循环 %.0fs 未消费任何下行（监督器第 %s 次重生）——设备此前处于"
+            "『在线但永聋』状态，所有命令都会超时；若反复出现请拉 agent 日志排障",
+            stalled_for,
+            self._dispatch_respawn_count,
+        )
+        if old_task is not None and not old_task.done():
+            old_task.cancel()
+        # 时间戳先复位：新循环首条信封前若再次被监督，说明连 recv() 都进不去。
+        self._spawn_dispatch_loop()
 
 
 # ------------------------------------------------------------------ worker ---

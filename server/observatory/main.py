@@ -217,6 +217,14 @@ async def _housekeeping(app: FastAPI) -> None:
             expired = await app.state.journal.expire_stale()
             if expired:
                 log_event(log, logging.INFO, "housekeeping.commands_expired", count=expired)
+            # 0.3.22：下行投递停滞看门狗——会话 outbox 里最老的未确认下行超过
+            # downlink_stall_close_s 就断开该会话，逼设备重连、新会话
+            # replay_pending 重投。僵尸 WS 会话（0.3.20 事故形态：TCP 靠
+            # ping/pong 保活、应用层永不读）和设备消费停滞（0.3.21 后仍可能）
+            # 的共同特征都是"在线但下行投不动"，在服务端可见的表现就是这里。
+            stalled = await _close_stalled_downlinks(app)
+            if stalled:
+                log_event(log, logging.WARNING, "housekeeping.downlink_stall_closed", count=stalled)
             # P2: a `running` uninstall whose ACK never arrives becomes
             # `unconfirmed` — "we do not know", never "failed" and never "done".
             # The device record stays until an operator resolves it.
@@ -250,6 +258,47 @@ async def _housekeeping(app: FastAPI) -> None:
             raise
         except Exception as exc:  # noqa: BLE001 - maintenance must never kill the loop
             log_event(log, logging.ERROR, "housekeeping.failed", error=str(exc))
+
+
+async def _close_stalled_downlinks(app: FastAPI) -> int:
+    """断开下行投递停滞的会话，返回断开的会话数（0.3.22 看门狗）。
+
+    判据：会话 outbox 里最老的未确认下行的服务端 ``ts_ms`` 距今超过
+    ``downlink_stall_close_s``（默认 900s，高于 exec 最长 600s 预算 + 回执
+    transit，避免把正在执行的长命令误断；0 = 关闭）。断开 = ``close(4000)``：
+    设备下一轮 link 请求会建立新会话并 ``replay_pending`` 重投，僵尸会话被
+    丢弃——这是 0.3.20 事故复盘里"服务端对 in-flight 命令烂掉无感知"的兜底。
+    """
+
+    threshold_ms = int(app.state.settings.downlink_stall_close_s) * 1000
+    if threshold_ms <= 0:
+        return 0
+    now_ms = clock.now_ms()
+    closed = 0
+    for session in list(app.state.links.sessions()):
+        outbox = getattr(session, "outbox", None)
+        if outbox is None or getattr(outbox, "closed", False):
+            continue
+        oldest = outbox.oldest_pending_ts_ms()
+        if oldest is None or now_ms - oldest < threshold_ms:
+            continue
+        log_event(
+            log,
+            logging.WARNING,
+            "link.downlink_stall",
+            device_id=getattr(session, "device_id", None),
+            uid=getattr(session, "uid", None),
+            stalled_ms=now_ms - oldest,
+            pending=outbox.pending_count(),
+            carrier=getattr(session, "carrier", None),
+        )
+        try:
+            await session.close(code=4000, reason="downlink delivery stall")
+        except Exception as exc:  # noqa: BLE001 - 关闭失败下轮再试
+            log_event(log, logging.WARNING, "link.downlink_stall_close_failed", error=str(exc))
+            continue
+        closed += 1
+    return closed
 
 
 def _load_agent_config_provider() -> Any | None:

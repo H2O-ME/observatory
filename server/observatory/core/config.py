@@ -19,7 +19,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PRODUCT = "Observatory"
-FALLBACK_VERSION = "0.3.21"
+FALLBACK_VERSION = "0.3.22"
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 #: Lowest agent build that may replace itself through the v3 update path (A3/A18).
@@ -136,6 +136,11 @@ class Settings(BaseSettings):
     # ---- behaviour ----------------------------------------------------------
     log_level: str = "INFO"
     housekeeping_interval_s: int = Field(default=20, ge=5, le=3600)
+    #: 0.3.22：下行投递停滞看门狗（秒）。会话 outbox 里最老的未确认下行超过该
+    #: 时长 → 判定这条会话投递停滞（僵尸 WS/设备消费停摆），断开逼设备重连、
+    #: 新会话 replay_pending 重投。阈值必须高于最长的正常命令预算（exec 最长
+    #: 600s + 回执 transit），否则长命令执行期间会被误断；0 = 关闭。
+    downlink_stall_close_s: int = Field(default=900, ge=0, le=86400)
 
     @field_validator("data_dir", mode="before")
     @classmethod

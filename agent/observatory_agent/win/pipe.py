@@ -488,6 +488,27 @@ class PipeServer:
                 self.connected.clear()
                 raise PipeUnavailable(f"写管道失败: {exc}") from exc
 
+    def force_close(self) -> None:
+        """不取锁立即关句柄（0.3.22 管道写护栏专用）。
+
+        使用场景：``send`` 在护栏超时后，另一条线程仍阻塞在 ``WriteFile`` 上
+        并持有 ``_write_lock``——此时取锁必然死锁，唯一解法是像 ``stop`` 的
+        兜底强关一样直接 ``CloseHandle``：阻塞中的写会以错误返回、线程退出、
+        锁释放。之后读线程的 ``finally`` 关闭看到 ``_handle is None`` 不会重复
+        关闭。句柄值不会被复用进新写：``send`` 每次都在锁内重新读
+        ``self._handle``，而这里先把它置 ``None``。
+        """
+
+        handle = self._handle
+        self._handle = None
+        self.connected.clear()
+        if handle is None:
+            return
+        with contextlib.suppress(Exception):
+            import win32file
+
+            win32file.CloseHandle(handle)
+
     # -- internals ---------------------------------------------------------
     def _run(self) -> None:
         try:

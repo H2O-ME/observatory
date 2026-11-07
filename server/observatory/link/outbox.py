@@ -60,6 +60,18 @@ class Outbox:
     def pending_count(self) -> int:
         return len(self._pending)
 
+    def oldest_pending_ts_ms(self) -> int | None:
+        """最早一条未确认下行的服务端 ``ts_ms``；空队列（或全无时间戳）返回 ``None``。
+
+        0.3.22 下行投递停滞看门狗用：一条命令在 outbox 里挂着远超其预算还没被
+        ack，说明这条会话的下行通道已经投不动了（僵尸 WS 会话/设备消费停滞，
+        真机事故 2026-11-05/2026-11-07 的共同形态），由 housekeeping 断开逼重连。
+        ``ts_ms<=0`` 的信封不可信（时钟缺省），整体视为"无样本"避免误判成无穷老。
+        """
+
+        stamps = [int(envelope.ts_ms) for envelope in self._pending.values() if int(envelope.ts_ms) > 0]
+        return min(stamps) if stamps else None
+
     def pending(self, limit: int | None = None) -> list[Envelope]:
         values = list(self._pending.values())
         if limit is not None:
