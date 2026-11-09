@@ -86,7 +86,11 @@ def test_skill_download_returns_rendered_zip(client) -> None:
 
 
 def _assert_skill_contract(skill: str, cli: str) -> None:
-    """0.3.20 文档契约（实测报告 A1-A9 的防复发钉子）。"""
+    """0.3.20 文档契约（实测报告 A1-A9 的防复发钉子）。
+
+    0.3.23 增补：远程执行/调试实战守则（长任务树杀、truncate 铁律、脚本编码、
+    进程自匹配、runspace 池参数）同样是防复发钉子，不得被后续重写删掉。
+    """
 
     # A1：读写走 /files/raw；/files/op 的 read/write 教法不得复活
     assert "/files/raw" in skill and "X-Eof" in skill and "truncate" in skill
@@ -104,6 +108,22 @@ def _assert_skill_contract(skill: str, cli: str) -> None:
                    "x-file-size", "x-eof", "OBS_ALLOW_PRIVATE", "OBS_ALLOW_HTTP",
                    "sys.stdout.reconfigure", "_PinnedHTTPS", "def cmd_exec"):
         assert needle in cli, needle
+    # 实战守则（0.3.23）：文件覆盖铁律 + 长任务/调试坑
+    for needle in (
+        "truncate=true",            # 首片必须截断，短文件覆盖长文件不留旧尾
+        "残留旧尾字节",              # 事故描述，保证教法有根有据
+        "找不到文件或路径（2）",      # delete 不存在文件的 422 容错
+        "taskkill /T /F",           # exec 超时连树杀
+        "Start-Process",            # 后台作业标准拉起方式
+        "WindowStyle Hidden",
+        "ProcessId -ne $PID",       # 存活自检排除自身
+        "Parser::ParseFile",        # 下发前语法预检
+        "GBK",                      # PS 5.1 编码坑
+        "pool ≤250",                # runspace 池上限
+        "BeginConnect",             # 批量 TCP 探测
+        "状态文件",                  # 不做阻塞轮询
+    ):
+        assert needle in skill, f"实战守则缺失：{needle}"
 
 
 def test_files_op_rejects_read_write_before_reachability(client) -> None:
