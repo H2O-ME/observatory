@@ -172,7 +172,9 @@ export function AgentAccessPage() {
   };
 
   return (
-    <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 p-4 pb-16 md:p-6">
+    // 页面级容器不设自己的 max-width/内边距（DESIGN_SYSTEM §4）：所有控制台
+    // 页面统一继承 AppShell 的 1360px 容器，左右边缘才与其它页面对齐。
+    <div className="flex w-full min-w-0 flex-col gap-6 pb-10">
       <PageHeader
         title="Agent 接入"
         description="把控制台的全部能力交给本地 AI agent：一把长效密钥调用所有 API，skill 包即装即用"
@@ -183,7 +185,9 @@ export function AgentAccessPage() {
         <ErrorBlock message={statusQuery.error instanceof Error ? statusQuery.error.message : "加载状态失败"} />
       )}
 
-      <div className="grid items-start gap-4 lg:grid-cols-2">
+      {/* 两张卡等高（去掉 items-start）：右卡内容更多，items-start 会让两张卡
+          底边错开一截，下面的「快速上手」跟着显得歪。 */}
+      <div className="grid gap-4 lg:grid-cols-2">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -201,7 +205,8 @@ export function AgentAccessPage() {
               （免密码登录、无登录限速、改密不吊销）。密钥只存服务端，不回显、不下发给受控端。
             </p>
             {newKey && (
-              <div className="flex flex-col gap-2 rounded-lg border border-warning/40 bg-warning/10 p-3">
+              // 不透明令牌（DESIGN_SYSTEM §2）：Chromium 81 算不了 alpha 工具类。
+              <div className="flex flex-col gap-2 rounded-lg border border-warning bg-warning-soft p-3">
                 <div className="font-mono text-xs break-all select-all">{newKey}</div>
                 <div className="flex items-center gap-2">
                   <CopyButton value={newKey} label="复制密钥" />

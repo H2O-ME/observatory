@@ -293,15 +293,13 @@ function DesktopSidebar({ active }: { active: (to: string) => boolean }) {
   );
 }
 
-function MobileTopBar() {
-  const viewport = useViewport();
-  const watch = viewport === "watch";
-
+function MobileTopBar({ watch }: { watch: boolean }) {
   return (
     <header
       className={cn(
-        "relative z-20 flex shrink-0 items-center border-b border-border bg-background px-3 pt-safe",
-        watch ? "h-11" : "h-12",
+        // Watch scrolls the document, so the bar must stick to stay visible.
+        "z-20 flex shrink-0 items-center border-b border-border bg-background px-3 pt-safe",
+        watch ? "sticky top-0 h-11" : "relative h-12",
       )}
     >
       <BrandMark compact={watch} />
@@ -490,22 +488,37 @@ export function AppShell() {
   // The content area is the scroll container (desktop and mobile both), so a
   // client-side route change does not reset window scroll. Reset it explicitly
   // or a deep page leaves the next page half-scrolled.
+  //
+  // Watch is the exception: it scrolls the *document*. The Chromium 81 WebView
+  // on the watch pans only the visual viewport during a pinch zoom and never
+  // hands the gesture to an inner `overflow-y-auto` container — after zooming
+  // in, the page could neither scroll nor be tapped reliably. With the root
+  // scroller the zoom + pan chain is native browser behavior again.
   useEffect(() => {
-    mainRef.current?.scrollTo({ top: 0, behavior: "auto" });
-  }, [pathname]);
+    if (watch) window.scrollTo({ top: 0, behavior: "auto" });
+    else mainRef.current?.scrollTo({ top: 0, behavior: "auto" });
+  }, [pathname, watch]);
 
   return (
-    <div className="relative flex app-vh w-full flex-col overflow-hidden bg-background">
+    <div
+      className={cn(
+        "relative flex w-full flex-col bg-background",
+        // Only the watch drops the fixed-viewport shell; desktop/mobile keep
+        // the inner scroll container (and with it the no-scroll-reset routes).
+        watch ? null : "app-vh overflow-hidden",
+      )}
+    >
       <div className="relative z-10 flex min-h-0 w-full flex-1">
         {desktop ? <DesktopSidebar active={active} /> : null}
 
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          {desktop ? null : <MobileTopBar />}
+        <div className={cn("flex min-w-0 flex-1 flex-col", watch ? null : "min-h-0")}>
+          {desktop ? null : <MobileTopBar watch={watch} />}
 
           <main
             ref={mainRef}
             className={cn(
-              "min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain",
+              "min-w-0 flex-1",
+              watch ? null : "min-h-0 overflow-y-auto overscroll-contain",
               desktop ? null : "pb-dock",
             )}
           >

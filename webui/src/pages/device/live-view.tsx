@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { Expand, Keyboard, MousePointer2, Power, RefreshCw, WifiOff } from "lucide-react";
+import { Expand, Keyboard, MousePointer2, Power, RefreshCw, Shrink, WifiOff } from "lucide-react";
 
 import { FrameStage } from "@/components/frame-view";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -162,6 +162,10 @@ export function LiveView({ device }: Props) {
   const [rttMs, setRttMs] = useState<number | null>(null);
   const [textValue, setTextValue] = useState("");
   const [isFullscreen, setIsFullscreen] = useState(false);
+  // 手表 WebView 的 Fullscreen API 多半被禁用：调用不存在、被拒或解析成功却
+  // 永远不触发 fullscreenchange。检测到任何一种情况就退回 CSS 固定层全屏
+  // （pseudoFullscreen）——画面铺满表盘，靠右上角按钮退出。
+  const [pseudoFullscreen, setPseudoFullscreen] = useState(false);
   // W5: stage 节点也暴露成 state。初始不可控制（polling/offline）时 stage 根本
   // 没渲染，滚轮监听不能只依赖稳定的 send；节点出现/消失时 effect 需要重绑。
   const [stageNode, setStageNode] = useState<HTMLDivElement | null>(null);
@@ -226,7 +230,14 @@ export function LiveView({ device }: Props) {
     return () => document.removeEventListener("fullscreenchange", sync);
   }, []);
 
-  const stageSizeStyle: CSSProperties | undefined = isFullscreen
+  // 会话结束（到期/断开/主动停止）时一并退出 CSS 全屏，避免盖住状态提示。
+  useEffect(() => {
+    if (!session) setPseudoFullscreen(false);
+  }, [session]);
+
+  const fullscreen = isFullscreen || pseudoFullscreen;
+
+  const stageSizeStyle: CSSProperties | undefined = fullscreen
     ? { width: "100%", height: "100%" }
     : viewport === "desktop"
       ? { width: "min(100%, max(20rem, calc((100vh - 26rem) * 16 / 9)))" }
@@ -804,7 +815,27 @@ export function LiveView({ device }: Props) {
 
   const requestFullscreen = () => {
     const element = stageRef.current?.parentElement ?? stageRef.current;
-    void element?.requestFullscreen?.();
+    const enter = (element as { requestFullscreen?: () => unknown } | null)?.requestFullscreen;
+    if (typeof enter === "function") {
+      try {
+        const result = enter.call(element) as Promise<void> | undefined;
+        // 兑现不了的承诺：resolve 但 fullscreenchange 永远不来（WebView 未
+        // 启用该 feature）。给一次检测机会，没进去就走 CSS 全屏。
+        result?.catch?.(() => setPseudoFullscreen(true));
+        window.setTimeout(() => {
+          if (!document.fullscreenElement) setPseudoFullscreen(true);
+        }, 400);
+        return;
+      } catch {
+        /* fall through to the CSS overlay */
+      }
+    }
+    setPseudoFullscreen(true);
+  };
+
+  const exitPseudoFullscreen = () => {
+    if (document.fullscreenElement) void document.exitFullscreen?.();
+    setPseudoFullscreen(false);
   };
 
   // W5：callback ref。stage 只在设备具备实时能力时渲染，用 state 记录节点，
@@ -909,14 +940,31 @@ export function LiveView({ device }: Props) {
         </div>
       </div>
 
-      <div className="min-w-0 rounded-md border border-border bg-card p-2 sm:p-2.5">
+      <div
+        className={cn(
+          "min-w-0 rounded-md border border-border bg-card p-2 sm:p-2.5",
+          // CSS 全屏回退：整个卡片变成覆盖层，画面铺满表盘；普通布局不受影响。
+          pseudoFullscreen && "fixed inset-0 z-50 flex flex-col justify-center rounded-none border-0 p-1",
+        )}
+      >
         <div
           className={cn(
             "relative flex min-w-0 justify-center",
-            isFullscreen && "h-full w-full items-center",
+            fullscreen && "h-full w-full items-center",
           )}
-          style={isFullscreen ? { width: "100%", height: "100%" } : undefined}
+          style={fullscreen ? { width: "100%", height: "100%" } : undefined}
         >
+          {pseudoFullscreen ? (
+            <Button
+              variant="outline"
+              size="sm"
+              className="absolute top-2 right-2 z-10 min-h-9 bg-card"
+              onClick={exitPseudoFullscreen}
+            >
+              <Shrink className="size-4" aria-hidden />
+              退出全屏
+            </Button>
+          ) : null}
           <div
             ref={attachStage}
             tabIndex={0}
@@ -924,8 +972,9 @@ export function LiveView({ device }: Props) {
               "ratio-16-9 relative mx-auto block w-full touch-none select-none overflow-hidden bg-muted outline-none",
               "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
               session ? "cursor-crosshair" : "cursor-default",
-              !isFullscreen && "rounded-md border border-border",
-              watch && "max-h-[48vh]",
+              !fullscreen && "rounded-md border border-border",
+              // 全屏（原生或 CSS 回退）时画面铺满，不再受手表的视口高度上限。
+              watch && !fullscreen && "max-h-[48vh]",
             )}
             style={stageSizeStyle}
             onPointerMove={onPointerMove}

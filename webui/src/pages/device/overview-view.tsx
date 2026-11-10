@@ -283,9 +283,10 @@ export function OverviewView({ device, onRefresh }: Props) {
         </Banner>
       ) : null}
 
-      {/* 0.3.20 重排：每行「2+1」，左右高度接近，不再出现大片空洞。 */}
+      {/* 0.3.20 重排：每行「2+1」，左右高度接近。0.3.23：右列面板缺失时
+          左面板补满整行——空着 1/3 宽的洞比不对齐更难看。 */}
       <div className="grid min-w-0 grid-cols-1 items-start gap-6 lg:grid-cols-3">
-        <Panel title="资源占用" className="min-w-0 lg:col-span-2">
+        <Panel title="资源占用" className={cn("min-w-0", disks.length > 0 ? "lg:col-span-2" : "lg:col-span-3")}>
           <div className="flex min-w-0 flex-col items-center gap-6 sm:flex-row sm:gap-10">
             <div className="flex w-full shrink-0 items-center justify-center gap-6 sm:w-[200px]">
               <UsageGauge label="CPU" value={cpu} size={watch ? 68 : 80} />
@@ -372,7 +373,10 @@ export function OverviewView({ device, onRefresh }: Props) {
       ) : null}
 
       <div className="grid min-w-0 grid-cols-1 items-start gap-6 lg:grid-cols-3">
-        <Panel title="设备信息" className="min-w-0 lg:col-span-2">
+        <Panel
+          title="设备信息"
+          className={cn("min-w-0", sessions.length > 0 ? "lg:col-span-2" : "lg:col-span-3")}
+        >
             <dl className="grid min-w-0 grid-cols-1 gap-x-12 gap-y-4 sm:grid-cols-2">
               <div className="min-w-0 sm:col-span-2">
                 <PanelRow label="设备标识">

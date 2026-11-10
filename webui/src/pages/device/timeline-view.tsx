@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { useSearchParams } from "react-router-dom";
 import { ChevronLeft, ExternalLink, RefreshCw } from "lucide-react";
 
 import {
@@ -23,6 +24,28 @@ import { cn } from "@/lib/utils";
 
 /** 无极滚动：观察到底部哨兵后每次多放出的桶数。 */
 const REVEAL_STEP = 96;
+
+/**
+ * 每台设备的时间线浏览进度（时段选择、无极滚动页数、滚动位置）。
+ *
+ * 本视图不在 keepMounted 名单里：切 Tab、路由往返（比如看到一半按了返回
+ * 再前进回来）都会重挂载。没有这份记忆时重挂载 = 时段重置成"今天"、只显示
+ * 前 96 个桶、滚动归零，加上"今天"窗口随服务端时钟移动导致缓存 miss 重拉
+ * ——看起来就是整页莫名其妙刷新，进度全丢。
+ */
+interface TimelineMemo {
+  daysAgo: number;
+  custom: { fromMs: number; toMs: number } | null;
+  visibleCount: number;
+  scrollTop: number;
+}
+const viewMemo = new Map<string, TimelineMemo>();
+
+// 组件里的 `window`（查询时间窗）会遮蔽全局 window，历史/滚动从这里走。
+const historyBack = (): void => window.history.back();
+const historyGo = (delta: number): void => window.history.go(delta);
+const pageScrollTop = (): number => window.scrollY;
+const pageScrollTo = (top: number): void => window.scrollTo({ top, behavior: "auto" });
 
 const DAY_OPTIONS = [
   { days: 0, label: "今天" },
@@ -78,6 +101,12 @@ function groupByHour(buckets: TimelineBucket[]): HourGroup[] {
  *  - 桶边界以服务端为准（`bucket_ms` + `buckets[]`），控制台只负责渲染；
  *  - 服务端桶是升序的（bucket_index ASC），这里统一反转为降序——最新置顶。
  * 无极滚动是纯客户端切片：一次查询已覆盖整个窗口，哨兵进入视口就多放一批。
+ *
+ * 时段弹窗与单帧原图走 URL（`?b=<ts_ms>&f=<frame_id>`）并各推一条历史：
+ * 手表/手机上的返回键会逐级关闭弹窗回到列表——之前返回直接跳出页面导致
+ * 整页重载，已选的时间段、无极滚动进度和滚动位置全部丢失。UI 的关闭按钮
+ * 也走 history.back()（本视图推过的条目数由 oursRef 记账）；直接落地在带
+ * 参数的 URL 上时没有可回退的条目，就用 replace 清参。
  */
 export function TimelineView({ device }: { device: DeviceLike }) {
   const uid = device.uid;
@@ -86,21 +115,81 @@ export function TimelineView({ device }: { device: DeviceLike }) {
   const watch = viewport === "watch";
   const anchor = now === null ? null : Math.floor(now / 60_000) * 60_000;
 
-  const [daysAgo, setDaysAgo] = useState(0);
-  const [custom, setCustom] = useState<{ fromMs: number; toMs: number } | null>(null);
+  // 浏览进度从记忆恢复（首挂载与换设备各一次），不再是每次进页面都从零开始。
+  const initialMemo = viewMemo.get(uid);
+  const [daysAgo, setDaysAgo] = useState(initialMemo?.daysAgo ?? 0);
+  const [custom, setCustom] = useState<{ fromMs: number; toMs: number } | null>(
+    initialMemo?.custom ?? null,
+  );
   const [fromText, setFromText] = useState("");
   const [toText, setToText] = useState("");
   const [rangeError, setRangeError] = useState("");
-  const [visibleCount, setVisibleCount] = useState(REVEAL_STEP);
-  const [openBucket, setOpenBucket] = useState<TimelineBucket | null>(null);
-  const [openFrame, setOpenFrame] = useState<Frame | null>(null);
+  const [visibleCount, setVisibleCount] = useState(initialMemo?.visibleCount ?? REVEAL_STEP);
+
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  /** 滚动位置只恢复一次：等首屏内容渲染后再落位。 */
+  const restoredRef = useRef(false);
+
+  // 换设备不重挂载（同一路由组件）：显式换到目标设备的进度档。
+  useEffect(() => {
+    const saved = viewMemo.get(uid);
+    restoredRef.current = false;
+    setDaysAgo(saved?.daysAgo ?? 0);
+    setCustom(saved?.custom ?? null);
+    setVisibleCount(saved?.visibleCount ?? REVEAL_STEP);
+  }, [uid]);
+
+  // 持续记档；scrollTop 单独在卸载时写（见下方 cleanup）。
+  useEffect(() => {
+    const prev = viewMemo.get(uid);
+    viewMemo.set(uid, {
+      daysAgo,
+      custom,
+      visibleCount,
+      scrollTop: prev?.scrollTop ?? 0,
+    });
+  }, [uid, daysAgo, custom, visibleCount]);
+
+  // 弹窗层级：0=列表 1=时段 2=单帧。推入的条目数由深度变化统一记账。
+  const bucketParam = searchParams.get("b");
+  const frameParam = searchParams.get("f");
+  const openBucketTs =
+    bucketParam !== null && bucketParam !== "" && Number.isFinite(Number(bucketParam))
+      ? Number(bucketParam)
+      : null;
+  const openFrameId =
+    frameParam !== null && frameParam !== "" && Number.isFinite(Number(frameParam))
+      ? Number(frameParam)
+      : null;
+  const dialogDepth = openBucketTs !== null ? (openFrameId !== null ? 2 : 1) : 0;
+
+  const oursRef = useRef(0);
+  const prevDepthRef = useRef(dialogDepth);
+  useEffect(() => {
+    const prev = prevDepthRef.current;
+    if (dialogDepth > prev) {
+      // 深度增加只可能来自本视图的 push（写 ?b/?f 的入口都在这里）。
+      oursRef.current += dialogDepth - prev;
+    } else if (dialogDepth < prev) {
+      // 浏览器/系统返回和自己的 history.back() 都会走到这里，统一核销。
+      oursRef.current = Math.max(0, oursRef.current - (prev - dialogDepth));
+    }
+    prevDepthRef.current = dialogDepth;
+  }, [dialogDepth]);
 
   const window = useMemo(() => {
     if (custom) return custom;
     if (anchor === null) return null;
-    return dayWindow(anchor, daysAgo);
+    const raw = dayWindow(anchor, daysAgo);
+    if (daysAgo !== 0) return raw;
+    // "今天"的原始终点 = 当前分钟，queryKey 每分钟换一次 key：周期性骨架屏、
+    // 重挂载永远打不中缓存（观感即"页面重新加载"）。终点向上取整到整小时，
+    // 一小时内 key 稳定；终点仍 ≥ now，最新帧不会缺席，30s 轮询继续保鲜。
+    const hourEnd = Math.ceil(anchor / 3_600_000) * 3_600_000;
+    return { ...raw, toMs: Math.min(raw.toMs, Math.max(raw.fromMs + 1000, hourEnd)) };
   }, [anchor, custom, daysAgo]);
 
   const timelineQuery = useQuery({
@@ -108,7 +197,20 @@ export function TimelineView({ device }: { device: DeviceLike }) {
     queryFn: () => api.timeline(uid, window!.fromMs, window!.toMs),
     enabled: Boolean(window),
     refetchInterval: 30_000,
+    // "今天"的窗口随服务端时钟每分钟移动，queryKey 跟着变；没有这一行，
+    // 每次换 key 都会闪一帧骨架屏（观感就是"页面重新加载"）。
+    placeholderData: keepPreviousData,
   });
+
+  const rawBuckets = timelineQuery.data?.buckets ?? [];
+
+  // 弹窗状态由 URL 还原。时段不在当前数据里（直接落地带参 URL、或窗口已
+  // 切换）时用最小占位对象——帧列表查询只需要 ts_ms。
+  const openBucket = useMemo<TimelineBucket | null>(() => {
+    if (openBucketTs === null) return null;
+    const found = rawBuckets.find((bucket) => bucket.ts_ms === openBucketTs);
+    return found ?? { ts_ms: openBucketTs, device_time_ms: openBucketTs, frame_id: null, frame_count: 0, session: 0 };
+  }, [openBucketTs, rawBuckets]);
 
   const framesQuery = useQuery({
     queryKey: ["frames", uid, openBucket?.ts_ms ?? 0, timelineQuery.data?.bucket_ms ?? 0],
@@ -120,6 +222,12 @@ export function TimelineView({ device }: { device: DeviceLike }) {
       }),
     enabled: openBucket !== null,
   });
+
+  // 单帧同样由 URL 还原；帧列表还在加载时先落到加载分支。
+  const openFrame = useMemo<Frame | null>(() => {
+    if (openFrameId === null) return null;
+    return (framesQuery.data?.frames ?? []).find((frame) => frame.id === openFrameId) ?? null;
+  }, [openFrameId, framesQuery.data]);
 
   const applyCustom = () => {
     const from = parseDateTimeLocal(fromText);
@@ -144,7 +252,40 @@ export function TimelineView({ device }: { device: DeviceLike }) {
     setVisibleCount(REVEAL_STEP);
   };
 
-  const rawBuckets = timelineQuery.data?.buckets ?? [];
+  /** 推一条历史并切换弹窗层级（push：系统返回键可逐级回退）。 */
+  const pushDialogParams = (ts: number | null, frameId: number | null) => {
+    const next = new URLSearchParams(searchParams);
+    if (ts === null) next.delete("b");
+    else next.set("b", String(ts));
+    if (frameId === null) next.delete("f");
+    else next.set("f", String(frameId));
+    setSearchParams(next);
+  };
+
+  /** 单帧 → 该时段网格：优先回退本视图推入的那条历史。 */
+  const closeFrame = () => {
+    if (oursRef.current > 0) {
+      historyBack();
+      return;
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete("f");
+    setSearchParams(next, { replace: true });
+  };
+
+  /** 时段弹窗 → 列表：把本视图推入的条目一次性回退掉，不留死历史。 */
+  const closeDialog = () => {
+    const n = Math.min(oursRef.current, dialogDepth);
+    if (n > 0 && n >= dialogDepth) {
+      historyGo(-n);
+      return;
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete("b");
+    next.delete("f");
+    setSearchParams(next, { replace: true });
+  };
+
   /** 服务端升序 → 最新在前。并列时 ts_ms 相同按 frame_id 降序保持稳定。 */
   const sortedBuckets = useMemo(
     () => [...rawBuckets].sort((a, b) => b.ts_ms - a.ts_ms || (b.frame_id ?? 0) - (a.frame_id ?? 0)),
@@ -155,6 +296,32 @@ export function TimelineView({ device }: { device: DeviceLike }) {
   const newestFrameId = sortedBuckets.find((bucket) => bucket.frame_id)?.frame_id ?? null;
   const hourGroups = useMemo(() => groupByHour(visibleBuckets), [visibleBuckets]);
   const allRevealed = visibleCount >= sortedBuckets.length;
+
+  // 恢复滚动位置：等列表真正渲染出来，且晚一拍——路由往返时 AppShell 的
+  // "路由变化归零滚动" effect 挂在父层、后于子 effect 执行，不能跟它赛跑。
+  const hasContent = hourGroups.length > 0;
+  useEffect(() => {
+    if (restoredRef.current || !hasContent) return;
+    restoredRef.current = true;
+    const saved = viewMemo.get(uid)?.scrollTop ?? 0;
+    if (saved <= 0) return;
+    const timer = setTimeout(() => {
+      const scroller = rootRef.current?.closest("main");
+      if (scroller) scroller.scrollTo({ top: saved, behavior: "auto" });
+      else pageScrollTo(saved);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [hasContent, uid]);
+
+  // 卸载（切 Tab / 路由离开）时把滚动位置写回记忆。
+  useEffect(() => {
+    return () => {
+      const scroller = rootRef.current?.closest("main");
+      const top = scroller ? scroller.scrollTop : pageScrollTop();
+      const prev = viewMemo.get(uid);
+      if (prev) viewMemo.set(uid, { ...prev, scrollTop: top });
+    };
+  }, [uid]);
 
   useEffect(() => {
     const node = sentinelRef.current;
@@ -176,7 +343,7 @@ export function TimelineView({ device }: { device: DeviceLike }) {
     : "grid-cols-2 md:grid-cols-3 xl:grid-cols-4";
 
   return (
-    <div className={cn("min-w-0", watch ? "space-y-3" : viewport === "mobile" ? "space-y-4" : "space-y-5")}>
+    <div ref={rootRef} className={cn("min-w-0", watch ? "space-y-3" : viewport === "mobile" ? "space-y-4" : "space-y-5")}>
       {/* Filter bar: segmented day picker + explicit window + quiet actions. */}
       <div className="flex min-w-0 flex-col justify-between gap-4 rounded-xl bg-card p-4 shadow-sm md:flex-row md:flex-wrap md:items-center">
         <div className="flex min-w-0 flex-col gap-3 md:flex-row md:items-center md:gap-4">
@@ -319,8 +486,10 @@ export function TimelineView({ device }: { device: DeviceLike }) {
                     <div className="relative hidden w-6 shrink-0 self-stretch sm:block" aria-hidden>
                       <span
                         className={cn(
-                          "absolute left-1/2 top-2 size-3 -translate-x-1/2 rounded-full ring-4 ring-background",
-                          groupIndex === 0 ? "bg-primary" : "bg-muted-foreground/40",
+                          // 不用 -translate-x-1/2：Tailwind v4 编译成 translate:
+                          // 属性（Chromium 104），手表上圆点会偏出轨道。
+                          "absolute top-2 size-3 rounded-full ring-4 ring-background left-[calc(50%-0.375rem)]",
+                          groupIndex === 0 ? "bg-primary" : "bg-border-strong",
                         )}
                       />
                     </div>
@@ -337,8 +506,7 @@ export function TimelineView({ device }: { device: DeviceLike }) {
                             key={bucket.ts_ms}
                             type="button"
                             onClick={() => {
-                              setOpenFrame(null);
-                              setOpenBucket(bucket);
+                              pushDialogParams(bucket.ts_ms, null);
                             }}
                             className="relative block w-full min-w-0 overflow-hidden rounded-lg border border-border-soft bg-card text-left shadow-sm transition-shadow hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
                             title={`${formatDateTime(bucket.ts_ms)} · ${bucket.frame_count} 帧`}
@@ -401,10 +569,7 @@ export function TimelineView({ device }: { device: DeviceLike }) {
       <Dialog
         open={openBucket !== null}
         onOpenChange={(open) => {
-          if (!open) {
-            setOpenBucket(null);
-            setOpenFrame(null);
-          }
+          if (!open) closeDialog();
         }}
       >
         <DialogContent size="xl" className="overflow-y-auto">
@@ -422,7 +587,7 @@ export function TimelineView({ device }: { device: DeviceLike }) {
           {openFrame ? (
             <div className="grid min-w-0 gap-2.5">
               <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center sm:gap-2">
-                <Button variant="outline" className="min-h-9" onClick={() => setOpenFrame(null)}>
+                <Button variant="outline" className="min-h-9" onClick={closeFrame}>
                   <ChevronLeft className="size-4" aria-hidden />
                   返回该时段
                 </Button>
@@ -475,7 +640,7 @@ export function TimelineView({ device }: { device: DeviceLike }) {
                 <button
                   key={frame.id}
                   type="button"
-                  onClick={() => setOpenFrame(frame)}
+                  onClick={() => pushDialogParams(openBucketTs, frame.id)}
                   className="relative block w-full min-w-0 overflow-hidden rounded-md border border-border bg-muted transition-colors hover:border-border-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
                   title={formatDateTime(frameTimeMs(frame))}
                 >
