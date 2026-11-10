@@ -283,10 +283,18 @@ export function OverviewView({ device, onRefresh }: Props) {
         </Banner>
       ) : null}
 
-      {/* 0.3.20 重排：每行「2+1」，左右高度接近。0.3.23：右列面板缺失时
-          左面板补满整行——空着 1/3 宽的洞比不对齐更难看。 */}
+      {/* 0.3.25 重排：放弃「每行 2+1」的行式网格——磁盘块数不受控，行内
+          左右高度永远对不齐，矮的那格下面就是洞。改成两列瀑布：左列
+          （2/3）= 资源占用 + 设备信息，右列（1/3）= 磁盘 + 登录会话，
+          两列总高天然接近。 */}
       <div className="grid min-w-0 grid-cols-1 items-start gap-6 lg:grid-cols-3">
-        <Panel title="资源占用" className={cn("min-w-0", disks.length > 0 ? "lg:col-span-2" : "lg:col-span-3")}>
+        <div
+          className={cn(
+            "flex min-w-0 flex-col gap-6",
+            disks.length > 0 || sessions.length > 0 ? "lg:col-span-2" : "lg:col-span-3",
+          )}
+        >
+          <Panel title="资源占用" className="min-w-0">
           <div className="flex min-w-0 flex-col items-center gap-6 sm:flex-row sm:gap-10">
             <div className="flex w-full shrink-0 items-center justify-center gap-6 sm:w-[200px]">
               <UsageGauge label="CPU" value={cpu} size={watch ? 68 : 80} />
@@ -331,52 +339,9 @@ export function OverviewView({ device, onRefresh }: Props) {
               </div>
             </dl>
           </div>
-        </Panel>
-
-        {disks.length > 0 ? (
-          <Panel title="磁盘" className="min-w-0">
-            <div className="space-y-3">
-              {disks.map((disk, index) => {
-                // Bar length = 已用占比, derived from the server's total/free
-                // pair (fall back to the agent's own percent when totals are
-                // missing). High fill therefore reads as "almost full".
-                const total = disk.total ?? 0;
-                const used = total > 0 ? Math.max(0, total - (disk.free ?? 0)) : 0;
-                const usedPercent =
-                  total > 0
-                    ? (used / total) * 100
-                    : typeof disk.percent === "number"
-                      ? disk.percent
-                      : null;
-                return (
-                  <div key={`${disk.mount ?? index}`} className="min-w-0">
-                    <Meter
-                      label={`${disk.mount ?? "?"} · 已用 ${formatBytes(used)}`}
-                      value={usedPercent}
-                      hint={`共 ${formatBytes(total)} · 剩余 ${formatBytes(disk.free ?? 0)}`}
-                    />
-                  </div>
-                );
-              })}
-            </div>
           </Panel>
-        ) : null}
-      </div>
 
-      {selfUpdateBlocked ? (
-        <Banner tone="warn" icon={TriangleAlert} title="无法自动升级">
-          <p>{selfUpdateBlocked}</p>
-          <p className={cn("mt-1 text-muted-foreground", metaText)}>
-            该版本不在自动更新路径上，服务器不会向它推送新版本。请在目标机器上重新运行最新的安装脚本（覆盖安装，设备标识与历史记录都会保留）。
-          </p>
-        </Banner>
-      ) : null}
-
-      <div className="grid min-w-0 grid-cols-1 items-start gap-6 lg:grid-cols-3">
-        <Panel
-          title="设备信息"
-          className={cn("min-w-0", sessions.length > 0 ? "lg:col-span-2" : "lg:col-span-3")}
-        >
+          <Panel title="设备信息">
             <dl className="grid min-w-0 grid-cols-1 gap-x-12 gap-y-4 sm:grid-cols-2">
               <div className="min-w-0 sm:col-span-2">
                 <PanelRow label="设备标识">
@@ -430,28 +395,73 @@ export function OverviewView({ device, onRefresh }: Props) {
               </div>
             </dl>
           </Panel>
+        </div>
 
-        {sessions.length > 0 ? (
-          <Panel title="登录会话" className="min-w-0">
-            <ul className="space-y-2">
-              {sessions.map((session) => (
-                <li
-                  key={session.session_id}
-                  className={cn(
-                    "grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 text-foreground",
-                    bodyText,
-                  )}
-                >
-                  <span className="min-w-0 truncate">
-                    会话 {session.session_id} · {session.username || "（未登录）"}
-                  </span>
-                  <span className={cn("shrink-0 text-muted-foreground", metaText)}>{session.state}</span>
-                </li>
-              ))}
-            </ul>
-          </Panel>
-        ) : null}
+        {(disks.length > 0 || sessions.length > 0) && (
+          <div className="flex min-w-0 flex-col gap-6">
+            {disks.length > 0 ? (
+              <Panel title="磁盘" className="min-w-0">
+            <div className="space-y-3">
+              {disks.map((disk, index) => {
+                // Bar length = 已用占比, derived from the server's total/free
+                // pair (fall back to the agent's own percent when totals are
+                // missing). High fill therefore reads as "almost full".
+                const total = disk.total ?? 0;
+                const used = total > 0 ? Math.max(0, total - (disk.free ?? 0)) : 0;
+                const usedPercent =
+                  total > 0
+                    ? (used / total) * 100
+                    : typeof disk.percent === "number"
+                      ? disk.percent
+                      : null;
+                return (
+                  <div key={`${disk.mount ?? index}`} className="min-w-0">
+                    <Meter
+                      label={`${disk.mount ?? "?"} · 已用 ${formatBytes(used)}`}
+                      value={usedPercent}
+                      hint={`共 ${formatBytes(total)} · 剩余 ${formatBytes(disk.free ?? 0)}`}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+              </Panel>
+            ) : null}
+
+            {sessions.length > 0 ? (
+              <Panel title="登录会话" className="min-w-0">
+                <ul className="space-y-2">
+                  {sessions.map((session) => (
+                    <li
+                      key={session.session_id}
+                      className={cn(
+                        "grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 text-foreground",
+                        bodyText,
+                      )}
+                    >
+                      <span className="min-w-0 truncate">
+                        会话 {session.session_id} · {session.username || "（未登录）"}
+                      </span>
+                      <span className={cn("shrink-0 text-muted-foreground", metaText)}>
+                        {session.state}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </Panel>
+            ) : null}
+          </div>
+        )}
       </div>
+
+      {selfUpdateBlocked ? (
+        <Banner tone="warn" icon={TriangleAlert} title="无法自动升级">
+          <p>{selfUpdateBlocked}</p>
+          <p className={cn("mt-1 text-muted-foreground", metaText)}>
+            该版本不在自动更新路径上，服务器不会向它推送新版本。请在目标机器上重新运行最新的安装脚本（覆盖安装，设备标识与历史记录都会保留）。
+          </p>
+        </Banner>
+      ) : null}
 
       <div className="grid min-w-0 grid-cols-1 items-start gap-6 lg:grid-cols-2">
           <Panel
