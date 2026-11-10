@@ -32,7 +32,6 @@ IO/并发边界：``Link`` 自己持有 asyncio 任务（载体/帧上传/心跳
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import os
 import re
@@ -81,6 +80,16 @@ HTTP_TIMEOUT_S: Final[float] = 30.0
 FRAME_TIMEOUT_S: Final[float] = 45.0
 ENROLL_TIMEOUT_S: Final[float] = 30.0
 CONNECT_TIMEOUT_S: Final[float] = 10.0
+
+#: 安装包下载（0.3.26 还 0.3.17 的账）：全线路轮换失败后整体重试的轮数与退避
+#: 基数（第 n 轮重试前退避 ``DOWNLOAD_BACKOFF_S * (n-1)`` 秒）。校园网差线路拉
+#: 26.5MB 包时单轮全灭很常见（0.3.25 真机三楼两台同夜失败），不重试等于把更新
+#: 成败押在一次传输上。
+DOWNLOAD_ATTEMPTS: Final[int] = 6
+DOWNLOAD_BACKOFF_S: Final[float] = 4.0
+#: 单连接读空闲超时：30s 没有任何字节到达即判死断开，靠断点续传接力。旧实现
+#: 整体 timeout=300s，线路中途停摆要干等 5 分钟才知道失败。
+DOWNLOAD_READ_TIMEOUT_S: Final[float] = 30.0
 
 WS_OPEN_TIMEOUT_S: Final[float] = 12.0
 WS_MAX_MESSAGE_BYTES: Final[int] = 16 * 1024 * 1024
@@ -695,7 +704,18 @@ class Link:
         """下载指定版本的受控端安装包到 ``destination``（更新链路唯一的下载实现）。
 
         只负责**传输**：sha256 校验由 ``tasks/update.stage_update`` 在下载完成后做
-        （A3 的唯一校验点），这里不重复实现一套校验逻辑。
+        （A3 的唯一校验点），这里不重复实现一套校验逻辑（也因此传输层不需要边下
+        边算摘要，截断/损坏都由最终 sha256 兜底）。
+
+        0.3.26（0.3.17 遗留账）：单次 GET 裸拉 26.5MB 包在差线路上成败全凭运气
+        （0.3.25 发布夜三楼两台设备同报"全部线路不可达"）。现在三层防护：
+
+        * 每轮尝试内 ``_request`` 照旧做全线路轮换；全灭后退避进入下一轮，
+          共 :data:`DOWNLOAD_ATTEMPTS` 轮；
+        * 已下载字节持久在 ``.part`` 文件里，重试带 ``Range`` 头断点续传——
+          服务端 206 从断点接着拉；回 200（不支持 Range / 偏移不符）则推倒重来；
+        * 单连接读空闲 :data:`DOWNLOAD_READ_TIMEOUT_S` 秒即断开重试，不再死等
+          300s。中途断流保留 ``.part``，只有 4xx/5xx 语义错误和写盘失败才立即失败。
         """
 
         if not version:
@@ -715,31 +735,118 @@ class Link:
         temporary = target.with_suffix(target.suffix + ".part").resolve()
         if not (temporary.is_relative_to(base_dir) and target.is_relative_to(base_dir)):
             raise LinkBadRequest("安装包目标路径越出目标目录")
-        response = await self._request(
-            "GET", f"/api/v1/public/agent/{version}/package", timeout=300.0
-        )
-        self._raise_for_status(response, what="package")
-        digest = hashlib.sha256()
-        written = 0
-        try:
-            with open(temporary, "wb") as handle:
-                async for chunk in response.aiter_bytes():
-                    if not chunk:
-                        continue
-                    handle.write(chunk)
-                    digest.update(chunk)
-                    written += len(chunk)
-        except OSError as exc:
-            temporary.unlink(missing_ok=True)
-            raise LinkUnavailable(f"写入安装包失败: {exc}") from exc
-        except asyncio.CancelledError:
-            temporary.unlink(missing_ok=True)
-            raise
-        if written <= 0:
-            temporary.unlink(missing_ok=True)
-            raise LinkUnavailable(f"安装包为空（version={version}）")
+        offset = temporary.stat().st_size if temporary.is_file() else 0
+        if offset:
+            log.info("发现半截安装包 %s（%s 字节），尝试断点续传", temporary.name, offset)
+        last_error = "无进展"
+        for attempt in range(1, max(1, DOWNLOAD_ATTEMPTS) + 1):
+            if attempt > 1:
+                delay = DOWNLOAD_BACKOFF_S * (attempt - 1)
+                log.warning(
+                    "安装包下载第 %s/%s 轮失败（%s），%.0fs 后带 %s 字节续传重试",
+                    attempt - 1,
+                    DOWNLOAD_ATTEMPTS,
+                    last_error,
+                    delay,
+                    offset,
+                )
+                await asyncio.sleep(delay)
+            headers = {"Range": f"bytes={offset}-"} if offset > 0 else None
+            response: httpx.Response | None = None
+            try:
+                response = await self._request(
+                    "GET",
+                    f"/api/v1/public/agent/{version}/package",
+                    headers=headers,
+                    # stream=True 才是真流式（见 _request 的 docstring）：读空闲
+                    # 超时逐段生效，慢而不断的线路也能拉完，只有真停摆才快速失败。
+                    stream=True,
+                    timeout=httpx.Timeout(
+                        connect=CONNECT_TIMEOUT_S,
+                        read=DOWNLOAD_READ_TIMEOUT_S,
+                        write=ENROLL_TIMEOUT_S,
+                        pool=CONNECT_TIMEOUT_S,
+                    ),
+                )
+                self._raise_for_status(response, what="package")
+            except LinkUnavailable as exc:
+                if response is not None:
+                    try:
+                        await response.aclose()
+                    except Exception:  # noqa: BLE001 - 关闭失败不影响重试结论
+                        log.debug("关闭未读完的下载响应失败", exc_info=True)
+                last_error = str(exc) or "全部线路不可达"
+                continue
+            except Exception:
+                # 4xx 等语义错误不重试：响应体没读完也要先关连接再抛。
+                if response is not None:
+                    try:
+                        await response.aclose()
+                    except Exception:  # noqa: BLE001
+                        log.debug("关闭失败的下载响应失败", exc_info=True)
+                raise
+            mode = "wb"
+            if offset > 0:
+                if response.status_code == 206:
+                    start, total = _parse_content_range(response.headers.get("Content-Range", ""))
+                    # Content-Range 解析不出或不匹配都按"不可信半截"处理：按整包
+                    # 覆盖写（body 从它声明的 start 开始，不管 start 是几）。
+                    if start == offset:
+                        mode = "ab"
+                        if total is not None and offset >= total:
+                            try:
+                                await response.aclose()
+                            except Exception:  # noqa: BLE001
+                                log.debug("关闭已完成续传的响应失败", exc_info=True)
+                            break  # 半截文件其实已经拉完
+                    else:
+                        log.warning(
+                            "续传偏移不符（已有 %s 字节，服务端从 %s 开始），按整包覆盖",
+                            offset,
+                            start,
+                        )
+                        offset = 0
+                else:
+                    log.info(
+                        "服务端不支持断点续传（HTTP %s），按整包覆盖", response.status_code
+                    )
+                    offset = 0
+            received = 0
+            try:
+                with open(temporary, mode) as handle:
+                    async for chunk in response.aiter_bytes():
+                        if not chunk:
+                            continue
+                        handle.write(chunk)
+                        received += len(chunk)
+            except OSError as exc:
+                temporary.unlink(missing_ok=True)
+                raise LinkUnavailable(f"写入安装包失败: {exc}") from exc
+            except asyncio.CancelledError:
+                temporary.unlink(missing_ok=True)
+                raise
+            except (httpx.TransportError, httpx.TimeoutException) as exc:
+                # 中途断流：.part 里已写入的字节保留（缓冲随 with 关闭落盘），
+                # 下一轮从新 offset 续传。
+                try:
+                    await response.aclose()
+                except Exception:  # noqa: BLE001 - 关闭失败不影响重试结论
+                    log.debug("关闭断流的下载响应失败", exc_info=True)
+                offset += received
+                last_error = f"传输中断: {exc}"
+                continue
+            offset += received
+            if offset <= 0:
+                temporary.unlink(missing_ok=True)
+                raise LinkUnavailable(f"安装包为空（version={version}）")
+            break
+        else:
+            raise LinkUnavailable(
+                f"安装包下载连续 {DOWNLOAD_ATTEMPTS} 轮失败（version={version}）: {last_error}"
+            )
+        size = temporary.stat().st_size
         os.replace(temporary, target)
-        log.info("下载安装包完成 version=%s bytes=%s sha256=%s", version, written, digest.hexdigest()[:12])
+        log.info("下载安装包完成 version=%s bytes=%s", version, size)
         return target
 
     # -- 注册 ------------------------------------------------------------
@@ -1571,8 +1678,22 @@ class Link:
             self._outbox.replay()
 
     # --------------------------------------------------- HTTP 细节 ---
-    async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        """带线路轮换的 HTTP 请求（只对连接层失败轮换，不对状态码轮换）。"""
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        stream: bool = False,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        """带线路轮换的 HTTP 请求（只对连接层失败轮换，不对状态码轮换）。
+
+        ``stream=True`` 时返回**未读体**的响应（调用方 ``aiter_bytes`` 才真正从
+        socket 收数据，用完必须 ``aclose``）：``client.request()`` 会把响应体
+        整个读进内存才返回——安装包下载在旧实现里因此是"假流式"，总超时罩住
+        整段传输，26.5MB 在差线路上 300s 内拉不完就直接超时（0.3.25 发布夜的
+        三楼两台失败即此机理），读空闲判死/断点续传都无从谈起。
+        """
 
         if not self._base_urls:
             raise LinkUnavailable("没有配置服务器线路")
@@ -1582,6 +1703,9 @@ class Link:
         for _ in range(max(1, len(self._base_urls))):
             url = f"{self._base_urls[self._base_index]}{path}"
             try:
+                if stream:
+                    request = self._http.build_request(method, url, headers=headers, **kwargs)
+                    return await self._http.send(request, stream=True)
                 return await self._http.request(method, url, headers=headers, **kwargs)
             except asyncio.CancelledError:
                 raise
@@ -1634,6 +1758,16 @@ class Link:
         if status >= 500:
             raise LinkUnavailable(f"{what} 服务端错误 HTTP {status}: {detail}")
         raise LinkBadRequest(f"{what} 请求失败 HTTP {status}: {detail}", msg_ids=msg_ids)
+
+
+def _parse_content_range(header: str) -> tuple[int | None, int | None]:
+    """解析 ``Content-Range: bytes <start>-<end>/<total>``；解析不了返回 ``(None, None)``。"""
+
+    match = re.search(r"bytes\s+(\d+)-\d+/(\d+|\*)", header.strip(), re.IGNORECASE)
+    if match is None:
+        return None, None
+    total = match.group(2)
+    return int(match.group(1)), None if total == "*" else int(total)
 
 
 def _retry_after_s(response: httpx.Response) -> float:

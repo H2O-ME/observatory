@@ -4,8 +4,12 @@ name: ci-cd
 #   push main → 质量门禁（pytest + ruff + webui typecheck）
 #   → ubuntu 构建「前后端一体」镜像推 ghcr.io（~90s，gha 缓存）
 #   → SSH 通知香港服务器 docker compose pull && up -d（秒级，零本地构建）
-#   受控端 exe 仅当 agent/** 或 VERSION 变更时才动用 Windows runner（2 倍费率），
+#   受控端 exe 仅当 agent/** 变更时才动用 Windows runner（2 倍费率），
 #   产物挂固定 Release tag latest-agent，由香港服务器自行下载登记。
+#   0.3.26 起不再把 VERSION 算进 agent 触发条件：纯 webui/服务端发布（只 bump
+#   VERSION）曾重建出"代码一字未变"的新包并全网下发 offer，设备在差线路上白拉
+#   26.5MB 还占掉更新冷却窗。代价是纯 webui 发布后新装机拿到的包版本号落后一拍
+#   （agent 代码相同），真要刷新版本号用 workflow_dispatch 的 force_agent。
 #
 # 0.3.7 审计 O05：原来"质量门禁只在本地"，于是 deploy-hk 会在测试从未运行的情况下
 # 直接上线——A10（换库前快照缺 stdin、静默失败）正是这样被推上生产的。
@@ -45,7 +49,6 @@ jobs:
           filters: |
             agent:
               - 'agent/**'
-              - 'VERSION'
             webui:
               - 'webui/**'
       # paths-filter 对 push 事件只比较"本次提交 vs 上一个提交"。于是有两种会漏掉

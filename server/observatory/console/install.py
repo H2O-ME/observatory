@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.clock import now_ms
@@ -226,7 +226,7 @@ async def download_agent(
     version: str,
     request: Request,
     session: AsyncSession = Depends(get_session),
-) -> FileResponse:
+) -> Response:
     from ..core.config import parse_version
 
     try:
@@ -240,16 +240,111 @@ async def download_agent(
     path = packages.file_for(package)
     if not path.exists():
         raise AppError.gone("安装包文件已丢失")
-    return FileResponse(
-        path,
+    headers = {
+        "X-Sha256": package.sha256,
+        "X-Version": package.version,
+        "Cache-Control": "no-store",
+        # 0.3.26：受控端下载带断点续传（0.3.26 起 agent 侧 Range 重试），
+        # 必须声明并支持区间请求。
+        "Accept-Ranges": "bytes",
+    }
+    file_size = path.stat().st_size
+    kind, bounds = _parse_range(request.headers.get("range", ""), file_size)
+    if kind == "invalid":
+        # 单区间 bytes 语法但区间非法（含 start 越界）：416 + 真实区间
+        # （RFC 9110 §14.2）。
+        return Response(
+            status_code=416,
+            headers={"Content-Range": f"bytes */{file_size}"},
+        )
+    disposition = f'attachment; filename="{package.filename}"'
+    if kind == "range" and bounds is not None:
+        start, end = bounds
+        length = end - start + 1
+        return StreamingResponse(
+            _file_slice(path, start, length),
+            media_type="application/zip",
+            status_code=206,
+            headers={
+                **headers,
+                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                "Content-Length": str(length),
+                "Content-Disposition": disposition,
+            },
+        )
+    # 无 Range / 多区间 / 非 bytes 单位 / 解析不了：整包 200（不误伤老客户端）。
+    # 这里不能用 FileResponse：新版 Starlette 的 FileResponse 会自己再解析一遍
+    # Range（多区间回 206 multipart、语法错回 400），与本端点"忽略区间"的契约
+    # 冲突，且 416 只发 ``*/size``（缺 bytes 前缀）。整条链自己出流，行为不随
+    # Starlette 版本漂移。
+    return StreamingResponse(
+        _file_slice(path, 0, file_size),
         media_type="application/zip",
-        filename=package.filename,
+        status_code=200,
         headers={
-            "X-Sha256": package.sha256,
-            "X-Version": package.version,
-            "Cache-Control": "no-store",
+            **headers,
+            "Content-Length": str(file_size),
+            "Content-Disposition": disposition,
         },
     )
+
+
+def _parse_range(header: str, file_size: int) -> tuple[str, tuple[int, int] | None]:
+    """解析 ``Range`` 头，返回 ``(kind, bounds)``：
+
+    * ``("range", (start, end))`` — 单区间 bytes 且可服务（含后缀 ``-N`` 展开，
+      ``end`` 已闭合并收敛到 ``file_size - 1``）；
+    * ``("invalid", None)`` — 单区间 bytes 语法但区间非法（start 越界 / end <
+      start）→ 调用方回 416；
+    * ``("full", None)`` — 无 Range / 多区间 / 非 bytes 单位 / 语法解析不了 →
+      调用方忽略区间回 200 整包（RFC 9110 允许服务器不支持时忽略）。
+    """
+
+    text = (header or "").strip().lower()
+    if not text.startswith("bytes="):
+        return "full", None
+    spec = text[len("bytes=") :].strip()
+    if "," in spec:
+        # 多区间合法但不支持：忽略而不是 416。
+        return "full", None
+    first, _, last = spec.partition("-")
+    first, last = first.strip(), last.strip()
+    try:
+        if not first:
+            # 后缀形式 ``-N``：取最后 N 字节。
+            suffix = int(last)
+            if suffix <= 0 or file_size <= 0:
+                return "invalid", None
+            return "range", (max(0, file_size - suffix), file_size - 1)
+        start = int(first)
+        if start < 0 or start >= file_size:
+            return "invalid", None
+        if not last:
+            return "range", (start, file_size - 1)
+        end = int(last)
+        if end < start:
+            return "invalid", None
+        return "range", (start, min(end, file_size - 1))
+    except ValueError:
+        return "full", None
+
+
+def _file_slice(path: Path, start: int, length: int, *, chunk_size: int = 256 * 1024):
+    """按区间产出文件字节；同步生成器由 Starlette 放线程池迭代，不堵事件循环。
+
+    包文件一经发布不可变（``PackageService.save`` 走临时名 + replace），不存在
+    读取中途被改写的竞争。
+    """
+
+    with open(path, "rb") as handle:
+        handle.seek(start)
+        remaining = length
+        while remaining > 0:
+            data = handle.read(min(chunk_size, remaining))
+            if not data:
+                break
+            remaining -= len(data)
+            yield data
 
 
 __all__ = [
