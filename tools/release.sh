@@ -3,6 +3,10 @@
 #   tools/release.sh            # patch +1
 #   tools/release.sh minor      # minor +1
 #   tools/release.sh 0.4.0      # 显式版本
+#
+# 0.3.26 约定（用户定）：版本号只为**受控端发布**递增。纯 webui/服务端改动直接
+# push main 走 latest/sha 镜像部署，不要发版——否则会重建一份代码一字未变的 exe
+# 并全网下发，设备在差线路上白拉 26.5MB 还占掉更新冷却窗。确需发版加 --force。
 # 本地想跑测试：python -m pytest tests/unit tests/integration tests/contract tests/acceptance -m "not perf"
 set -Eeuo pipefail
 cd "$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
@@ -11,6 +15,15 @@ git diff --quiet || { echo "工作树有未提交改动，先 commit/stash" >&2;
 [[ "$(git rev-parse --abbrev-ref HEAD)" == "main" ]] || { echo "只允许从 main 发布" >&2; exit 1; }
 git fetch --quiet origin 2>/dev/null || true
 [[ "$(git rev-list --count HEAD..origin/main)" == "0" ]] || { echo "本地落后 origin/main，先 pull --rebase" >&2; exit 1; }
+
+if [[ "${2:-}" != "--force" ]]; then
+  last_tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+  if [[ -n "$last_tag" ]] && ! git diff --name-only "$last_tag"..HEAD -- agent | grep -q .; then
+    echo "自 $last_tag 以来 agent/ 无改动：按约定不发新版本号。" >&2
+    echo "直接 push main 即可部署服务端/webui（镜像按 latest+sha）。确需发版：tools/release.sh <bump> --force" >&2
+    exit 1
+  fi
+fi
 
 BUMP="${1:-patch}"
 case "$BUMP" in
