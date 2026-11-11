@@ -37,7 +37,7 @@ from .log import log_event
 log = logging.getLogger(__name__)
 
 #: Bump this and append a migration function when the schema changes.
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 #: 每个连接都执行的 PRAGMA（W7/F56：journal_mode 需要短暂拿写锁且只需设一次，
 #: 移到迁移路径；NullPool 下每会话新建连接，这里只留真正 per-connection 的项）。
@@ -645,6 +645,56 @@ async def _migration_v10_purge_intent(conn: AsyncConnection) -> None:
     )
 
 
+async def _migration_v11_file_transfers(conn: AsyncConnection) -> None:
+    """服务端暂存的设备文件取回记录（``file_transfers``）。
+
+    取回从"浏览器直连分片读"改成"服务端后台任务"：发起后由服务端把文件从设备
+    拉回 ``transfers_dir``，浏览器随时可以从服务器下载，固定保留 24h。这张表就是
+    那些暂存文件的元数据（进度、状态、到期时间、磁盘文件名）。
+
+    ``storage_name`` 是服务端生成的 uuid，不设备路径——远端路径只用于展示，
+    不参与任何文件系统定位。``expires_at_ms`` 在任务完成时才写入：未完成的取回
+    没有保留倒计时，失败/取消由后台或清理步骤直接删行删文件。
+
+    没有外键到 ``devices``：设备可以被删除/改名，而取回的文件仍要在保留期内
+    可下载，所以 ``device_uid``/``device_name`` 是快照，不是引用。
+    """
+
+    await conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS file_transfers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_uid VARCHAR(64) NOT NULL DEFAULT '',
+                device_name VARCHAR(255) NOT NULL DEFAULT '',
+                remote_path VARCHAR(1024) NOT NULL DEFAULT '',
+                filename VARCHAR(255) NOT NULL DEFAULT '',
+                expected_bytes BIGINT NOT NULL DEFAULT 0,
+                received_bytes BIGINT NOT NULL DEFAULT 0,
+                status VARCHAR(16) NOT NULL DEFAULT 'pending',
+                error TEXT NULL,
+                sha256 VARCHAR(64) NOT NULL DEFAULT '',
+                storage_name VARCHAR(64) NOT NULL DEFAULT '',
+                actor VARCHAR(64) NOT NULL DEFAULT 'console',
+                created_at_ms BIGINT NOT NULL,
+                completed_at_ms BIGINT NULL,
+                expires_at_ms BIGINT NULL
+            )
+            """
+        )
+    )
+    await conn.execute(
+        text("CREATE INDEX IF NOT EXISTS ix_file_transfers_device_uid ON file_transfers (device_uid)")
+    )
+    # 清理步骤的唯一热路径：status + 到期时间（ready/expired 扫描）。
+    await conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_file_transfers_status_expires "
+            "ON file_transfers (status, expires_at_ms)"
+        )
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline_0_2_10", _migration_v1_baseline),
     Migration(2, "link_v3_0_3_0", _migration_v2_link_v3),
@@ -656,6 +706,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(8, "command_history_preserved", _migration_v8_command_history),
     Migration(9, "drop_tickets_and_tombstones", _migration_v9_drop_tickets_and_tombstones),
     Migration(10, "purge_intent", _migration_v10_purge_intent),
+    Migration(11, "file_transfers", _migration_v11_file_transfers),
 )
 
 

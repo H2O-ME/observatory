@@ -7,7 +7,7 @@ rem device id from this machine's MachineGuid).
 rem
 rem Rendered per request by the server:
 rem   * the version and several server addresses are embedded and tried in order
-rem   * the real work happens in install.ps1, which asks for elevation once
+rem   * this file elevates itself once, then runs install.ps1 in the same window
 rem
 rem This file is intentionally plain ASCII: cmd.exe parses batch files using
 rem the console code page, and non-ASCII text there breaks on some machines.
@@ -17,6 +17,21 @@ rem or use the console; remote uninstall never prompts for UAC.
 
 setlocal EnableExtensions
 title Observatory agent installer
+
+rem Elevate once, in this console: a non-admin launch re-starts this file
+rem elevated and the current copy exits immediately (no -Wait). That gives the
+rem operator exactly one window and one UAC prompt; install.ps1 then runs
+rem already elevated, so its own re-launch fallback is never used.
+set "ELEVATED="
+if /i "%~1"=="ELEVATED" set "ELEVATED=1"
+if not defined ELEVATED (
+  net session >nul 2>&1
+  if errorlevel 1 (
+    echo   Requesting administrator permission...
+    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs -ArgumentList 'ELEVATED'"
+    exit /b 0
+  )
+)
 
 set "VERSION=@@VERSION@@"
 @@URL_LINES@@
@@ -42,7 +57,9 @@ if not defined GOT (
   echo   FAILED: none of the server addresses could be reached.
   echo   Check the network or proxy, then run this file again.
   echo.
-  pause
+  rem Keep the error readable, then close by itself (no "press any key").
+  echo   This window closes in 10 seconds.
+  timeout /t 10 >nul 2>&1 || ping -n 11 127.0.0.1 >nul
   exit /b 3
 )
 
@@ -57,14 +74,16 @@ if not "%RC%"=="0" (
   echo   Installation failed with exit code %RC%.
   echo   Log: %TEMP%\observatory-install.log
   echo.
-  pause
+  echo   This window closes in 10 seconds.
+  timeout /t 10 >nul 2>&1 || ping -n 11 127.0.0.1 >nul
   exit /b %RC%
 )
 
 echo.
 echo   Done. Future versions update themselves; this file is not needed again.
 echo.
-pause
+rem Success closes the window immediately: no key press, no stray console left
+rem behind on a machine the operator may be installing unattended.
 exit /b 0
 
 :Fetch

@@ -421,3 +421,98 @@ def test_script_parameters_are_declared() -> None:
     header = text.split("[CmdletBinding()]", 1)[1].split("$ErrorActionPreference", 1)[0]
     for name in ("BaseUrls", "Package", "Uninstall", "Insecure", "Quiet", "NoStart", "EnrollCode", "WatchdogOnly"):
         assert f"${name}" in header, name
+
+
+# --------------------------------------------------- 安装器 UX（窗口/等待/退出） ---
+INSTALL_CMD = REPO_ROOT / "server/observatory/templates/install.cmd"
+USB_CMD = REPO_ROOT / "usb-installer/Install-ObservatoryAgent.cmd"
+
+
+def _cmd_text(path: Path) -> str:
+    assert path.exists(), f"缺少 {path}"
+    return path.read_text(encoding="utf-8")
+
+
+def test_cmd_elevates_itself_once_without_waiting() -> None:
+    """双击只看到一个窗口：.cmd 自举提权，非管理员实例立即退出（不带 -Wait）。"""
+
+    for path in (INSTALL_CMD, USB_CMD):
+        text = _cmd_text(path)
+        assert "net session >nul 2>&1" in text, path
+        assert "-Verb RunAs" in text, path
+        assert "-ArgumentList 'ELEVATED'" in text, path
+        elevated = next(line for line in text.splitlines() if "-Verb RunAs" in line)
+        assert "-Wait" not in elevated, "提权实例必须异步启动，原窗口立刻退出"
+        assert 'if /i "%~1"=="ELEVATED"' in text, "提权实例要跳过再次提权"
+
+
+def test_cmd_success_path_has_no_pause() -> None:
+    """成功即自动关窗；失败保留 10 秒倒计时，不再要求按任意键。"""
+
+    for path in (INSTALL_CMD, USB_CMD):
+        text = _cmd_text(path)
+        assert not any(line.strip().lower() == "pause" for line in text.splitlines()), path
+        assert "timeout /t 10" in text, f"{path} 失败时要留出读错误的时间"
+
+
+def test_usb_wizard_asks_after_elevation() -> None:
+    """USB 向导先提权再输入：密钥不经过命令行/临时文件转发。"""
+
+    text = _cmd_text(USB_CMD)
+    assert text.index("-Verb RunAs") < text.index("set /p BASE_URL="), "先提权再问服务器/密钥"
+
+
+def test_usb_builder_generates_elevating_cmds() -> None:
+    """U 盘包生成的三份 .cmd 与仓库内模板同构：提权、无 pause、失败倒计时。"""
+
+    source = (REPO_ROOT / "tools/build_usb_package.py").read_text(encoding="utf-8")
+    assert source.count("-ArgumentList 'ELEVATED'") == 3, "一键/在线/卸载三份都要自举提权"
+    assert source.count("timeout /t 10") == 3
+    assert "\npause\n" not in source, "生成的 .cmd 不得再要求按任意键"
+
+
+def test_watchdog_registers_before_service_start() -> None:
+    """慢步骤（schtasks 可被主防拖住）必须在「服务已启动」之前完成。"""
+
+    text = _install_script()
+    main = text.split("# -------------------------------------------------------------------- main --", 1)[1]
+    flow = main.split("Remove-Watchdog\n    Stop-Existing", 1)[1]
+    files = flow.index("Install-Files -PackagePath $packagePath")
+    watchdog = flow.index("Install-Watchdog")
+    service = flow.index("Install-Service")
+    assert files < watchdog < service, "顺序必须是 装文件 → 注册守护 → 启服务"
+
+
+def test_install_watchdog_registration_is_bounded() -> None:
+    """schtasks 被安全软件拦着时不会自己超时：注册必须有界且给进度。"""
+
+    block = _watchdog_block()
+    installer = block.split("function Install-Watchdog", 1)[1].split("function Remove-Watchdog", 1)[0]
+    assert "正在注册服务守护任务" in installer, "慢步骤要有进度输出"
+    assert "Wait-Process" in installer and "-Timeout 20" in installer, "不能无界等待"
+    assert "& schtasks.exe /Create" not in installer, "老实现会无限期阻塞"
+    assert "超时" in installer, "超时要明确告知（只警告，不 kill）"
+
+
+def test_device_uid_poll_does_not_stall_install() -> None:
+    """device_uid 只用于成功横幅：最多等 1 秒，取不到就提示去控制台看。"""
+
+    text = _install_script()
+    main = text.split("# -------------------------------------------------------------------- main --", 1)[1]
+    uid_block = main.split("$deviceUid = ''", 1)[1]
+    assert "for ($i = 0; $i -lt 5; $i++)" in uid_block
+    assert "Milliseconds 200" in uid_block
+    assert "稍后在控制台查看" in main
+
+
+def test_remote_elevation_forwards_parameters() -> None:
+    """``irm | iex`` 提权分支以前丢全部参数：准入密钥丢失即注册失败。"""
+
+    text = _install_script()
+    elevation = text.split("function Request-Elevation", 1)[1].split("function Stop-Existing", 1)[0]
+    remote = elevation.split("# 提权子进程从服务器重新下载脚本", 1)[1]
+    assert "[scriptblock]::Create" in remote, "下载后要带参数调用脚本块"
+    assert "-EnrollCode '{0}'" in remote
+    assert "-BaseUrls '{0}'" in remote
+    for flag in ("-Insecure", "-Quiet", "-NoStart", "-Offline", "-Online", "-Uninstall", "-WatchdogOnly"):
+        assert f"'{flag}'" in remote, flag

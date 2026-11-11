@@ -223,6 +223,16 @@ class Settings(BaseSettings):
         return self.data_dir / "tmp"
 
     @property
+    def transfers_dir(self) -> Path:
+        """服务端暂存的设备文件取回（24h 保留，独立目录）。
+
+        刻意不复用 ``tmp_dir``/``staging_dir``：那两处会被媒体保留策略的孤儿与
+        ``.part`` 清扫扫到，取回文件必须有独立目录，清扫范围才能各管各的。
+        """
+
+        return self.data_dir / "transfers"
+
+    @property
     def webui_dir(self) -> Path:
         return self.data_dir / "webui"
 
@@ -238,6 +248,7 @@ class Settings(BaseSettings):
             self.packages_dir,
             self.staging_dir,
             self.tmp_dir,
+            self.transfers_dir,
             self.backups_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)

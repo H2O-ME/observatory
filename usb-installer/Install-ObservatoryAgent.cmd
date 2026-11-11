@@ -17,6 +17,19 @@ echo      Observatory 受控端安装
 echo   ==================================================
 echo.
 
+rem 先提权，再收集服务器/密钥：提权后的窗口自己完成两次输入，非管理员实例
+rem 立刻退出（不带 -Wait），所以全程只有一次 UAC、一个窗口。
+set "ELEVATED="
+if /i "%~1"=="ELEVATED" set "ELEVATED=1"
+if not defined ELEVATED (
+  net session >nul 2>&1
+  if errorlevel 1 (
+    echo   正在请求管理员权限...
+    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs -ArgumentList 'ELEVATED'"
+    exit /b 0
+  )
+)
+
 set "DEFAULT_URL=https://control.tianhw.top"
 set "BASE_URL="
 set /p BASE_URL=服务器地址 [%DEFAULT_URL%]:
@@ -50,7 +63,8 @@ if "%RC%"=="0" (
   echo   安装失败，退出码 %RC%。
   echo   检查 %%TEMP%%\observatory-install.log；
   echo   若提示准入密钥无效，请在控制台「设置 → 安装程序」确认/轮换密钥后重试。
+  echo.
+  echo   窗口将在 10 秒后自动关闭。
+  timeout /t 10 >nul 2>&1 || ping -n 11 127.0.0.1 >nul
 )
-echo.
-pause
 exit /b %RC%

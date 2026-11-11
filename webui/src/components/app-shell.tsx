@@ -16,6 +16,7 @@ import {
   Archive,
   Bot,
   ChevronRight,
+  Download,
   LogOut,
   MonitorSmartphone,
   Moon,
@@ -58,6 +59,7 @@ const NAV_GROUPS: Array<{ label: string; items: NavEntry[] }> = [
     label: "监控",
     items: [
       { to: "/wall", label: "设备墙", hint: "全部受控端", icon: MonitorSmartphone },
+      { to: "/transfers", label: "文件取回", hint: "服务器暂存", icon: Download },
       { to: "/backup", label: "归档", hint: "远端备份", icon: Archive },
       { to: "/updates", label: "更新", hint: "受控端版本", icon: PackageCheck },
       { to: "/audit", label: "审计", hint: "操作留痕", icon: ScrollText },

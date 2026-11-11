@@ -146,15 +146,28 @@ ONE_CLICK_CMD = """@echo off
 chcp 936 >nul
 cd /d "%~dp0"
 title Observatory offline install
+rem Elevate once, in this console: a non-admin launch re-starts this file
+rem elevated and the current copy exits immediately (no -Wait), so the operator
+rem sees one window and one UAC prompt. install.ps1 never re-launches.
+set "ELEVATED="
+if /i "%~1"=="ELEVATED" set "ELEVATED=1"
+if not defined ELEVATED (
+  net session >nul 2>&1
+  if errorlevel 1 (
+    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs -ArgumentList 'ELEVATED'"
+    exit /b 0
+  )
+)
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1" -Offline
 set "RC=%ERRORLEVEL%"
-echo.
 if not "%RC%"=="0" (
+  echo.
   echo   Install did not finish. Exit code %RC%.
   echo   Log: %TEMP%\\observatory-install.log
   echo.
+  echo   This window closes in 10 seconds.
+  timeout /t 10 >nul 2>&1 || ping -n 11 127.0.0.1 >nul
 )
-pause
 exit /b %RC%
 """
 
@@ -162,15 +175,26 @@ ONLINE_CMD = """@echo off
 chcp 936 >nul
 cd /d "%~dp0"
 title Observatory online install
+rem Same one-window elevation as the offline installer.
+set "ELEVATED="
+if /i "%~1"=="ELEVATED" set "ELEVATED=1"
+if not defined ELEVATED (
+  net session >nul 2>&1
+  if errorlevel 1 (
+    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs -ArgumentList 'ELEVATED'"
+    exit /b 0
+  )
+)
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1" -Online
 set "RC=%ERRORLEVEL%"
-echo.
 if not "%RC%"=="0" (
+  echo.
   echo   Install did not finish. Exit code %RC%.
   echo   Log: %TEMP%\\observatory-install.log
   echo.
+  echo   This window closes in 10 seconds.
+  timeout /t 10 >nul 2>&1 || ping -n 11 127.0.0.1 >nul
 )
-pause
 exit /b %RC%
 """
 
@@ -178,9 +202,25 @@ UNINSTALL_CMD = """@echo off
 chcp 936 >nul
 cd /d "%~dp0"
 title Observatory uninstall
+rem The uninstaller only removes local state, but it still needs admin rights.
+set "ELEVATED="
+if /i "%~1"=="ELEVATED" set "ELEVATED=1"
+if not defined ELEVATED (
+  net session >nul 2>&1
+  if errorlevel 1 (
+    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs -ArgumentList 'ELEVATED'"
+    exit /b 0
+  )
+)
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1" -Uninstall
-echo.
-pause
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" (
+  echo.
+  echo   Uninstall did not finish. Exit code %RC%.
+  echo   This window closes in 10 seconds.
+  timeout /t 10 >nul 2>&1 || ping -n 11 127.0.0.1 >nul
+)
+exit /b %RC%
 """
 
 README = """Observatory 受控端 U 盘离线安装包

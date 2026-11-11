@@ -114,8 +114,9 @@ def test_v8_to_v9_archives_and_drops_legacy_tables(tmp_dir: Path) -> None:
     report = asyncio.run(run())
     assert report.from_version == 8
     assert report.to_version == SCHEMA_VERSION
-    # v9（本用例的主题）+ v10（清理意图，S5）在同一个事务里连续应用。
-    assert report.applied == (9, 10)
+    # v9（本用例的主题）之后的迁移在同一个事务里连续应用；不写死终态，
+    # 后续版本新增迁移时这里只校验"从 9 起一路连续"。
+    assert report.applied == tuple(range(9, SCHEMA_VERSION + 1))
     assert report.backup_path is not None and report.backup_path.exists()
 
     connection = sqlite3.connect(database_path)

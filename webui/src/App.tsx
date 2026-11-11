@@ -21,6 +21,7 @@ import { DevicePage } from "@/pages/device";
 import { LoginPage } from "@/pages/login";
 import { SettingsPage } from "@/pages/settings";
 import { SystemPage } from "@/pages/system";
+import { TransfersPage } from "@/pages/transfers";
 import { UpdatesPage } from "@/pages/updates";
 import { WallPage } from "@/pages/wall";
 import { useAuth } from "@/store/auth";
@@ -91,6 +92,7 @@ export function App() {
           {/* 0.2.x bookmark compatibility: same page, no redirect. */}
           <Route path="devices/:uid/*" element={<DevicePage />} />
           <Route path="backup" element={<BackupPage />} />
+          <Route path="transfers" element={<TransfersPage />} />
           <Route path="updates" element={<UpdatesPage />} />
           <Route path="audit" element={<AuditPage />} />
           <Route path="settings" element={<SettingsPage />} />

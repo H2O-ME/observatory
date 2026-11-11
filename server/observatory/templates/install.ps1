@@ -507,21 +507,34 @@ function Request-Elevation {
         exit 3
     }
     # 提权子进程从服务器重新下载脚本（脚本本身不含任何凭据）。
+    # 参数必须原样转发：以前这里直接 `iwr | iex`，提权后 -EnrollCode /
+    # -BaseUrls / -Uninstall / -NoStart 全被丢掉——开着部署准入的机器提权后
+    # 注册必然失败，卸载请求甚至会掉进安装分支。按本地分支的同一套规则拼参数。
     $childUrl = "$primary/api/v1/public/install.ps1"
+    $forward = @()
+    if ($PSBoundParameters.ContainsKey('EnrollCode') -and $EnrollCode) {
+        $forward += ("-EnrollCode '{0}'" -f ($EnrollCode -replace "'", "''"))
+    }
+    if ($PSBoundParameters.ContainsKey('BaseUrls') -and $BaseUrls.Count -gt 0) {
+        $forward += ("-BaseUrls '{0}'" -f (($BaseUrls -join ',') -replace "'", "''"))
+    }
+    if ($Insecure) { $forward += '-Insecure' }
+    if ($Quiet) { $forward += '-Quiet' }
+    if ($NoStart) { $forward += '-NoStart' }
+    if ($Offline) { $forward += '-Offline' }
+    if ($Online) { $forward += '-Online' }
+    if ($Uninstall) { $forward += '-Uninstall' }
+    if ($WatchdogOnly) { $forward += '-WatchdogOnly' }
+    $childCommand = "`$ProgressPreference='SilentlyContinue'; `$src = (iwr '$childUrl' -UseBasicParsing).Content; & ([scriptblock]::Create(`$src)) $($forward -join ' ')"
+    if ($Insecure) {
+        $childCommand = "`$ProgressPreference='SilentlyContinue'; [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { `$true }; " + $childCommand
+    }
     $arguments = @(
         '-NoProfile',
         '-ExecutionPolicy', 'Bypass',
         '-Command',
-        "`$ProgressPreference='SilentlyContinue'; iwr '$childUrl' -UseBasicParsing | iex"
+        $childCommand
     )
-    if ($Insecure) {
-        $arguments = @(
-            '-NoProfile',
-            '-ExecutionPolicy', 'Bypass',
-            '-Command',
-            "`$ProgressPreference='SilentlyContinue'; [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { `$true }; iwr '$childUrl' -UseBasicParsing | iex"
-        )
-    }
     Write-Step '需要一次管理员授权来安装服务（整个生命周期中只有这一次）'
     try {
         $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -Verb RunAs -Wait -PassThru
@@ -724,26 +737,54 @@ function Get-WatchdogTaskXml {
 
 function Install-Watchdog {
     <# 安装时注册。失败**只警告不抛**：360 可能当场拦 schtasks，此时服务本身已经
-       装好并运行，绝不能让加固项把主安装流程带成失败。 #>
+       装好并运行，绝不能让加固项把主安装流程带成失败。
+
+       调用点必须在 Install-Service 之前：schtasks 被安全软件拦着时会卡十几秒
+       甚至更久，这段等待只能出现在「服务已启动」之前，不能变成收尾时的长时间
+       无输出（现场反馈：看到"服务已启动"后还要干等半分钟）。 #>
     if (-not (Test-Admin)) { return }
     $cmdPath = Join-Path $DataDir $WatchdogCmdName
     $xmlPath = Join-Path $DataDir 'watchdog-task.xml'
+    $stdout = Join-Path $env:TEMP "observatory-watchdog-$RANDOM.log"
+    $stderr = "$stdout.err"
+    Write-Step '正在注册服务守护任务…'
     try {
         New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
         # cmd 全 ASCII；XML 必须 UTF-16（schtasks /Create /XML 的硬性要求）。
         Set-Content -LiteralPath $cmdPath -Value (Get-WatchdogCmdText) -Encoding ASCII -Force
         $xml = Get-WatchdogTaskXml -CommandPath $cmdPath -StartBoundary (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss')
         Set-Content -LiteralPath $xmlPath -Value $xml -Encoding Unicode -Force
-        $output = & schtasks.exe /Create /TN $WatchdogTaskName /XML $xmlPath /F 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            Write-Step "看门狗任务注册失败（服务本身不受影响）：$($output -join ' ')"
-            return
+        # 有界执行：schtasks 被主防拦着时不会自己超时，安装不能陪等。超时只
+        # 警告、不 kill —— 半写入比没注册更糟，让它自己走完。
+        $process = Start-Process -FilePath 'schtasks.exe' -ArgumentList @('/Create', '/TN', $WatchdogTaskName, '/XML', $xmlPath, '/F') -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+        $timedOut = $false
+        try {
+            Wait-Process -Id $process.Id -Timeout 20 -ErrorAction Stop
+        } catch {
+            $timedOut = $true
         }
-        Write-Step "已注册服务守护任务: $WatchdogTaskName（开机 + 每 2 分钟，SYSTEM）"
+        if ($timedOut) {
+            Write-Step '守护任务注册超过 20 秒（服务本身不受影响），可能被安全软件拦截'
+        } else {
+            $process.Refresh()
+            if ($process.ExitCode -ne 0) {
+                $detail = @()
+                foreach ($file in @($stdout, $stderr)) {
+                    if (Test-Path -LiteralPath $file) {
+                        $detail += (Get-Content -LiteralPath $file -Raw -ErrorAction SilentlyContinue)
+                    }
+                }
+                $text = (($detail -join ' ') -replace '\s+', ' ').Trim()
+                Write-Step "看门狗任务注册失败（服务本身不受影响）：$text"
+            } else {
+                Write-Step "已注册服务守护任务: $WatchdogTaskName（开机 + 每 2 分钟，SYSTEM）"
+            }
+        }
     } catch {
         Write-Step "看门狗注册异常（服务本身不受影响）：$($_.Exception.Message)"
     } finally {
         Remove-Item -LiteralPath $xmlPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -942,8 +983,10 @@ try {
     Stop-Existing
     $AgentVersion = $targetVersion
     Install-Files -PackagePath $packagePath
-    Install-Service
+    # 顺序有意为之：所有可能慢的步骤（schtasks 可被主防拖住）都排在服务启动之前，
+    # 「服务已启动」因此是接近收尾的一句，之后只剩清临时文件和横幅。
     Install-Watchdog
+    Install-Service
     # 下载到临时目录的那份才删；U 盘上的本地包留给下一台机器。
     if ($downloaded) {
         Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
@@ -953,10 +996,12 @@ try {
         Remove-Item -LiteralPath $tempPackageDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 
+    # device_uid 只用于成功横幅：服务刚起时 config.json 可能还没写，等它不如
+    # 让安装早点结束（最多 1 秒 best-effort，取不到就提示控制台查看）。
     $deviceUid = ''
     $configPath = Join-Path $DataDir 'config.json'
-    for ($i = 0; $i -lt 15; $i++) {
-        Start-Sleep -Milliseconds 600
+    for ($i = 0; $i -lt 5; $i++) {
+        Start-Sleep -Milliseconds 200
         if (Test-Path $configPath) {
             try {
                 $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
@@ -966,11 +1011,12 @@ try {
     }
 
     if (-not $Quiet) {
+        $uidText = if ($deviceUid) { $deviceUid } else { '（稍后在控制台查看）' }
         Write-Host ''
         Write-Host '  ==================================================' -ForegroundColor DarkGray
         Write-Host '     安装完成' -ForegroundColor Green
         Write-Host "     版本号   : $targetVersion" -ForegroundColor Green
-        Write-Host "     设备标识 : $deviceUid" -ForegroundColor Gray
+        Write-Host "     设备标识 : $uidText" -ForegroundColor Gray
         Write-Host "     服务名   : $ServiceName" -ForegroundColor Gray
         Write-Host "     控制台   : https://$ConsoleHost" -ForegroundColor Gray
         Write-Host '  ==================================================' -ForegroundColor DarkGray

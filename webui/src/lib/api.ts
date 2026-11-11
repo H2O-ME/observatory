@@ -39,6 +39,8 @@ import type {
   FileList,
   FileOpRequest,
   FileOpResult,
+  FileTransfer,
+  FileTransferList,
   FrameList,
   InstallInfo,
   LatestFrame,
@@ -609,6 +611,33 @@ export const api = {
       signal,
       opKey: "files.writeChunk",
     });
+  },
+
+  // ---- file transfers (server-side staged retrieval) ------------------
+  /**
+   * Ask the *server* to pull the file from the device. Returns immediately:
+   * progress is polled through {@link listTransfers}. Nothing is downloaded to
+   * this browser until the operator clicks the ready row.
+   */
+  createTransfer(uid: string, path: string, size: number) {
+    return request<FileTransfer>(`${devicePath(uid)}/files/transfers`, {
+      method: "POST",
+      json: { path, size },
+      opKey: "files.transferStart",
+    });
+  },
+  listTransfers() {
+    return request<FileTransferList>(`${API_ROOT}/file-transfers`, { opKey: "files.transferList" });
+  },
+  deleteTransfer(id: number) {
+    return request<OkResult>(`${API_ROOT}/file-transfers/${id}`, {
+      method: "DELETE",
+      opKey: "files.transferDelete",
+    });
+  },
+  /** Cookie-authenticated link for `<a download>`; no JS/Blob in the middle. */
+  transferContentUrl(id: number) {
+    return `${API_ROOT}/file-transfers/${id}/content`;
   },
 
   // ---- control -------------------------------------------------------

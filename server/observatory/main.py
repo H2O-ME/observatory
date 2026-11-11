@@ -207,6 +207,19 @@ async def _retry_pending_purges(app: FastAPI) -> int:
         return await retry_pending_purges(app, session)
 
 
+async def _expire_file_transfers(app: FastAPI) -> int:
+    """Housekeeping: drop file transfers past their fixed 24 h retention."""
+
+    database = getattr(app.state, "db", None)
+    if database is None:
+        return 0
+    try:
+        from .console.transfers import expire_transfers
+    except ImportError:  # pragma: no cover - console always present in the assembly
+        return 0
+    return await expire_transfers(app)
+
+
 async def _housekeeping(app: FastAPI) -> None:
     interval = app.state.settings.housekeeping_interval_s
     app.state.retention_task = None
@@ -236,6 +249,19 @@ async def _housekeeping(app: FastAPI) -> None:
             retried = await _retry_pending_purges(app)
             if retried:
                 log_event(log, logging.INFO, "housekeeping.purge_retried", count=retried)
+            # v11: 服务端暂存取回文件固定保留 24h。独立 try/except：这一步失败
+            # 不能连带跳过后面的媒体保留（清理步骤必须各管各的事务）。
+            try:
+                expired_transfers = await _expire_file_transfers(app)
+                if expired_transfers:
+                    log_event(
+                        log,
+                        logging.INFO,
+                        "housekeeping.file_transfers_expired",
+                        count=expired_transfers,
+                    )
+            except Exception as exc:  # noqa: BLE001 - one cleanup step must not stall the rest
+                log_event(log, logging.WARNING, "housekeeping.file_transfers_failed", error=str(exc))
             media = getattr(app.state, "media", None)
             if media is not None:
                 task = app.state.retention_task
@@ -611,6 +637,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         app.state.credential_version = await load_credential_version(session)
     app.state.retention_task = None
+    # v11: server-side file retrieval. The tasks themselves live in memory, so a
+    # restart must first fail whatever was mid-flight (their .part is unusable).
+    app.state.file_transfer_tasks = {}
+    try:
+        from .console.transfers import recover_interrupted_transfers
+
+        interrupted = await recover_interrupted_transfers(app)
+        if interrupted:
+            log_event(
+                log,
+                logging.WARNING,
+                "file_transfers.interrupted",
+                count=interrupted,
+            )
+    except Exception as exc:  # noqa: BLE001 - recovery must not block startup
+        log.warning("could not recover interrupted file transfers (%s)", exc)
     app.state.media_retention_interval_s = int(SPECS[MEDIA_RETENTION_KEY].default)
     directory_name = type(app.state.device_directory).__name__
     latest_agent_version = None
@@ -657,6 +699,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 # Reason: a retention pass may be mid-unlink; cancel before DB close.
                 await retention_task
         app.state.retention_task = None
+        try:
+            from .console.transfers import cancel_all_transfers
+
+            await cancel_all_transfers(app)
+        except Exception as exc:  # noqa: BLE001 - shutdown must still close the DB
+            log.warning("could not cancel file transfers (%s)", exc)
         await _stop_media(app)
         closed = await registry.close_all()
         presence.reset()
@@ -685,6 +733,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.agent_config_provider = None
     app.state.runtime_settings_provider = None
     app.state.retention_task = None
+    app.state.file_transfer_tasks = {}
     app.state.media_retention_interval_s = int(SPECS[MEDIA_RETENTION_KEY].default)
     app.state.link_limiter = RateLimiter(settings.link_rate_limit, settings.link_rate_window_s)
     app.state.link_ip_limiter = RateLimiter(settings.link_ip_rate_limit, settings.link_rate_window_s)

@@ -222,12 +222,53 @@ class DeviceTokenHistory(Base):
     superseded_at_ms: Mapped[int] = mapped_column(BigInteger, default=now_ms)
 
 
+class FileTransfer(Base):
+    """A server-side spool of one file pulled back from a device (v11).
+
+    Why it exists: the console used to stream a device file straight into the
+    browser, so closing the tab / leaving the page / switching devices killed the
+    transfer and the operator had to start over. Retrieval is now a server-side
+    background task: the bytes land in ``Settings.transfers_dir`` and are served
+    to any browser for a fixed 24 h, independent of who is watching.
+
+    ``storage_name`` is a uuid filename, never the device path: the remote path
+    stays in ``remote_path`` for display only, so nothing the device reports can
+    traverse our filesystem. While bytes are arriving the file has a ``.part``
+    suffix; a completed transfer is ``os.replace``-d onto the final name, so a
+    missing ``.part`` never means "partially ready".
+    """
+
+    __tablename__ = "file_transfers"
+    __table_args__ = (Index("ix_file_transfers_status_expires", "status", "expires_at_ms"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    device_uid: Mapped[str] = mapped_column(String(64), default="", index=True)
+    #: Snapshot: the device may be renamed or deleted while the file is retained.
+    device_name: Mapped[str] = mapped_column(String(255), default="")
+    remote_path: Mapped[str] = mapped_column(String(1024), default="")
+    filename: Mapped[str] = mapped_column(String(255), default="")
+    expected_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    received_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    #: pending | running | ready | failed | cancelled | expired
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sha256: Mapped[str] = mapped_column(String(64), default="")
+    storage_name: Mapped[str] = mapped_column(String(64), default="")
+    actor: Mapped[str] = mapped_column(String(64), default="console")
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, default=now_ms)
+    completed_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    #: Set when the transfer becomes ready (= completed + 24 h). NULL while the
+    #: task is still running: an unfinished transfer has no retention clock yet.
+    expires_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+
 __all__ = [
     "AuditEntry",
     "Base",
     "Command",
     "Device",
     "DeviceTokenHistory",
+    "FileTransfer",
     "Frame",
     "FrameArchive",
     "Package",

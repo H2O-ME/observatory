@@ -305,6 +305,39 @@ export interface FileChunk {
   eof: boolean;
 }
 
+// ------------------------------------------------------------- file transfers ---
+
+/**
+ * One server-side staged retrieval (`POST /devices/{uid}/files/transfers`).
+ *
+ * The server pulls the file from the device itself, so the transfer survives a
+ * closed tab or a different device. It is downloadable for a fixed 24 h.
+ */
+export interface FileTransfer {
+  id: number;
+  device_uid: string;
+  device_name: string;
+  /** Remote path on the device (display only). */
+  path: string;
+  /** Basename, used as the download filename. */
+  name: string;
+  expected_bytes: number;
+  received_bytes: number;
+  status: "pending" | "running" | "ready" | "failed" | "cancelled" | "expired" | string;
+  error: string | null;
+  sha256: string;
+  created_at_ms: number;
+  completed_at_ms: number | null;
+  /** Only ``ready`` rows have a retention clock (completed + 24 h). */
+  expires_at_ms: number | null;
+  content_url: string | null;
+}
+
+export interface FileTransferList {
+  items: FileTransfer[];
+  server_time_ms: number;
+}
+
 // -------------------------------------------------------------------- control ---
 
 export interface ControlGrant {

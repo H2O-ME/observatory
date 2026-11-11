@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "react-router-dom";
 import {
   ArrowUp,
   ChevronRight,
@@ -68,8 +69,6 @@ import { cn } from "@/lib/utils";
 
 /** One agent chunk (`MAX_CHUNK_BYTES` on both sides). */
 const CHUNK_BYTES = 1024 * 1024;
-/** 下载总量硬上限的容差：允许远端文件比列表时增长这么多（仍远小于内存风险）。 */
-const DOWNLOAD_GROWTH_TOLERANCE_BYTES = 64 * 1024 * 1024;
 
 interface Entry {
   name: string;
@@ -174,6 +173,7 @@ export function FilesView({ device }: { device: Device }) {
   const watch = viewport === "watch";
   const capabilities = capabilitiesOf(device.presence);
   const uid = device.uid;
+  const navigate = useNavigate();
 
   const [path, setPath] = useState("");
   const [action, setAction] = useState<ActionState | null>(null);
@@ -196,8 +196,8 @@ export function FilesView({ device }: { device: Device }) {
   });
 
   useEffect(() => {
-    // Leaving the tab (unmount) cancels an in-flight transfer instead of letting
-    // it keep the socket busy with nobody watching.
+    // Leaving the tab (unmount) cancels an in-flight *upload*. Retrieval is a
+    // server-side task now, so it deliberately survives this.
     return () => abortRef.current?.abort();
   }, []);
 
@@ -342,49 +342,18 @@ export function FilesView({ device }: { device: Device }) {
     }
   };
 
-  const download = async (entry: Entry) => {
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setBusy("下载");
+  const dl = async (entry: Entry) => {
+    // 取回交给服务端：浏览器只发起，然后跳到「文件取回」看进度。关标签页、
+    // 换设备、断网都不影响——这正是用户要的"从服务器下载"。
+    setBusy("取回");
     setError("");
     setMessage("");
-    setProgress({ label: `下载 ${entry.name}`, loaded: 0, total: entry.size });
     try {
-      const parts: BlobPart[] = [];
-      let offset = 0;
-      let total = entry.size;
-      // 硬上限：列表条目可能过期（远端文件在增长/已变化），eof 判据又被 agent
-      // 控制——没有上限时一条"列表说 1MB、实际无限追加的日志"能把浏览器内存
-      // 拉爆。上限 = 列表大小 + 64MB 容差（容忍合法增长），超限中止并明确报错。
-      const maxBytes = entry.size + DOWNLOAD_GROWTH_TOLERANCE_BYTES;
-      for (let guard = 0; guard < 100_000; guard += 1) {
-        if (offset > maxBytes) {
-          throw new Error(
-            `文件比列表显示的大小（${formatBytes(entry.size)}）超出容差仍未见结尾，已中止下载`,
-          );
-        }
-        const chunk = await api.readChunk(uid, entry.path, offset, CHUNK_BYTES, controller.signal);
-        if (chunk.size > 0) total = chunk.size;
-        if (chunk.blob.size === 0) break;
-        parts.push(chunk.blob);
-        offset += chunk.blob.size;
-        setProgress({ label: `下载 ${entry.name}`, loaded: offset, total });
-        if (chunk.eof) break;
-      }
-      const blob = new Blob(parts);
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = entry.name;
-      anchor.click();
-      window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
-      setMessage(`已下载 ${entry.name}（${formatBytes(blob.size)}）`);
+      await api.createTransfer(uid, entry.path, entry.size);
+      navigate("/transfers");
     } catch (failure) {
-      if (isApiError(failure) && failure.message.includes("取消")) setMessage("已取消下载");
-      else setError(isApiError(failure) ? failure.message : "下载失败");
+      setError(isApiError(failure) ? failure.message : "发起取回失败");
     } finally {
-      abortRef.current = null;
-      setProgress(null);
       setBusy("");
     }
   };
@@ -412,7 +381,7 @@ export function FilesView({ device }: { device: Device }) {
     onCopy: (entry: Entry) => openAction("copy", entry),
     onMove: (entry: Entry) => openAction("move", entry),
     onDelete: setPendingDelete,
-    onDownload: (entry: Entry) => void download(entry),
+    onDownload: (entry: Entry) => void dl(entry),
   };
 
   return (

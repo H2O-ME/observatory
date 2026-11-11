@@ -66,8 +66,9 @@ def test_v9_to_v10_adds_purge_intent_and_backfills(tmp_dir: Path) -> None:
 
     report = asyncio.run(run())
     assert report.from_version == 9
-    assert report.to_version == SCHEMA_VERSION == 10
-    assert report.applied == (10,)
+    assert report.to_version == SCHEMA_VERSION
+    # v10 之后的迁移在同一事务里连续应用；不写死终态，只校验从 10 起连续。
+    assert report.applied == tuple(range(10, SCHEMA_VERSION + 1))
     assert report.backup_path is not None and report.backup_path.exists(), "跨版本迁移必须先备份"
 
     connection = sqlite3.connect(database_path)
@@ -81,7 +82,7 @@ def test_v9_to_v10_adds_purge_intent_and_backfills(tmp_dir: Path) -> None:
             "SELECT purge_reason, purge_remote FROM devices WHERE uid='OBS-V10-LIVE'"
         ).fetchone()
         assert live == (None, None), "没有待清理标记的设备不得凭空冒出意图"
-        assert connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 10
+        assert connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == SCHEMA_VERSION
     finally:
         connection.close()
 

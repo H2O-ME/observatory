@@ -25,6 +25,7 @@ from . import (
     install,
     settings,
     system,
+    transfers,
     uninstall_ack,
     updates,
 )
@@ -39,6 +40,7 @@ console_router.include_router(backup.router)
 console_router.include_router(devices.router)
 console_router.include_router(control.router)
 console_router.include_router(files.router)
+console_router.include_router(transfers.router)
 console_router.include_router(frames.router)
 console_router.include_router(updates.router)
 console_router.include_router(settings.router)
