@@ -295,10 +295,129 @@ def test_install_service_passes_enroll_code() -> None:
     assert "$EnrollCode" in install_service
 
 
+# --------------------------------------------------------- watchdog installer ---
+def _watchdog_block() -> str:
+    text = _install_script()
+    return text.split("# ----------------------------------------------------------------- watchdog --", 1)[1].split(
+        "function Uninstall-Agent", 1
+    )[0]
+
+
+def _watchdog_cmd(text: str) -> str:
+    """从 here-string 里取出 .cmd 正文（含换行，便于与独立脚本比对）。"""
+
+    return text.split("return @'\n", 1)[1].split("\n'@", 1)[0]
+
+
+def test_watchdog_task_is_system_boot_and_periodic() -> None:
+    """真名、SYSTEM、开机触发 + 周期巡检：缺一个断联就救不回来。"""
+
+    block = _watchdog_block()
+    assert "'Observatory'" in block, "任务必须真名，绝不伪装成系统维护"
+    assert "Observatory Agent Watchdog" not in block, "任务名要短，就叫 Observatory"
+    assert "<BootTrigger>" in block, "无人登录的机房不能靠 LogonTrigger"
+    assert "<Delay>PT30S</Delay>" in block
+    assert "<Interval>PT2M</Interval>" in block
+    assert "<UserId>S-1-5-18</UserId>" in block
+    assert "<RunLevel>HighestAvailable</RunLevel>" in block
+    assert "<StartWhenAvailable>true</StartWhenAvailable>" in block
+    assert "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>" in block
+    assert "伪装" not in block.split("function Get-WatchdogCmdText", 1)[1].split("function Get-WatchdogTaskXml", 1)[0]
+
+
+def test_watchdog_cmd_heals_start_type_before_starting() -> None:
+    """Start=4 时 sc start 返回 1058；必须先 sc config start= auto 再拉起。"""
+
+    cmd = _watchdog_cmd(_watchdog_block())
+    assert "reg query" in cmd and "/v Start" in cmd
+    assert 'if /i not "%START_TYPE%"=="0x2"' in cmd, "3(manual)/4(disabled) 都要治"
+    assert "sc config %SVC% start= auto" in cmd
+    assert "sc start %SVC%" in cmd
+    assert cmd.index("sc config %SVC% start= auto") < cmd.index("sc start %SVC%"), "顺序不能反"
+    assert '>>"%LOG%"' in cmd, "不能全静默，出错要留痕"
+    assert ">>\"%LOG%\" echo" in cmd
+    assert "1056" in cmd, "already-running 竞态要标注为可忽略"
+    # 不吞权限、不碰 360：只用系统内置工具，且动作只在自有目录。
+    for forbidden in ("360Safe", "WhiteList.dat", "Stop-Process", "reg add", "certutil", "powershell -enc"):
+        assert forbidden not in cmd, forbidden
+
+
+def test_watchdog_cmd_is_idempotent_and_quiet_when_healthy() -> None:
+    cmd = _watchdog_cmd(_watchdog_block())
+    # 正常状态（0x2 + RUNNING）两个动作都不执行 → 不写日志、不重复 StartService。
+    assert 'if /i not "%START_TYPE%"=="0x2" (' in cmd
+    assert "if errorlevel 1 (" in cmd
+    assert cmd.count("sc config %SVC% start= auto") == 1, "配置自愈只出现一次"
+    assert cmd.count("sc start %SVC%") == 1
+
+
+def test_watchdog_uses_ascii_cmd_and_utf16_xml() -> None:
+    block = _watchdog_block()
+    assert "-Encoding ASCII" in block, "cmd 必须全 ASCII，避免 ANSI 解码出中文乱码"
+    assert "-Encoding Unicode" in block, "schtasks /XML 要求 UTF-16"
+    assert "[System.Security.SecurityElement]::Escape" in block, "路径需 XML 转义"
+
+
+def test_watchdog_failure_never_breaks_main_install() -> None:
+    """360 可能当场拦 schtasks：加固项失败不能把已装好的服务带成安装失败。"""
+
+    block = _watchdog_block()
+    installer = block.split("function Install-Watchdog", 1)[1].split("function Remove-Watchdog", 1)[0]
+    assert "catch" in installer
+    assert "服务本身不受影响" in installer
+    assert "throw" not in installer, "Install-Watchdog 不得抛异常"
+
+
+def test_watchdog_removed_before_service_stop_and_on_uninstall() -> None:
+    """否则 2 分钟周期任务会在停服/删除服务窗口把服务又拉起来。"""
+
+    text = _install_script()
+    uninstall = text.split("function Uninstall-Agent", 1)[1].split("# -------------------------------------------------------------------- main --", 1)[0]
+    assert "Remove-Watchdog" in uninstall
+    # 注释里也提到 Stop-Existing，用带缩进的调用行定位真实调用点。
+    assert uninstall.index("Remove-Watchdog") < uninstall.index("\n    Stop-Existing")
+    main = text.split("# -------------------------------------------------------------------- main --", 1)[1]
+    assert main.index("Remove-Watchdog") < main.index("Install-Files -PackagePath"), "重装前先摘旧任务"
+    assert "Install-Watchdog" in main, "安装流程必须注册"
+
+
+def test_watchdog_only_mode_for_existing_devices() -> None:
+    """存量设备远程补装：不下载包、不注册服务、不改版本。"""
+
+    text = _install_script()
+    header = text.split("[CmdletBinding()]", 1)[1].split("$ErrorActionPreference", 1)[0]
+    assert "$WatchdogOnly" in header
+    elevation = text.split("function Request-Elevation", 1)[1].split("function Stop-Existing", 1)[0]
+    assert "'-WatchdogOnly'" in elevation, "提权后不能丢，否则会走成完整安装"
+    main = text.split("# -------------------------------------------------------------------- main --", 1)[1]
+    # 只截提权完成之后的分支区（前面的提权判断里也有一句 if ($Uninstall)）。
+    branch = main.split("if ($WatchdogOnly) {", 1)[1].split("\n}\n", 1)[0]
+    assert "Install-Watchdog" in branch
+    assert "exit 0" in branch
+    for forbidden in ("Install-Files", "Install-Service", "Resolve-BaseUrl", "Get-PackageWithFailover"):
+        assert forbidden not in branch, forbidden
+    assert main.index("if ($WatchdogOnly) {") < main.index("if ($Uninstall) {\n    Write-Step '开始卸载'")
+
+
+def test_standalone_watchdog_script_matches_installer() -> None:
+    """两份脚本必须逐字一致，否则存量设备与新装机行为会漂移。"""
+
+    standalone = (REPO_ROOT / "tools/install-watchdog.ps1").read_text(encoding="utf-8")
+    block = _watchdog_block()
+    cmd_installer = _watchdog_cmd(block)
+    cmd_standalone = standalone.split("$WatchdogCmd = @'\n", 1)[1].split("\n'@", 1)[0]
+    assert cmd_standalone == cmd_installer, "watchdog.cmd 正文两份必须完全相同"
+    for marker in ("<BootTrigger>", "<Interval>PT2M</Interval>", "S-1-5-18", "HighestAvailable"):
+        assert marker in standalone, marker
+    assert "'Observatory'" in standalone
+    assert "Observatory Agent Watchdog" not in standalone
+    assert "-Remove" in standalone, "要留可回滚的删除入口"
+
+
 def test_script_parameters_are_declared() -> None:
     """``$PSBoundParameters.ContainsKey(...)`` 依赖参数被真正声明。"""
 
     text = _install_script()
     header = text.split("[CmdletBinding()]", 1)[1].split("$ErrorActionPreference", 1)[0]
-    for name in ("BaseUrls", "Package", "Uninstall", "Insecure", "Quiet", "NoStart", "EnrollCode"):
+    for name in ("BaseUrls", "Package", "Uninstall", "Insecure", "Quiet", "NoStart", "EnrollCode", "WatchdogOnly"):
         assert f"${name}" in header, name

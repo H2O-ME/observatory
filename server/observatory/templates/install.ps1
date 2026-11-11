@@ -27,7 +27,10 @@ param(
     [switch]$Uninstall,
     [switch]$Insecure,
     [switch]$Quiet,
-    [switch]$NoStart
+    [switch]$NoStart,
+    # 只注册/刷新服务守护任务，不装 agent、不改版本、不动服务。供存量设备通过
+    # 控制台 exec（SYSTEM）远程补装：与安装流程共用同一份 watchdog 逻辑，避免漂移。
+    [switch]$WatchdogOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -477,6 +480,7 @@ function Request-Elevation {
         #   * -Uninstall 丢失 → 普通用户请求卸载会掉进安装分支（重装一台本想卸掉的机器）；
         #   * 显式 -BaseUrls 丢失 → 自定义/内网地址被脚本内置地址覆盖。
         if ($Uninstall) { $arguments += '-Uninstall' }
+        if ($WatchdogOnly) { $arguments += '-WatchdogOnly' }
         # 只在这个参数是被显式传入时才转发（否则保留脚本内置默认地址）。
         # PowerShell 的 argument-mode 逗号语法把 `-BaseUrls a,b` 绑定成 [string[]]，
         # 所以多线路用逗号拼成一个参数；重复出现 `-BaseUrls` 会报"指定了多次"。
@@ -629,6 +633,129 @@ function Install-Service {
     }
 }
 
+# ----------------------------------------------------------------- watchdog --
+# 真名、真描述、SYSTEM 身份：绝不伪装成"系统维护/遥测"（那是隐蔽持久化特征，
+# 被 360 抓到反而坐实木马），也不写 360 的任何配置。
+#
+# 为什么必须有它：360「一键优化」把服务 Start 改成 4 (SERVICE_DISABLED) 后 SCM
+# 根本不加载该服务，failure actions / 一次性重启任务全部失效，且 StartService
+# 对 disabled 返回 1058。必须在服务之外放一个开机就会执行的旁路执行体，先
+# 把启动类型改回 2 (AUTO_START)，再拉起服务。主服务**保持** AUTO_START，不改成
+# manual——那会把"任务丢了"从单台故障升级成全网开机不可达。
+$WatchdogTaskName = 'Observatory'
+$WatchdogCmdName  = 'watchdog.cmd'
+
+function Get-WatchdogCmdText {
+    <# 幂等、静默（正常状态不写一个字节日志）、只用系统内置 reg/sc/find。
+       固定 .cmd 而不是内联 PowerShell：长 -Command 字符串更容易被主防当可疑脚本。 #>
+    return @'
+@echo off
+setlocal
+set "SVC=ObservatoryAgent"
+set "LOG=%ProgramData%\Observatory\watchdog.log"
+
+for /f "tokens=3" %%i in ('reg query "HKLM\SYSTEM\CurrentControlSet\Services\%SVC%" /v Start 2^>nul') do set "START_TYPE=%%i"
+if not defined START_TYPE (
+  >>"%LOG%" echo [%date% %time%] cannot read Start value; abort
+  exit /b 1
+)
+if /i not "%START_TYPE%"=="0x2" (
+  >>"%LOG%" echo [%date% %time%] Start=%START_TYPE%; restoring AUTO_START
+  sc config %SVC% start= auto >>"%LOG%" 2>&1
+)
+sc query %SVC% | find "RUNNING" >nul
+if errorlevel 1 (
+  >>"%LOG%" echo [%date% %time%] not RUNNING; starting (1056=already up)
+  sc start %SVC% >>"%LOG%" 2>&1
+)
+endlocal
+exit /b 0
+'@
+}
+
+function Get-WatchdogTaskXml {
+    param([string]$CommandPath, [string]$StartBoundary)
+    $escaped = [System.Security.SecurityElement]::Escape($CommandPath)
+    $xml = @'
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Observatory agent service watchdog: restores AUTO_START and starts the service if a system optimizer disabled it.</Description>
+    <URI>\Observatory</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <BootTrigger>
+      <Delay>PT30S</Delay>
+      <Enabled>true</Enabled>
+    </BootTrigger>
+    <TimeTrigger>
+      <StartBoundary>__START_BOUNDARY__</StartBoundary>
+      <Enabled>true</Enabled>
+      <Repetition>
+        <Interval>PT2M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+    </TimeTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <ExecutionTimeLimit>PT1M</ExecutionTimeLimit>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>__WATCHDOG_CMD__</Command>
+    </Exec>
+  </Actions>
+</Task>
+'@
+    return $xml.Replace('__WATCHDOG_CMD__', $escaped).Replace('__START_BOUNDARY__', $StartBoundary)
+}
+
+function Install-Watchdog {
+    <# 安装时注册。失败**只警告不抛**：360 可能当场拦 schtasks，此时服务本身已经
+       装好并运行，绝不能让加固项把主安装流程带成失败。 #>
+    if (-not (Test-Admin)) { return }
+    $cmdPath = Join-Path $DataDir $WatchdogCmdName
+    $xmlPath = Join-Path $DataDir 'watchdog-task.xml'
+    try {
+        New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
+        # cmd 全 ASCII；XML 必须 UTF-16（schtasks /Create /XML 的硬性要求）。
+        Set-Content -LiteralPath $cmdPath -Value (Get-WatchdogCmdText) -Encoding ASCII -Force
+        $xml = Get-WatchdogTaskXml -CommandPath $cmdPath -StartBoundary (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss')
+        Set-Content -LiteralPath $xmlPath -Value $xml -Encoding Unicode -Force
+        $output = & schtasks.exe /Create /TN $WatchdogTaskName /XML $xmlPath /F 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Step "看门狗任务注册失败（服务本身不受影响）：$($output -join ' ')"
+            return
+        }
+        Write-Step "已注册服务守护任务: $WatchdogTaskName（开机 + 每 2 分钟，SYSTEM）"
+    } catch {
+        Write-Step "看门狗注册异常（服务本身不受影响）：$($_.Exception.Message)"
+    } finally {
+        Remove-Item -LiteralPath $xmlPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Remove-Watchdog {
+    <# 卸载必须先删任务再删 DataDir，否则任务会指向已被删除的 .cmd 反复报错。 #>
+    try {
+        & schtasks.exe /Delete /TN $WatchdogTaskName /F 2>&1 | Out-Null
+        Write-Step "已删除服务守护任务: $WatchdogTaskName"
+    } catch { }
+    Remove-Item -LiteralPath (Join-Path $DataDir $WatchdogCmdName) -Force -ErrorAction SilentlyContinue
+}
+
 function Uninstall-Agent {
     $exe = Join-Path $InstallDir $ExeName
     if (Test-Path $exe) {
@@ -652,6 +779,9 @@ function Uninstall-Agent {
             Write-Step "卸载 helper 超过 90s 仍未结束（pid: $($left.Id -join ', ')），交由下方兜底清理"
         }
     }
+    # 必须先删看门狗再停服务：否则 2 分钟周期任务会在 helper 等待/停服窗口里
+    # 把刚停掉的服务重新拉起，甚至指向即将被删掉的 DataDir 里的 .cmd。
+    Remove-Watchdog
     Stop-Existing
     foreach ($path in @($InstallDir, $DataDir)) {
         if (Test-Path $path) {
@@ -703,6 +833,13 @@ if (-not (Test-Admin)) {
     }
     Request-Elevation
     return
+}
+
+if ($WatchdogOnly) {
+    # 存量设备补装：不下载包、不注册服务、不改 VERSION；只写固定 .cmd + 注册任务。
+    # 由控制台 exec（SYSTEM）远程调用，设备不用到现场、不用重装。
+    Install-Watchdog
+    exit 0
 }
 
 if ($Uninstall) {
@@ -799,10 +936,14 @@ try {
         }
     }
 
+    # 重装（不是首次安装）时先摘掉旧看门狗：它每 2 分钟会检查服务，Stop-Existing
+    # 删服务注册的窗口里被它撞上，会把正在停的服务又拉起来。
+    Remove-Watchdog
     Stop-Existing
     $AgentVersion = $targetVersion
     Install-Files -PackagePath $packagePath
     Install-Service
+    Install-Watchdog
     # 下载到临时目录的那份才删；U 盘上的本地包留给下一台机器。
     if ($downloaded) {
         Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
