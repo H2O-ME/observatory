@@ -516,3 +516,34 @@ def test_remote_elevation_forwards_parameters() -> None:
     assert "-BaseUrls '{0}'" in remote
     for flag in ("-Insecure", "-Quiet", "-NoStart", "-Offline", "-Online", "-Uninstall", "-WatchdogOnly"):
         assert f"'{flag}'" in remote, flag
+
+
+def test_agent_invocations_are_bounded() -> None:
+    """360 极智守护会挂起无签名 exe 云查杀：同步无界等待 = 安装永久卡死（0.3.26 真机）。"""
+
+    text = _install_script()
+    assert "& $exe" not in text, "受控端 exe 调用必须全部走 Invoke-AgentBounded"
+    helper = text.split("function Invoke-AgentBounded", 1)[1].split("function Install-Service", 1)[0]
+    assert "Wait-Process" in helper and "-Timeout $TimeoutSeconds" in helper, "有界等待"
+    install_service = text.split("function Install-Service", 1)[1].split(
+        "# ----------------------------------------------------------------- watchdog --", 1
+    )[0]
+    assert "-TimeoutSeconds 60" in install_service, "--install 必须有界"
+    assert "允许运行" in install_service, "超时报错要指向杀软放行，不能让现场猜"
+
+
+def test_watchdog_success_is_verified_by_query() -> None:
+    """schtasks 偶发打印「成功」却返回非 0 退出码（0.3.26 真机）：成败以 /Query 实证为准。"""
+
+    block = _watchdog_block()
+    installer = block.split("function Install-Watchdog", 1)[1].split("function Remove-Watchdog", 1)[0]
+    assert "& schtasks.exe /Query /TN" in installer
+    assert installer.index("schtasks.exe /Query") < installer.index("看门狗任务注册失败"), "查询结果优先于退出码"
+
+
+def test_banner_warns_about_antivirus_prompts() -> None:
+    """360 拦截表现为安装失败/卡死，现场没法归因：开装前就提示允许弹窗。"""
+
+    text = _install_script()
+    banner = text.split("function Show-Banner", 1)[1].split("function Test-Admin", 1)[0]
+    assert "允许运行" in banner

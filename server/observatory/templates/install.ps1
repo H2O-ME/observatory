@@ -402,6 +402,11 @@ function Show-Banner {
     Write-Host "     服务器 : $($BaseUrls -join '  |  ')" -ForegroundColor Gray
     Write-Host '  ==================================================' -ForegroundColor DarkGray
     Write-Host ''
+    # 0.3.26 真机教训：360 极智守护拦「创建计划任务/写 DLL」且挂起未签名 exe，
+    # 被阻止/被挂起分别表现为安装失败与永久卡死。提前一句话能省一次现场返工。
+    Write-Host '  注意：若杀毒软件（360 等）在安装中弹窗，请选择「允许运行」——' -ForegroundColor Yellow
+    Write-Host '  选「阻止」或长时间不响应会导致安装失败或卡死。' -ForegroundColor Yellow
+    Write-Host ''
 }
 
 function Test-Admin {
@@ -604,6 +609,41 @@ function Install-Files {
     }
 }
 
+function Invoke-AgentBounded {
+    <# 有界执行受控端 exe。360 极智守护等主防会把未签名 exe 挂起做云查杀（弹窗
+       等用户决定），无界直调会把安装卡死且界面无任何输出（0.3.26 真机实测卡死
+       在"注册并启动服务"）。超时**不 kill**：杀软放行后它还能自己走完，但安装
+       以失败收场并给出明确指引。 #>
+    param(
+        [Parameter(Mandatory)] [string[]]$AgentArguments,
+        [Parameter(Mandatory)] [string]$StdoutPath,
+        [Parameter(Mandatory)] [string]$StderrPath,
+        [int]$TimeoutSeconds = 60
+    )
+    $process = Start-Process -FilePath (Join-Path $InstallDir $ExeName) -ArgumentList $AgentArguments -PassThru -NoNewWindow -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath
+    $timedOut = $false
+    try {
+        Wait-Process -Id $process.Id -Timeout $TimeoutSeconds -ErrorAction Stop
+    } catch {
+        $timedOut = $true
+    }
+    $output = @()
+    foreach ($file in @($StdoutPath, $StderrPath)) {
+        $text = Get-Content -LiteralPath $file -Raw -ErrorAction SilentlyContinue
+        if ($text) { $output += $text.TrimEnd() }
+    }
+    $exitCode = $null
+    if (-not $timedOut) {
+        $process.Refresh()
+        $exitCode = $process.ExitCode
+    }
+    return [pscustomobject]@{
+        TimedOut = $timedOut
+        ExitCode = $exitCode
+        Output   = $output
+    }
+}
+
 function Install-Service {
     $exe = Join-Path $InstallDir $ExeName
     if (-not (Test-Path $exe)) { throw "找不到 $exe" }
@@ -615,19 +655,35 @@ function Install-Service {
     foreach ($url in $BaseUrls) { $arguments += @('--base-url', $url) }
     if ($EnrollCode) { $arguments += @('--enroll-code', ("`"{0}`"" -f $EnrollCode)) }
 
-    $output = & $exe @arguments 2>&1
-    if (-not $Quiet) { $output | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray } }
-    if ($LASTEXITCODE -ne 0) {
+    $stdout = Join-Path $env:TEMP "observatory-install-$(Get-Random).log"
+    $stderr = "$stdout.err"
+    try {
+        $run = Invoke-AgentBounded -AgentArguments $arguments -StdoutPath $stdout -StderrPath $stderr -TimeoutSeconds 60
+    } finally {
+        Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
+    }
+    if (-not $Quiet) { $run.Output | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray } }
+    if ($run.TimedOut) {
+        throw ("受控端 --install 超过 60 秒未返回——大概率被安全软件挂起（360 极智守护对未签名程序云查杀）。" +
+               "在杀软弹窗选「允许运行」后重跑本安装。")
+    }
+    if ($run.ExitCode -ne 0) {
         # agent --install 失败（CreateService 权限/杀软/参数问题）必须让安装失败，
         # 不能落进"安装完成"横幅把故障盖住。
-        throw "受控端 --install 失败（退出码 $LASTEXITCODE）"
+        throw "受控端 --install 失败（退出码 $($run.ExitCode)）——若杀软拦了文件释放或服务注册，允许后重跑"
     }
 
     if (-not $NoStart) {
         try {
             Start-Service -Name $ServiceName -ErrorAction Stop
         } catch {
-            & $exe --start | Out-Null
+            $startStdout = Join-Path $env:TEMP "observatory-start-$(Get-Random).log"
+            $startStderr = "$startStdout.err"
+            try {
+                Invoke-AgentBounded -AgentArguments @('--start') -StdoutPath $startStdout -StderrPath $startStderr -TimeoutSeconds 30 | Out-Null
+            } finally {
+                Remove-Item -LiteralPath $startStdout, $startStderr -Force -ErrorAction SilentlyContinue
+            }
         }
         # 轮询到 Running（SCM 慢启动是正常的），超时仍非 Running 就失败——
         # "稍后会自动重试启动"曾被用来掩盖起不来的安装。
@@ -745,7 +801,7 @@ function Install-Watchdog {
     if (-not (Test-Admin)) { return }
     $cmdPath = Join-Path $DataDir $WatchdogCmdName
     $xmlPath = Join-Path $DataDir 'watchdog-task.xml'
-    $stdout = Join-Path $env:TEMP "observatory-watchdog-$RANDOM.log"
+    $stdout = Join-Path $env:TEMP "observatory-watchdog-$(Get-Random).log"
     $stderr = "$stdout.err"
     Write-Step '正在注册服务守护任务…'
     try {
@@ -765,20 +821,25 @@ function Install-Watchdog {
         }
         if ($timedOut) {
             Write-Step '守护任务注册超过 20 秒（服务本身不受影响），可能被安全软件拦截'
-        } else {
-            $process.Refresh()
-            if ($process.ExitCode -ne 0) {
-                $detail = @()
-                foreach ($file in @($stdout, $stderr)) {
-                    if (Test-Path -LiteralPath $file) {
-                        $detail += (Get-Content -LiteralPath $file -Raw -ErrorAction SilentlyContinue)
-                    }
+        }
+        # 以任务真实存在为准：schtasks 偶发打印「成功」却返回非 0 退出码（0.3.26
+        # 真机实测），退出码只能当线索不能当结论。
+        $registered = $false
+        try {
+            & schtasks.exe /Query /TN $WatchdogTaskName *> $null
+            if ($LASTEXITCODE -eq 0) { $registered = $true }
+        } catch { }
+        if ($registered) {
+            Write-Step "已注册服务守护任务: $WatchdogTaskName（开机 + 每 2 分钟，SYSTEM）"
+        } elseif (-not $timedOut) {
+            $detail = @()
+            foreach ($file in @($stdout, $stderr)) {
+                if (Test-Path -LiteralPath $file) {
+                    $detail += (Get-Content -LiteralPath $file -Raw -ErrorAction SilentlyContinue)
                 }
-                $text = (($detail -join ' ') -replace '\s+', ' ').Trim()
-                Write-Step "看门狗任务注册失败（服务本身不受影响）：$text"
-            } else {
-                Write-Step "已注册服务守护任务: $WatchdogTaskName（开机 + 每 2 分钟，SYSTEM）"
             }
+            $text = (($detail -join ' ') -replace '\s+', ' ').Trim()
+            Write-Step "看门狗任务注册失败（服务本身不受影响）：$text"
         }
     } catch {
         Write-Step "看门狗注册异常（服务本身不受影响）：$($_.Exception.Message)"
@@ -801,9 +862,17 @@ function Uninstall-Agent {
     $exe = Join-Path $InstallDir $ExeName
     if (Test-Path $exe) {
         Write-Step '调用受控端卸载程序'
-        & $exe --uninstall | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Step "受控端卸载程序返回非零（$LASTEXITCODE），继续清理（footprint 可能残留）"
+        $stdout = Join-Path $env:TEMP "observatory-uninstall-$(Get-Random).log"
+        $stderr = "$stdout.err"
+        try {
+            $run = Invoke-AgentBounded -AgentArguments @('--uninstall') -StdoutPath $stdout -StderrPath $stderr -TimeoutSeconds 60
+        } finally {
+            Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
+        }
+        if ($run.TimedOut) {
+            Write-Step '受控端卸载程序超过 60s 未返回（可能被杀软挂起），继续兜底清理'
+        } elseif ($run.ExitCode -ne 0) {
+            Write-Step "受控端卸载程序返回非零（$($run.ExitCode)），继续清理（footprint 可能残留）"
         }
         # agent 的 --uninstall 会拉起一份 staged 的卸载 helper（与 agent 同名
         # observatory-agent.exe）后立即返回，helper 在后台清服务/防火墙/Defender
